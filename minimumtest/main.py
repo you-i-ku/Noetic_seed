@@ -152,12 +152,16 @@ def load_state() -> dict:
                 data["last_notification_fetch"] = ""
             if "pressure" not in data:
                 data["pressure"] = 0.0
-            if "last_e3" not in data:
-                data["last_e3"] = 0.5
-            if "tools_created" not in data:
-                data["tools_created"] = []
+            if "last_e1" not in data:
+                data["last_e1"] = 0.5
             if "last_e2" not in data:
                 data["last_e2"] = 0.5
+            if "last_e3" not in data:
+                data["last_e3"] = 0.5
+            if "last_e4" not in data:
+                data["last_e4"] = 0.5
+            if "tools_created" not in data:
+                data["tools_created"] = []
             if "entropy" not in data:
                 data["entropy"] = 0.65
             if "drives_state" not in data:
@@ -1765,7 +1769,7 @@ def _call_openai_compat(prompt: str, max_tokens: int, temperature: float = 0.7) 
             "max_tokens": max_tokens,
             "temperature": temperature,
         },
-        timeout=120,
+        timeout=300,
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
@@ -1784,7 +1788,7 @@ def _call_claude(prompt: str, max_tokens: int) -> str:
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         },
-        timeout=120,
+        timeout=300,
     )
     resp.raise_for_status()
     return resp.json()["content"][0]["text"]
@@ -1999,15 +2003,15 @@ def build_prompt_propose(state: dict, ctrl: dict, fire_cause: str = "") -> str:
 上記のLTM（自己モデル）を起点に、STM（現在の状況）を読み、次にとりうる行動候補を【5個】計画してください。
 
 - 各候補は「全く異なる意図・目的」であること（同じ意図の候補は禁止）
-- 連続して実行したい場合は「ツール名+ツール名」形式で記述可（例: read_file+update_self）
+- 連続して実行したい場合は「ツール名+ツール名+...」形式で記述可（例: read_file+update_self, web_search+fetch_url+write_file）
 - ツール名は上記リストの名称をそのまま使うこと。省略禁止（例:`read` ではなく `read_file`）
 
 以下の形式で箇条書きのみ出力してください:
-1. [意図・目的] → ツール名（または ツール名+ツール名）
-2. [意図・目的] → ツール名（または ツール名+ツール名）
-3. [意図・目的] → ツール名（または ツール名+ツール名）
-4. [意図・目的] → ツール名（または ツール名+ツール名）
-5. [意図・目的] → ツール名（または ツール名+ツール名）
+1. [意図・目的] → ツール名（または ツール名+ツール名+...）
+2. [意図・目的] → ツール名（または ツール名+ツール名+...）
+3. [意図・目的] → ツール名（または ツール名+ツール名+...）
+4. [意図・目的] → ツール名（または ツール名+ツール名+...）
+5. [意図・目的] → ツール名（または ツール名+ツール名+...）
 
 [TOOL:...]は不要です。計画のみ出力してください。"""
 
@@ -2173,8 +2177,9 @@ def build_prompt_execute(state: dict, ctrl: dict, candidate: dict) -> str:
             line += f" [{' '.join(evals)}]"
         log_lines.append(line)
     log_text = "\n".join(log_lines) if log_lines else "  (なし)"
-    allowed = ctrl.get("allowed_tools", set(TOOLS.keys()))
-    tool_text = _build_tool_lines(allowed)
+    # executeでは選択されたツールのみ表示（LLMが他のツールに逸脱するのを防ぐ）
+    selected_tools = set(candidate.get("tools", [candidate["tool"]]))
+    tool_text = _build_tool_lines(selected_tools)
     plan = state.get("plan", {})
     plan_lines = []
     if plan.get("goal"):
@@ -2289,29 +2294,78 @@ log ({now}):
 
 ENTROPY_PARAMS = {
     "base_rate": 0.001,        # 毎tickの自然増加量（1Hz）
-    "neg_scale": 0.15,         # negentropy係数。E2=100%→0.075回復
-    "drive_scale": 0.6,        # entropy→pressureの変換係数
+    "neg_scale": 0.15,         # negentropy係数
     "plan_multiplier": 1.5,    # plan中のentropy増加倍率
     "custom_scale": 0.3,       # custom_drivesのpressureスケール
+    # pressure信号の重み（自由エネルギー勾配モデル）
+    "w_entropy": 0.3,          # entropyの絶対値
+    "w_surprise": 0.25,        # 予測外れ（1-E3）
+    "w_unresolved": 0.25,      # 未達成（0.7-E2）
+    "w_novelty": 0.2,          # 新規性（E4）
+    # 量子トンネル発火
+    "tunnel_prob": 0.001,      # 毎tick 0.1%（平均約15分に1回）
 }
 
-def tick_entropy(state: dict) -> tuple[float, float]:
-    """エントロピーを1tick分更新し、(entropy_drive, custom_drive)を返す。
-    entropy_driveはpressureに加算される。"""
+def tick_entropy(state: dict) -> float:
+    """エントロピーを1tick分更新する。E値で増加率を変調（増減対称設計）。
+    entropyの更新のみ行い、pressureへの直接寄与は返さない。"""
     ep = ENTROPY_PARAMS
     entropy = state.get("entropy", 0.65)
 
-    # --- entropy自然増加（第二法則）---
-    rate = ep["base_rate"]
+    # --- entropy自然増加（第二法則）+ E値による増加率変調 ---
+    last_e1 = state.get("last_e1", 0.5)
+    last_e2 = state.get("last_e2", 0.5)
+    last_e3 = state.get("last_e3", 0.5)
+    last_e4 = state.get("last_e4", 0.5)
+
+    # E値変調: negentropyの逆（増加側）
+    e2_factor = 1.0 + max(0, 0.7 - last_e2) * 2.0    # 未達→加速
+    e4_factor = 1.0 + max(0, 0.5 - last_e4) * 2.0    # 反復→加速
+    e1_factor = 1.0 + max(0, 0.5 - last_e1) * 1.5    # 混乱→加速
+    e3_factor = 1.0 + max(0, last_e3 - 0.5) * 1.5    # 予測通り→加速（停滞）
+
+    rate = ep["base_rate"] * e2_factor * e4_factor * e1_factor * e3_factor
     if state.get("plan", {}).get("goal"):
-        rate *= ep["plan_multiplier"]  # plan中は増加が速い
+        rate *= ep["plan_multiplier"]
     entropy = min(1.0, entropy + rate)
     state["entropy"] = entropy
+    return entropy
 
-    # --- entropy → pressure drive ---
-    entropy_drive = entropy * ep["drive_scale"]
 
-    # --- custom_drives: pref.jsonのdrives:{}から読む（L3、独立） ---
+def calc_dynamic_threshold(state: dict, base_threshold: float) -> float:
+    """動的閾値: 中長期のE2移動平均で変動する。
+    最近うまくいってる → 閾値上がる（余裕、鷹揚）
+    最近うまくいってない → 閾値下がる（敏感、過敏）
+    """
+    log = state.get("log", [])
+    # 直近10サイクルのE2平均を計算
+    e2_vals = []
+    for entry in log[-10:]:
+        m = re.search(r'(\d+)%', str(entry.get("e2", "")))
+        if m:
+            e2_vals.append(int(m.group(1)) / 100.0)
+    e2_avg = sum(e2_vals) / len(e2_vals) if e2_vals else 0.5
+    # 0.7 + e2_avg * 0.6 → e2_avg=0.8で1.18倍、e2_avg=0.4で0.94倍、e2_avg=0.2で0.82倍
+    return base_threshold * (0.7 + e2_avg * 0.6)
+
+
+def calc_pressure_signals(state: dict) -> dict:
+    """pressure蓄積層の信号を計算する。自由エネルギー勾配モデル。
+    entropyは1入力に過ぎず、surprise/unresolved/noveltyと合わせて統合。"""
+    ep = ENTROPY_PARAMS
+    entropy = state.get("entropy", 0.65)
+    last_e2 = state.get("last_e2", 0.5)
+    last_e3 = state.get("last_e3", 0.5)
+    last_e4 = state.get("last_e4", 0.5)
+
+    signals = {
+        "entropy":    entropy * ep["w_entropy"],
+        "surprise":   max(0, 1.0 - last_e3) * ep["w_surprise"],    # 予測外れ→圧
+        "unresolved": max(0, 0.7 - last_e2) * ep["w_unresolved"],  # 未達→圧
+        "novelty":    max(0, last_e4) * ep["w_novelty"],            # 新しいものがある→圧
+    }
+
+    # custom_drives（L3、独立）
     custom_pressure = 0.0
     pref = load_pref()
     raw_drives = pref.get("drives", {})
@@ -2319,8 +2373,9 @@ def tick_entropy(state: dict) -> tuple[float, float]:
         total = sum(max(0, v) for v in raw_drives.values() if isinstance(v, (int, float)))
         if total > 0:
             custom_pressure = ep["custom_scale"]
+    signals["custom"] = custom_pressure
 
-    return entropy_drive, custom_pressure
+    return signals
 
 
 def apply_negentropy(state: dict, e1_val: float, e2_val: float, e3_val: float, e4_val: float):
@@ -2399,6 +2454,19 @@ def main():
         save_pref(pref)
         print("  pref.json drives:{} 追加")
 
+    # 起動時Xセッションチェック（Level 3以上でセッションなしなら聞く）
+    if state.get("tool_level", 0) >= 3 and not X_SESSION_PATH.exists():
+        print("\n  [X] Level 3以上ですがXセッションがありません。")
+        try:
+            answer = input("  Xにログインする？ [y/N]: ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer == "y":
+            _x_do_login()
+        else:
+            print("  [X] スキップ。X系ツールはセッションなしで動作しません。")
+        print()
+
     # 感覚層・蓄積層の初期化
     pressure = state.get("pressure", 0.0)
     print(f"  感覚層: エントロピーモード (entropy={state.get('entropy', 0.65):.2f})")
@@ -2408,16 +2476,34 @@ def main():
         _last_env_inject = 0.0
         tick_dt = datetime.now()
 
-        # 蓄積層: pressureが閾値に達するまで1Hzでティック
-        while pressure < pp.get("threshold", DEFAULT_PRESSURE_PARAMS["threshold"]):
+        # 蓄積層: pressureが閾値に達する or トンネル発火するまで1Hzでティック
+        import random as _rand
+        _tunnel_fire = False
+        base_threshold = pp.get("threshold", DEFAULT_PRESSURE_PARAMS["threshold"])
+        while True:
             tick_start = time.time()
             tick_dt = datetime.now()
 
-            # --- 感覚層: エントロピー計測 ---
-            entropy_drive, custom_drive = tick_entropy(state)
+            # --- 感覚層: エントロピー更新（E値変調あり）---
+            tick_entropy(state)
 
-            # --- 蓄積層: 漏洩積分器（エントロピーベース） ---
-            pressure = pressure * pp.get("decay", 0.97) + entropy_drive + custom_drive
+            # --- 蓄積層: 自由エネルギー勾配モデル（複数信号の漏洩積分）---
+            signals = calc_pressure_signals(state)
+            signal_total = sum(signals.values())
+            pressure = pressure * pp.get("decay", 0.97) + signal_total
+
+            # --- 動的閾値（中長期E2移動平均で変動）---
+            threshold = calc_dynamic_threshold(state, base_threshold)
+
+            # --- 閾値超過判定 ---
+            if pressure >= threshold:
+                break
+
+            # --- 量子トンネル発火（閾値未満でも確率的に発火）---
+            tp = ENTROPY_PARAMS.get("tunnel_prob", 0.001)
+            if _rand.random() < tp:
+                _tunnel_fire = True
+                break
 
             # 固定時刻通知チェック
             _fetch_key = tick_dt.strftime("%Y-%m-%d %H")
@@ -2455,28 +2541,29 @@ def main():
                     state["last_notification_fetch"] = _fetch_key
                     save_state(state)
 
-            # エントロピーログ表示（10秒ごと）
+            # ログ表示（10秒ごと）
             now_ts = time.time()
             if now_ts - _last_env_inject >= ENV_INJECT_INTERVAL:
                 _last_env_inject = now_ts
                 _ent = state.get("entropy", 0.65)
-                print(f"  [entropy] p={pressure:.2f} ent={_ent:.3f} ed={entropy_drive:.2f} cd={custom_drive:.2f}")
+                _s = signals
+                print(f"  [pressure] p={pressure:.2f}/{threshold:.1f} ent={_ent:.3f} | e={_s.get('entropy',0):.2f} s={_s.get('surprise',0):.2f} u={_s.get('unresolved',0):.2f} n={_s.get('novelty',0):.2f} c={_s.get('custom',0):.2f}")
 
             # 1Hzで回す
             elapsed = time.time() - tick_start
             time.sleep(max(0.0, 1.0 - elapsed))
 
-        # --- 閾値超過: 認知層起動 ---
-        # 発火原因タグを判定
-        _ent = state.get("entropy", 0.65)
-        fire_cause = "entropy"
-        if custom_drive > entropy_drive:
-            fire_cause = "custom"
+        # --- 閾値超過 or トンネル発火: 認知層起動 ---
+        # 発火原因タグを判定（signalsから最大の信号）
+        fire_cause = max(signals, key=signals.get) if signals else "entropy"
+        if _tunnel_fire:
+            fire_cause = "tunnel"
 
         state = load_state()
         now_dt = tick_dt
         now = now_dt.strftime("%H:%M:%S")
-        print(f"--- cycle {state.get('cycle_id', 0) + 1} [{now}] pressure={pressure:.2f} fire_cause={fire_cause} ---")
+        _fire_type = "TUNNEL" if _tunnel_fire else "threshold"
+        print(f"--- cycle {state.get('cycle_id', 0) + 1} [{now}] p={pressure:.2f}/th={threshold:.1f} fire={fire_cause} ({_fire_type}) ---")
 
         # Controller: stateからツール可用性・ログ長を導出
         ctrl = controller(state)
@@ -2528,80 +2615,88 @@ def main():
         selected = controller_select(candidates, ctrl, state)
         print(f"  選択: {selected['tool']} - {selected['reason'][:60]}")
 
-        # ③ LLM: 実行
-        exec_prompt = build_prompt_execute(state, ctrl, selected)
-        try:
-            response = call_llm(exec_prompt, max_tokens=24000, temperature=0.4)
-            append_debug_log("LLM2 (Execute)", response)
-        except Exception as e:
-            print(f"  LLM②エラー: {e}")
-            pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
-            time.sleep(10)
-            continue
-
-        # レスポンス表示
-        response_clean = response.strip()
-        print(f"  LLM②: {response_clean[:200]}")
-
-        # 計画パース（ツール実行より先にチェック）
-        plan_data = parse_plan(response_clean)
-        if plan_data:
-            state["plan"] = plan_data
-            ds = state.setdefault("drives_state", drives_state)
-            ds["plan_set_at"] = time.time()
-            drives_state = ds
-            save_state(state)
-            print(f"  計画更新: {plan_data['goal']} ({len(plan_data['steps'])}ステップ)")
-            # 計画立案サイクルはwait扱いでログ記録
-            cid = state.get("cycle_id", 0) + 1
-            state["cycle_id"] = cid
-            entry = {
-                "id": f"{state.get('session_id','x')}_{cid:04d}",
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "tool": "wait",
-                "result": f"計画: {plan_data['goal']}",
-            }
-            _archive_entries([entry])
-            state["log"].append(entry)
-            maybe_compress_log(state)
-            save_state(state)
-            pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
-            print()
-            continue
-
-        # ツールパース（複数対応）
-        raw_calls = parse_tool_calls(response_clean)
+        # ③ LLM: チェーン実行（ツールごとに1回ずつexecute）
+        chain_tools = selected.get("tools", [selected["tool"]])
+        all_results = []
+        all_tool_names = []
+        intent = ""
+        expect = ""
         parse_failed = False
-        if not raw_calls:
-            print(f"  (ツールマーカー検出失敗)")
-            parse_failed = response_clean[:120]
-            raw_calls = [("wait", {})]
+        prev_result = ""
 
-        # バリデーション
-        valid_calls = []
-        for tname, targs in raw_calls:
+        for chain_idx, chain_tool in enumerate(chain_tools):
+            # チェーン用の候補を作成（1ツールずつ）
+            chain_candidate = {
+                "tool": chain_tool,
+                "tools": [chain_tool],
+                "reason": selected["reason"],
+            }
+            # 2つ目以降は前のツール結果をreasonに追加
+            if chain_idx > 0 and prev_result:
+                chain_candidate["reason"] += f"（前のツール結果: {prev_result[:200]}）"
+
+            exec_prompt = build_prompt_execute(state, ctrl, chain_candidate)
+            try:
+                response = call_llm(exec_prompt, max_tokens=24000, temperature=0.4)
+                append_debug_log(f"LLM2 (Execute chain {chain_idx+1}/{len(chain_tools)})", response)
+            except Exception as e:
+                print(f"  LLM②エラー (chain {chain_idx+1}): {e}")
+                break
+
+            response_clean = response.strip()
+            print(f"  LLM② ({chain_idx+1}/{len(chain_tools)}): {response_clean[:200]}")
+
+            # 計画パース（最初のツールでのみチェック）
+            if chain_idx == 0:
+                plan_data = parse_plan(response_clean)
+                if plan_data:
+                    state["plan"] = plan_data
+                    ds = state.setdefault("drives_state", {})
+                    ds["plan_set_at"] = time.time()
+                    save_state(state)
+                    print(f"  計画更新: {plan_data['goal']} ({len(plan_data['steps'])}ステップ)")
+                    cid = state.get("cycle_id", 0) + 1
+                    state["cycle_id"] = cid
+                    entry = {
+                        "id": f"{state.get('session_id','x')}_{cid:04d}",
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "tool": "wait",
+                        "result": f"計画: {plan_data['goal']}",
+                    }
+                    _archive_entries([entry])
+                    state["log"].append(entry)
+                    maybe_compress_log(state)
+                    save_state(state)
+                    pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
+                    print()
+                    break  # 計画パースしたらチェーン終了
+
+            # ツールパース（1つだけ期待）
+            raw_calls = parse_tool_calls(response_clean)
+            if not raw_calls:
+                print(f"  (ツールマーカー検出失敗)")
+                parse_failed = response_clean[:120]
+                raw_calls = [("wait", {})]
+
+            tname, targs = raw_calls[0]
             if tname not in TOOLS:
                 print(f"  (未知のツール: {tname})")
                 parse_failed = f"未知のツール: {tname}"
+                tname, targs = "wait", {}
             elif tname not in allowed:
                 print(f"  (Controller却下: {tname})")
                 parse_failed = f"却下: {tname}"
+                tname, targs = "wait", {}
+
+            # intent/expectは最初のツールから取る
+            if chain_idx == 0:
+                intent = targs.pop("intent", "")
+                expect = targs.pop("expect", "")
             else:
-                valid_calls.append((tname, targs))
-        if not valid_calls:
-            valid_calls = [("wait", {})]
+                targs.pop("intent", "")
+                targs.pop("expect", "")
 
-        # intent/expectは最初のツールから取る
-        intent = valid_calls[0][1].pop("intent", "")
-        expect = valid_calls[0][1].pop("expect", "")
-        for _, targs in valid_calls[1:]:
-            targs.pop("intent", "")
-            targs.pop("expect", "")
-
-        # ツールを順番に実行
-        all_results = []
-        all_tool_names = []
-        for tname, targs in valid_calls:
+            # ツール実行
             try:
                 res = TOOLS[tname]["func"](targs)
             except Exception as e:
@@ -2621,9 +2716,14 @@ def main():
                     if path not in fw:
                         fw.append(path)
                     save_state(state)
+            prev_result = str(res)[:500]
             all_results.append(f"[{tname}]\n{str(res)[:20000]}")
             all_tool_names.append(tname)
             print(f"  実行: {tname} → {str(res)[:100]}")
+
+        # 計画パースでcontinueした場合はここに来ない
+        if not all_tool_names:
+            continue
 
         tool_name = "+".join(all_tool_names)
         result_str = ("\n---\n".join(all_results))[:50000]
@@ -2702,17 +2802,17 @@ def main():
         e3_val = _e_to_float(e3)
         e4_val = _e_to_float(e4) if e4 else 0.5
         pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
+        # E値をstateに保存（次tickのentropy変調 + pressure信号に使う）
+        state["last_e1"] = e1_val
         state["last_e2"] = e2_val
+        state["last_e3"] = e3_val
+        state["last_e4"] = e4_val
         # negentropy: E1-E4の4軸でentropy回復
         ent_before = state.get("entropy", 0.65)
         apply_negentropy(state, e1_val, e2_val, e3_val, e4_val)
         ent_after = state.get("entropy", 0.65)
         print(f"  entropy: {ent_after:.3f} (neg={ent_before - ent_after:.4f} E1={e1_val:.0%} E2={e2_val:.0%} E3={e3_val:.0%} E4={e4_val:.0%})")
         state["pressure"] = round(pressure, 2)
-        # last_e3更新（記録のみ、e3_deltaのpressure加算は削除済み）
-        last_e3_str = str(entry.get("e3", ""))
-        m_e3 = re.search(r'(\d+)', last_e3_str)
-        state["last_e3"] = int(m_e3.group(1)) / 100.0 if m_e3 else 0.5
         save_state(state)
         print(f"  pressure reset: {pressure:.2f}")
         print()

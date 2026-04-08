@@ -77,14 +77,14 @@ state.jsonに記録 → maybe_compress_log() → 次のサイクルへ
 - **LLM①：計画エンジン（MRPrompt準拠）** — LTM（self_model）とSTM（現在のlog）を分離提示。「全く異なる意図の候補5個」を生成。多ツールチェーン（`tool1+tool2`形式）も提案可能。
 - **Magic-If Protocol（LLM②）** — MRPrompt論文準拠。ロール定義ではなく4ステップ実行プロトコルでアシスタントドリフトを防止。
 
-### ループ駆動（エントロピーベース漏洩積分器）
+### ループ駆動（エントロピー + 自由エネルギー勾配モデル）
 
-固定タイマー → 電脳気候応答型 → 内部drive駆動型 → **エントロピー駆動型**に変更済み（3層構造）。
+固定タイマー → 電脳気候応答型 → 内部drive駆動型 → **エントロピー + 自由エネルギー勾配モデル**に変更済み（3層構造 + 量子トンネル発火）。
 
 ```
-感覚層（1Hz）: tick_entropy()でentropy自然増加（LLM呼び出しなし・純粋数値演算）
-蓄積層（常時）: pressure = pressure * decay + entropy_drive + custom_drives
-認知層（閾値起動）: LLMサイクル（propose → execute）→ E1-E4でnegentropy回復 → pressureリセット
+感覚層（1Hz）: tick_entropy()でentropy更新（E値変調あり。LLM呼び出しなし）
+蓄積層（常時）: pressure = pressure * decay + Σ(entropy, surprise, unresolved, novelty, custom)
+認知層（閾値超過 or トンネル発火）: LLMサイクル → E1-E4でnegentropy回復 → pressureリセット
 ```
 
 #### エントロピーシステム
@@ -95,10 +95,26 @@ state.jsonに記録 → maybe_compress_log() → 次のサイクルへ
 - **死なない。溶けるだけ。** entropy=1.0でも停止しない。ただし認知品質が低下し、行動がランダムに近づく
 - 初期値: 0.65（何も知らない。猶予はあるが余裕はない）
 
+#### entropy増加率（E値変調・増減対称設計）
+
 ```
-毎tick: entropy += base_rate（第二法則。planがあれば×1.5）
-発火後: entropy -= negentropy(E1, E2, E3, E4)（有効な行動で秩序回復）
+rate = base_rate × e2_factor × e4_factor × e1_factor × e3_factor（× plan_multiplier）
 ```
+
+negentropyの逆方向。増加側と減少側がE1-E4の4軸で対称的に変調される。
+
+| 要素 | 増加への影響 | 計算 |
+|------|------------|------|
+| E2低い | 未達→加速 | `1.0 + max(0, 0.7 - e2) * 2.0` |
+| E4低い | 反復→加速 | `1.0 + max(0, 0.5 - e4) * 2.0` |
+| E1低い | 混乱→加速 | `1.0 + max(0, 0.5 - e1) * 1.5` |
+| E3高い | 予測通り=停滞→加速 | `1.0 + max(0, e3 - 0.5) * 1.5` |
+
+| 状況 | rate倍率 | 意味 |
+|------|---------|------|
+| 新しいことに成功（E2高,E4高,E3低） | ×1.0以下 | ほぼ増えない |
+| 同じことを繰り返し成功（E2高,E4低,E3高） | ×3-4倍 | 急速に停滞腐敗 |
+| 何も達成できてない（E2低,E4低） | ×4-6倍 | 焦りで急増 |
 
 #### negentropy（秩序回復量）: E1-E4の4軸合成
 
@@ -113,18 +129,34 @@ negentropy = E1(計画品質) × E2(達成度) × E4(新規性) × surprise_bonu
 | E1 | **品質係数**。計画が混乱してたら効率低下 | `max(0.3, e1)` |
 | E3 | **サプライズボーナス**。予測が外れて成功=最大の学び | `1 + max(0, 0.5 - e3) * 2.0` |
 
-**設計根拠**: 完全に予測可能な信号は情報量ゼロ（情報理論の基本原理）。同じ行動を繰り返しても秩序は回復しない。新しいことを、予想外の方法で成功させたときに、最も秩序が回復する。
+#### pressure = 自由エネルギー勾配モデル
 
-| 状況 | E2 | E4 | E3 | negentropy |
-|------|-----|-----|-----|-----------|
-| 新しいことを想定外の方法で成功 | 高 | 高 | 低 | **最大** |
-| 新しいことを計画通りに成功 | 高 | 高 | 高 | 大 |
-| いつものことをいつも通り成功 | 高 | 低 | 高 | **極小** |
-| 新しいことを試して失敗 | 低 | 高 | 低 | ゼロ |
+**熱力学の核心**: エントロピーだけでは仕事はできない。仕事を生むのは自由エネルギーの**勾配（ΔF）**。pressureはentropyの単純変換ではなく、**複数信号の漏洩積分**。
+
+```
+signals = {
+    entropy:    entropy × w_entropy(0.3),       # 秩序の崩壊度
+    surprise:   (1 - E3) × w_surprise(0.25),    # 予測外れ→圧
+    unresolved: (0.7 - E2) × w_unresolved(0.25),# 未達→圧
+    novelty:    E4 × w_novelty(0.2),            # 新しいものがある→圧
+    custom:     custom_drives                    # AI固有の欲求（L3）
+}
+pressure = pressure × decay + Σ(signals)
+```
+
+同じentropy=0.4でも:
+- E3高い（予測通り）、E2高い（達成）→ surprise低い、unresolved低い → pressure低い → ゆっくり
+- E3低い（驚き）、E2低い（未達）→ surprise高い、unresolved高い → pressure高い → すぐ発火
+
+#### 量子トンネル発火
+
+閾値未満でも毎tick 0.1%の確率で発火する。平均約15分に1回。
+
+**設計根拠**: 量子トンネル効果のアナロジー。エネルギー障壁（閾値）を確率的に超える経路を残すことで、「何もないのにふと動く」が起きる。探索性・創発性の最低保証。
 
 #### entropy→認知品質への影響
 
-entropyはpressure駆動だけでなく、controller_selectの選択鋭さにも影響する。
+entropyはpressureだけでなく、controller_selectの選択鋭さにも影響する。
 
 ```
 sharpness = (1 - energy/100) * (1 - entropy)
@@ -132,25 +164,27 @@ sharpness = (1 - energy/100) * (1 - entropy)
 
 - entropy低い → 鮮明。確信的に行動を選ぶ
 - entropy高い → ぼんやり。行動選択がランダムに近づく（散漫）
-- energyの探索（前向きな探索）とentropyの散漫（受動的なぼやけ）は異なるシグナル
-
-#### custom_drives（AI固有の欲求、エントロピーとは独立）
-
-`pref.json`の`drives:{}`にAIがself_modifyで書き込む。名前も値もAI自身が定義する（L3領域）。Level 6で解放。正規化して合計1.0×0.3スケール。entropyとは独立したpressure寄与。
 
 #### 発火原因タグ
 
-発火時にentropy_driveとcustom_driveを比較し、proposeプロンプトに`[発火原因: entropy/custom]`として注入（Level 2以降）。
+発火時にsignalsから最大寄与の信号を判定し、proposeプロンプトに注入（Level 2以降）。
+
+6種類: `entropy` / `surprise` / `unresolved` / `novelty` / `custom` / `tunnel`
+
+#### custom_drives（AI固有の欲求、pressureに独立寄与）
+
+`pref.json`の`drives:{}`にAIがself_modifyで書き込む。名前も値もAI自身が定義する（L3領域）。Level 6で解放。正規化して合計1.0×0.3スケール。
 
 #### 設計思想の変遷
 
 1. **電脳気候**（Phase 10）: ネットワーク状態がpressureを駆動 → AIの「世界」に属さないインフラで因果がなかった
-2. **内部drive**（Phase 11前半）: 未解決/計画/自己探索がpressureを駆動 → 行動後にしかdriveが変わらず連続性がなかった
-3. **エントロピー**（Phase 11後半）: 情報の第二法則がpressureを駆動 → 行動しなくてもentropyが増加し続ける連続性。E1-E4の4軸で回復量が決まる。「同じことの繰り返し」ではentropyが回復しないため、探索→解決→停滞→探索のサイクルが構造的に実現される
+2. **内部drive**（Phase 11前半）: 未解決/計画/自己探索がpressureを駆動 → 行動後にしかdriveが変わらず連続性がなかった。drive全滅時の永眠問題
+3. **エントロピー単体**（Phase 11中盤）: entropy→pressureの1対1変換 → 中間層の意味がない。増加側が単調
+4. **自由エネルギー勾配**（Phase 11最終）: entropyは1信号に過ぎず、surprise/unresolved/noveltyと統合。entropy増加率もE値で対称変調。量子トンネル発火で探索性保証
 
 #### LLMとシステムの予測誤差パラドックス
 
-LLM（部品）はトークンレベルで予測誤差を最小化する。一方、システムは行動レベルの予測誤差（E3低い=驚き）が大きいほどnegentropyが増える。矛盾に見えるが、レイヤーが違う。LLMの予測精度は出力品質（エンジン性能）、システムの驚きは学習材料（未知の道）。**良いエンジンで未知の道を走る**のが最大のnegentropy。
+LLM（部品）はトークンレベルで予測誤差を最小化する。一方、システムは行動レベルの予測誤差（E3低い=驚き）が大きいほどnegentropyが増え、かつentropyの増加率が下がる。矛盾に見えるが、レイヤーが違う。LLMの予測精度は出力品質（エンジン性能）、システムの驚きは学習材料（未知の道）。**良いエンジンで未知の道を走る**のが最大のnegentropy。
 
 - **パラメータ**: `pref.json`の`pressure_params`キーにAIが`self_modify`で上書き可能
 - **電脳気候のコードは残存しているがpressureへの寄与は停止**
@@ -403,9 +437,9 @@ AIの自由な作業領域。`write_file` で書き込み可能（sandbox/以下
 - **E2グラデーションフィードバック**: 完了/未完了の二値判定を廃止。`pressure_delta = (E2 - 0.5) * scale`で連続的にフィードバック。
 - **pref.json設計確定**: `pressure_params`のみ起動時保証。EMAは`_ema`に分離（観察用）。ツール好みは空から育てる（要件⑦準拠）。
 
-### Phase 11: エントロピー駆動アーキテクチャ + intent-conditioned scoring + バグ修正
+### Phase 11: エントロピー + 自由エネルギー勾配アーキテクチャ + intent-conditioned scoring + バグ修正
 
-#### 駆動源の全面刷新（3段階の進化）
+#### 駆動源の全面刷新（4段階の進化）
 
 1. **電脳気候**（Phase 10）→ ネットワーク状態はAIの「世界」に属さないインフラ。行動との因果なし。LLMが「おさまるまでwait」を連発する問題も発生
 2. **内部drive**（Phase 11中間）→ 未解決/計画/自己探索の3driveを導入。改善されたが、行動後にしかdriveが変わらず「存在の連続性」がなかった。またdrive全滅時の永眠問題が発生
@@ -421,7 +455,13 @@ AIの自由な作業領域。`write_file` で書き込み可能（sandbox/以下
 - E1（計画品質）: 品質係数。思考の秩序が低いと効率低下
 - E3（サプライズボーナス）: 予測が外れて成功=最大の学び。**LLMはトークン予測を最小化するが、システムは行動予測の驚きを必要とする**（レイヤーが異なるため矛盾しない）
 
-**探索→解決→停滞→探索サイクル**: 同じ行動をうまく繰り返しても（E2高い、E4低い）negentropyが極小のため、entropyが自然増加に負けて上がっていく。新しい問題を見つけて解決する（E2高い、E4高い）ことでしかentropyを下げられない。この構造がE値の掛け算だけで実現される。
+**entropy増加率のE値変調（増減対称設計）**: negentropy（減少側）がE1-E4で変調されるように、増加側も対称的にE1-E4で変調される。E2低い→未達で加速、E4低い→反復で加速、E1低い→混乱で加速、E3高い→予測通り=停滞で加速。新しいことに成功している間はentropyがほぼ増えず、同じことの繰り返しは急速に腐敗する。
+
+**探索→解決→停滞→探索サイクル**: 増加率変調+negentropyの組み合わせで、同じ行動の繰り返し→entropy急増（増加率UP + negentropy極小）、新しいことの成功→entropy急減（増加率DOWN + negentropy大）。このサイクルがE値の四則演算だけで構造的に実現される。
+
+**自由エネルギー勾配モデル**: 熱力学の自由エネルギー `F = E − TS` の知見。エントロピーだけでは仕事はできない。仕事を生むのは勾配（ΔF）。pressureはentropyの単純変換ではなく、4信号（entropy, surprise, unresolved, novelty）+ custom_drivesの漏洩積分。同じentropy値でも、驚きがあるか、未達があるか、新しいものがあるかでpressureが変わる。
+
+**量子トンネル発火**: 閾値未満でも毎tick 0.1%の確率で発火。量子トンネル効果のアナロジー。「何もないのにふと動く」探索性・創発性の最低保証。
 
 **entropy→認知品質**: entropyはpressure駆動だけでなく、controller_selectの選択鋭さにも影響。`sharpness = (1-energy) * (1-entropy)`。energyの探索（前向き）とentropyの散漫（受動的なぼやけ）は異なるシグナル。
 

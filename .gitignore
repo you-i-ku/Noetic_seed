@@ -28,6 +28,9 @@ AI/
 CLAUDE.md
 TASK.md
 article_draft.md
+article_draft_v2.md
+/install.bat
+/run.bat
 UI_DESIGN.md
 最小要件定義（実装に向けて粒度細かめ）.txt
 llm_debug_prev.log
