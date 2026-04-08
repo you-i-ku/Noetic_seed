@@ -1,0 +1,9 @@
+httpx
+psutil
+numpy
+sqlalchemy
+aiosqlite
+onnxruntime
+tokenizers
+huggingface-hub
+playwright

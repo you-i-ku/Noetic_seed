@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.venv/
+
+# Runtime data (auto-generated)
+minimumtest/state.json
+minimumtest/pref.json
+minimumtest/settings.json
+minimumtest/x_session.json
+minimumtest/raw_log.txt
+minimumtest/llm_debug.log
+*.bak
+
+# Memory & sandbox contents (structure kept via .gitkeep)
+minimumtest/memory/*
+!minimumtest/memory/.gitkeep
+minimumtest/sandbox/*
+!minimumtest/sandbox/.gitkeep
+
+# Old project
+AI/
+
+# Dev docs
+CLAUDE.md
+TASK.md
+article_draft.md
+UI_DESIGN.md
+最小要件定義（実装に向けて粒度細かめ）.txt
+llm_debug_prev.log
+documents/
+expalanationsumple/
+
+# Secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
