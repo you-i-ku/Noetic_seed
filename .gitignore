@@ -6,20 +6,24 @@ __pycache__/
 venv/
 .venv/
 
-# Runtime data (auto-generated)
+# Profiles (_template only tracked, all others ignored)
+minimumtest/profiles/*
+!minimumtest/profiles/_template/
+
+# Legacy root-level runtime files (pre-profile)
 minimumtest/state.json
 minimumtest/pref.json
 minimumtest/settings.json
 minimumtest/x_session.json
 minimumtest/raw_log.txt
 minimumtest/llm_debug.log
+minimumtest/iku.txt
+minimumtest/memory/
+minimumtest/sandbox/
+minimumtest/main.py
+minimumtest/core/
+minimumtest/tools/
 *.bak
-
-# Memory & sandbox contents (structure kept via .gitkeep)
-minimumtest/memory/*
-!minimumtest/memory/.gitkeep
-minimumtest/sandbox/*
-!minimumtest/sandbox/.gitkeep
 
 # Old project
 AI/
