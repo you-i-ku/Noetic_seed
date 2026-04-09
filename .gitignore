@@ -6,40 +6,50 @@ __pycache__/
 venv/
 .venv/
 
-# Profiles (_template only tracked, all others ignored)
-minimumtest/profiles/*
-!minimumtest/profiles/_template/
+# Noetic_seed profiles (_template only tracked)
+Noetic_seed/profiles/*
+!Noetic_seed/profiles/_template/
 
-# Legacy root-level runtime files (pre-profile)
-minimumtest/state.json
-minimumtest/pref.json
-minimumtest/settings.json
-minimumtest/x_session.json
-minimumtest/raw_log.txt
-minimumtest/llm_debug.log
-minimumtest/iku.txt
-minimumtest/memory/
-minimumtest/sandbox/
-minimumtest/main.py
-minimumtest/core/
-minimumtest/tools/
+# Noetic_seed runtime
 *.bak
+
+# Android project (Noetic_seed_monitor)
+Noetic_seed_monitor/.gradle/
+Noetic_seed_monitor/build/
+Noetic_seed_monitor/app/build/
+Noetic_seed_monitor/local.properties
+Noetic_seed_monitor/.idea/
+Noetic_seed_monitor/gradle/
+
+# Old Android project remnants (root-level app/)
+/app/
+/build.gradle.kts
+/gradle/
+/gradle.properties
+/gradlew
+/gradlew.bat
+/settings.gradle.kts
+/.gradle/
+/local.properties
 
 # Old project
 AI/
+minimumtest/
 
-# Dev docs
+# Dev docs (not published)
 CLAUDE.md
 TASK.md
 article_draft.md
 article_draft_v2.md
+oss_application_draft.md
+UI_PROGRESS.md
 /install.bat
 /run.bat
-UI_DESIGN.md
 最小要件定義（実装に向けて粒度細かめ）.txt
 llm_debug_prev.log
 documents/
 expalanationsumple/
+UIイメージ/
 
 # Secrets
 .env
