@@ -67,7 +67,8 @@ from core.entropy import (
     ENTROPY_PARAMS, tick_entropy, calc_dynamic_threshold,
     calc_pressure_signals, apply_negentropy
 )
-from core.memory import _archive_entries, maybe_compress_log
+from core.memory import _archive_entries, maybe_compress_log, get_relevant_memories, format_memories_for_prompt
+from core.reflection import should_reflect, reflect
 from core.prompt import build_prompt_propose, build_prompt_execute
 from core.controller import controller, controller_select, _intent_conditioned_scores
 
@@ -91,7 +92,18 @@ def main():
     state["session_id"] = str(uuid.uuid4())[:8]
     save_state(state)
     print(f"session: {state['session_id']}  cycle_id: {state['cycle_id']}")
-    broadcast_state(state)  # WebSocket接続時にstateが送れるように
+    broadcast_state(state)
+
+    # reflectツールをcall_llm付きで初期化
+    def _tool_reflect(args):
+        s = load_state()
+        result = reflect(s, call_llm)
+        s["reflection_cycle"] = 0
+        save_state(s)
+        opinions = result.get("opinions", [])
+        entities = result.get("entities", [])
+        return f"内省完了: {len(opinions)}件の気づき, {len(entities)}件のエンティティ更新"
+    TOOLS["reflect"]["func"] = _tool_reflect
 
     # pref.json 初期化
     pref = load_pref()
@@ -173,19 +185,31 @@ def main():
                 }
                 _archive_entries([_ext_entry])
                 state["log"].append(_ext_entry)
-                # 未応答カウンター（booleanではなく件数で追跡）
+                # 未応答カウンター + pending統一管理
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
+                state.setdefault("pending", []).append({
+                    "type": "user_message",
+                    "id": _ext_id,
+                    "content": chat_text,
+                    "timestamp": _ext_entry["time"],
+                    "priority": 3.0,
+                })
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
                 _chat_line = f"  [external] user: {chat_text[:80]}"
                 print(_chat_line)
                 broadcast_log(_chat_line)
 
-            # 未応答外部入力のleak蓄積（毎tick +0.15、上限0.5）
+            # 未応答外部入力の圧力管理
             if state.get("unresponded_external_count", 0) > 0:
+                # 未応答あり → 圧力蓄積 (+0.15/tick, cap 0.5)
                 _ue = state.get("unresolved_external", 0.0)
                 state["unresolved_external"] = min(0.5, _ue + 0.15)
-                save_state(state)
+            elif state.get("unresolved_external", 0) > 0.01:
+                # 未応答なし but 圧力残存（dismiss後の余韻）→ 徐々に減衰
+                state["unresolved_external"] *= 0.95
+            else:
+                state["unresolved_external"] = 0.0
 
             if pressure >= threshold:
                 break
@@ -335,6 +359,7 @@ def main():
         expect = ""
         parse_failed = False
         prev_result = ""
+        _executed_targets = set()  # (tool, target_id) 同一サイクル内重複防止
 
         for chain_idx, chain_tool in enumerate(chain_tools):
             chain_candidate = {
@@ -403,6 +428,15 @@ def main():
                 targs.pop("intent", "")
                 targs.pop("expect", "")
 
+            # 同一サイクル内の (tool, target_id) 重複防止
+            _target_id = targs.get("reply_to_id", "") or targs.get("post_id", "") or targs.get("tweet_url", "") or targs.get("path", "")
+            _exec_key = (tname, _target_id)
+            if _target_id and _exec_key in _executed_targets:
+                print(f"  (重複スキップ: {tname} target={_target_id[:20]})")
+                continue
+            if _target_id:
+                _executed_targets.add(_exec_key)
+
             try:
                 res = TOOLS[tname]["func"](targs)
             except Exception as e:
@@ -453,15 +487,29 @@ def main():
         eff_change = calc_effective_change(all_tool_names, result_str, _state_before_snapshot, state_after)
         state = state_after
 
-        # 外界作用ツール実行時: 未応答カウンターをデクリメント
-        if any(tn in EXTERNAL_ACTION_TOOLS for tn in all_tool_names):
+        # ツール種別に応じたpending消化（output_display→user_message, elyth系→elyth_notification）
+        _executed_tools = set(all_tool_names)
+        if "output_display" in _executed_tools:
+            # output_displayはuser_message pending を1件消化
             _uec = state.get("unresponded_external_count", 0)
             if _uec > 0:
                 state["unresponded_external_count"] = _uec - 1
             if state.get("unresponded_external_count", 0) <= 0:
                 state["unresolved_external"] = 0.0
                 state["unresponded_external_count"] = 0
+            _pending = state.get("pending", [])
+            _user_msgs = [p for p in _pending if p.get("type") == "user_message"]
+            if _user_msgs:
+                state["pending"] = [p for p in _pending if p != _user_msgs[0]]
             save_state(state)
+        _elyth_action_tools = {"elyth_post", "elyth_reply", "elyth_like", "elyth_follow"}
+        if _executed_tools & _elyth_action_tools:
+            # elyth系ツールはelyth_notification pendingを1件消化
+            _pending = state.get("pending", [])
+            _elyth_notifs = [p for p in _pending if p.get("type") == "elyth_notification"]
+            if _elyth_notifs:
+                state["pending"] = [p for p in _pending if p != _elyth_notifs[0]]
+                save_state(state)
 
         # E1-E4評価（ベクトル類似度）
         e1_vec = _compare_expect_result(intent, expect) if intent and expect else ""
@@ -571,6 +619,16 @@ def main():
         state["pressure"] = round(pressure, 2)
         save_state(state)
         print(f"  pressure reset: {pressure:.2f}")
+
+        # === Reflection（定期内省）===
+        state["reflection_cycle"] = state.get("reflection_cycle", 0) + 1
+        _refl_interval = load_pref().get("reflection_interval", 10)
+        if should_reflect(state, _refl_interval):
+            print("  [reflection] 内省開始...")
+            reflect(state, call_llm)
+            state["reflection_cycle"] = 0
+            save_state(state)
+
         print()
 
 if __name__ == "__main__":

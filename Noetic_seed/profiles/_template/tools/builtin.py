@@ -5,7 +5,7 @@ from core.state import load_state, save_state
 
 # AIから見えないファイル
 _HIDDEN_ALWAYS = {"raw_log.txt", "llm_debug.log", "setup.bat", "_setup.py", "run.bat", "requirements.txt", "settings.json"}
-_HIDDEN_UNTIL_LV6 = {"pref.json", "state.json"}
+_HIDDEN_UNTIL_LV6 = set()  # state.json/pref.jsonは読取可（書込はsandbox/制限で保護済み）
 
 def _is_hidden(name: str, state: dict | None = None) -> bool:
     """AIから隠すべきファイルかどうか。pref.json/state.jsonはLevel6で解放。"""
@@ -82,3 +82,24 @@ def _update_self(key: str, value: str) -> str:
     ds["last_self_update"] = time.time()
     save_state(state)
     return f"self[{key}] = {value}"
+
+
+def _wait_or_dismiss(args: dict) -> str:
+    """待機、またはpendingの明示的却下。"""
+    dismiss_id = args.get("dismiss", "").strip()
+    if not dismiss_id:
+        return "[wait]\n待機"
+    state = load_state()
+    pending = state.get("pending", [])
+    target = [p for p in pending if p.get("id", "") == dismiss_id]
+    if not target:
+        return f"[dismiss] id={dismiss_id} は未対応リストにありません"
+    state["pending"] = [p for p in pending if p.get("id") != dismiss_id]
+    # user_messageの場合: カウンター減算するが、圧力は即ゼロにしない（余韻として残る）
+    if target[0].get("type") == "user_message":
+        uec = state.get("unresponded_external_count", 0)
+        if uec > 0:
+            state["unresponded_external_count"] = uec - 1
+        # unresolved_externalはゼロにしない → tick loopで徐々に減衰する
+    save_state(state)
+    return f"[dismiss] {target[0].get('type','?')}: {target[0].get('content','')[:50]} を却下しました"

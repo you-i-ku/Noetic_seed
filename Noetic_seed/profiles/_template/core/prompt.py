@@ -131,11 +131,30 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
     summary_text = "\n".join(summary_lines)
 
     fire_cause_line = f"\n[発火原因: {fire_cause}]" if fire_cause and ctrl.get("tool_level", 0) >= 2 else ""
+
+    # pending（未対応事項）
+    pending = state.get("pending", [])
+    if pending:
+        pending_lines = []
+        for p in sorted(pending, key=lambda x: -x.get("priority", 0))[:5]:
+            pending_lines.append(f"  [{p.get('type','?')}] {p.get('content','')[:80]} ({p.get('timestamp','')})")
+        pending_text = "\n".join(pending_lines)
+    else:
+        pending_text = "  なし"
+
+    # 関連記憶（Entity/Opinionネットワーク）
+    from core.memory import get_relevant_memories, format_memories_for_prompt
+    memories = get_relevant_memories(state, limit=8)
+    memory_text = format_memories_for_prompt(memories) if memories else ""
+
     return f"""[{now}]{fire_cause_line}
 
 [LTM — 自己モデル]
 {self_text}
 
+[未対応事項]
+{pending_text}
+{f'{chr(10)}[関連記憶]{chr(10)}{memory_text}{chr(10)}' if memory_text else ''}
 [STM — 現在の状況 / given circumstances]
 {f'summaries:{chr(10)}{summary_text}{chr(10)}' if summary_text else ''}log:
 {log_text}
@@ -203,12 +222,24 @@ def build_prompt_execute(state: dict, ctrl: dict, candidate: dict, tools_dict: d
         example = "[TOOL:read_file path=ファイル名 intent=目的 expect=予測]\n[TOOL:update_self key=キー名 value=値]"
     elif t == "search_memory":
         example = "[TOOL:search_memory query=キーワード intent=目的 expect=予測]\n[TOOL:update_self key=キー名 value=値]"
+    elif t == "memory_store":
+        example = '[TOOL:memory_store network=experience content="記憶内容" intent=目的 expect=予測]'
+    elif t == "memory_update":
+        example = '[TOOL:memory_update memory_id=mem_xxxx content="更新内容" intent=目的 expect=予測]'
     elif t == "list_files":
         example = "[TOOL:list_files path=. intent=目的 expect=予測]"
     elif t == "write_file":
         example = '[TOOL:write_file path=sandbox/memo.md content="内容" intent=目的 expect=予測]'
     elif t == "update_self":
         example = "[TOOL:update_self key=キー名 value=値 intent=目的 expect=予測]"
+    elif t == "wait":
+        example = "[TOOL:wait intent=目的 expect=予測]\n未対応事項を却下する場合: [TOOL:wait dismiss=pending_id intent=対応不要と判断 expect=pendingから除去]"
+    elif t == "create_tool":
+        example = '[TOOL:create_tool name=ツール名 code="def run(args): return str(args)" intent=目的 expect=予測]'
+    elif t == "exec_code":
+        example = '[TOOL:exec_code file=sandbox/xxx.py intent=目的 expect=予測]'
+    elif t == "self_modify":
+        example = '[TOOL:self_modify path=pref.json old="変更前" new="変更後" intent=目的 expect=予測]'
     elif t in _X_TOOLS:
         hint = _X_ARGS_HINT.get(t, "")
         example = f"[TOOL:{t} {hint} intent=目的 expect=予測]".replace("  ", " ")
@@ -232,9 +263,16 @@ def build_prompt_execute(state: dict, ctrl: dict, candidate: dict, tools_dict: d
 
     tools_in_chain = candidate.get("tools", [candidate["tool"]])
     tools_str = "+".join(tools_in_chain)
+
+    # 行動対象に関連する記憶を検索（エンティティ名が候補reasonに含まれていれば）
+    from core.memory import memory_network_search, format_memories_for_prompt
+    _reason = candidate.get("reason", "")
+    _context_memories = memory_network_search(_reason[:200], networks=["entity", "opinion"], limit=5) if _reason else []
+    _context_mem_text = format_memories_for_prompt(_context_memories) if _context_memories else ""
+
     return f"""[LTM — 自己モデル]
 {self_text}
-
+{f'{chr(10)}[関連記憶]{chr(10)}{_context_mem_text}{chr(10)}' if _context_mem_text else ''}
 [STM — 現在の状況 / given circumstances]
 {f'summaries:{chr(10)}{summary_text}{chr(10)}' if summary_text else ''}{plan_text}
 log ({now}):

@@ -32,6 +32,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 
@@ -134,16 +136,34 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
             }
         }
     ) {
-        when (currentScreen) {
-            Screen.Main -> MainScreen(
-                state = state,
-                onMenuClick = { scope.launch { drawerState.open() } },
-                onSendChat = { text -> vm.sendChat(text) },
-            )
-            Screen.Terminal -> TerminalScreen(
-                state = state,
-                onMenuClick = { scope.launch { drawerState.open() } },
-            )
+        val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
+
+        // ドロワーのクリックとpagerを同期
+        LaunchedEffect(currentScreen) {
+            val target = if (currentScreen == Screen.Main) 0 else 1
+            if (pagerState.currentPage != target) {
+                pagerState.animateScrollToPage(target)
+            }
+        }
+        LaunchedEffect(pagerState.currentPage) {
+            currentScreen = if (pagerState.currentPage == 0) Screen.Main else Screen.Terminal
+        }
+
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxSize(),
+        ) { page ->
+            when (page) {
+                0 -> MainScreen(
+                    state = state,
+                    onMenuClick = { scope.launch { drawerState.open() } },
+                    onSendChat = { text -> vm.sendChat(text) },
+                )
+                1 -> TerminalScreen(
+                    state = state,
+                    onMenuClick = { scope.launch { drawerState.open() } },
+                )
+            }
         }
     }
 }

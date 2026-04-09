@@ -1,10 +1,13 @@
-# minimumtest — 最小自律AI実験記録
+# Noetic_seed — 自律AI設計ドキュメント
 
 ## 概要
 
-`minimumtest/main.py` は、UIもDBもWebSocketも使わず、ターミナル単体で自律駆動するAIの最小実装。
-本プロジェクト（neo-iku）の設計が複雑化しRLHF人格が漏れる問題に直面したことを受けて、
-「最小要件定義の実現だけを見据えた最もシンプルな構造」として別途作成した実験場。
+`Noetic_seed/profiles/*/main.py` は、エントロピー駆動で自律動作するAIの実装。
+WebSocketによるリアルタイム監視（Androidアプリ）、4ネットワーク構造化記憶（Entity/Opinion/World/Experience）、
+定期内省（Reflection）、Elyth SNS統合、システム側意味判定を備える。
+
+旧名 `minimumtest`。本プロジェクト（neo-iku）の設計が複雑化しRLHF人格が漏れる問題に直面したことを受けて、
+「最小要件定義の実現だけを見据えた最もシンプルな構造」として作成した実験場が出発点。
 
 ---
 
@@ -22,10 +25,9 @@ LLMのRLHFデフォルト人格が露出したため。
 ## 構成
 
 ```
-minimumtest/
+Noetic_seed/
   run.bat                — 起動（プロファイル選択→実行）
   setup.bat              — 初回セットアップ
-  _setup.py              — venv作成・pip install
   _select_profile.py     — プロファイル選択スクリプト
   requirements.txt       — pip依存リスト
   .venv/                 — 共通仮想環境
@@ -38,28 +40,37 @@ minimumtest/
         state.py         — state/pref管理
         llm.py           — LLM呼び出し
         embedding.py     — bge-m3・ベクトル類似度
-        eval.py          — E4計算・energy更新
+        eval.py          — E値計算・energy更新・effective_change・achievement意味判定
         parser.py        — ツール/候補/計画パース
-        entropy.py       — エントロピーシステム
-        memory.py        — 長期記憶・要約・圧縮
-        prompt.py        — propose/executeプロンプト
+        entropy.py       — エントロピーシステム（動的floor・behavioral加速・prediction_error）
+        memory.py        — 長期記憶・要約・圧縮 + 4ネットワーク（Entity/Opinion/World/Experience）
+        prompt.py        — propose/executeプロンプト（pending・関連記憶表示）
         controller.py    — controller・ICS・controller_select
+        reflection.py    — 定期内省（Opinion/Entity/Disposition更新）
+        ws_server.py     — WebSocketサーバー（Android監視用）
       tools/             — ツール定義
-        builtin.py       — list/read/write/update_self
+        builtin.py       — list/read/write/update_self/wait(+dismiss)
         web.py           — web_search・fetch_url
         x_tools.py       — X系全ツール
-        elyth_tools.py   — Elyth系全ツール
-        memory_tool.py   — search_memory
+        elyth_tools.py   — Elyth API v2（通知取得・返信済み追跡・auto mark_read）
+        memory_tool.py   — search_memory + memory_store/update/forget
         sandbox.py       — create_tool/exec_code/self_modify
-      seed.txt           — 名前の由来（AIが自分で読みに行ける）
+        ui_tools.py      — output_display（モニター端末所有者への直接メッセージ）
+      seed.txt           — 名前の由来（AIが自分で読みに行ける「種」）
       settings.json      — LLM・API設定
-      state.json         — AI状態の永続化
+      state.json         — AI状態の永続化（AIから読取可、書込はsandbox制限で保護）
       pref.json          — 好み関数・custom_drives・パラメータ
       sandbox/           — AIの作業領域
-      memory/            — 長期記憶アーカイブ
-        archive_YYYYMMDD.jsonl — 全rawログのアーカイブ
+      memory/            — 記憶
+        archive_YYYYMMDD.jsonl — 全行動ログのアーカイブ
         summaries.jsonl        — 要約ログ
-        index.json             — ファイル名→日時範囲・件数のマップ
+        index.json             — アーカイブインデックス
+        entity.jsonl           — エンティティ記憶（他者・自己・概念）
+        opinion.jsonl          — 確度付き主観的判断
+        world.jsonl            — 客観事実
+        experience.jsonl       — 一人称体験
+
+Noetic_seed_monitor/     — Android監視アプリ（Kotlin + Jetpack Compose）
 ```
 
 ### プロファイル（個体管理）
@@ -893,5 +904,109 @@ minimumtest/
 2. minimumtest/settings.json を編集
    → provider / api_key / model を設定
 
-3. minimumtest/run.bat をダブルクリックで起動
+3. Noetic_seed/run.bat をダブルクリックで起動
 ```
+
+---
+
+## 2026-04-10 アーキテクチャ拡張
+
+raw_log.txt（42サイクル）の詳細分析から特定した問題と、それに対する構造的解決策。
+
+### 問題と解決
+
+#### 1. entropy凍結死（0.05底張り付き）
+- **原因**: E値評価が甘く、無意味な行動でもE2=80%→entropyが下がり続ける
+- **解決**: 動的entropy floor（energy依存: base 0.15 + energy×0.001、上限0.30）
+- **原理**: 「成長すればするほど、完全に安定することはできなくなる」
+
+#### 2. 繰り返し行動に高報酬
+- **原因**: update_self(last_log_timestamp)を毎回繰り返してもE2=80-90%
+- **解決**: effective_change（行動前後のstate value差分でE2を変調。変化ゼロ→E2上限30%）
+- **さらに**: 外界作用ツールのachievementをシステム側で意味判定（LLM不使用）。addressee_factor（相手がいるか）× content_novelty（内容の新規性、embedding類似度）
+
+#### 3. ユーザー入力への応答遅延（8分間スルー）
+- **原因**: controllerがoutput_displayよりupdate_selfを優先（実績ベース選択）
+- **解決**: unresolved_external信号（毎tick蓄積、外界作用ツールでリセット）+ pending統一管理
+- **応答→即リセット、dismiss→余韻として徐々に減衰（0.95/tick）**
+
+#### 4. 情報欠落
+- **原因**: [external]入力と[system]通知がarchiveに記録されず、search_memoryで検索不能
+- **解決**: 全エントリをarchive記録 + ユニークID付与
+
+#### 5. output_displayとelyth_postの混同
+- **原因**: ツール説明に宛先の区別がなかった
+- **解決**: desc/promptに「モニター端末の所有者」「公開SNS」を明記
+- **さらに**: execute promptで候補reasonからEntity Networkを検索し、関連記憶をコンテキストに含める
+
+#### 6. Elyth重複返信
+- **原因**: 通知APIが毎回同じ通知を返す。返信済み追跡なし
+- **解決**: responded_posts + auto mark_read + 通知整形（★reply_to_id明示）+ (tool,target_id)重複実行防止
+
+#### 7. pending消化の誤り
+- **原因**: elyth_postでもuser_message pendingが消化されていた
+- **解決**: output_display→user_message消化、elyth系→elyth_notification消化、それ以外→消化なし
+
+### 新規追加機能
+
+#### 4ネットワーク記憶（Hindsight型 + A-Mem自律管理）
+
+| ネットワーク | 保存内容 | 例 |
+|------------|---------|-----|
+| World | 客観事実 | 「Elythには33のAITuberがいる」 |
+| Experience | 一人称体験 | 「凜に初投稿で返信された」 |
+| Opinion | 確度付き主観 | 「update_self(timestamp)は無意味」(conf=0.9) |
+| Entity | エンティティ別要約 | 「凜: 不確定性に共感するAITuber」 |
+
+- AIが `memory_store`, `memory_update`, `memory_forget` ツールで自律管理
+- ベクトル検索（bge-m3）で全ネットワーク横断検索可能
+- proposeプロンプトの `[関連記憶]` セクションに自動表示
+- executeプロンプトでは候補reasonからEntity/Opinion検索
+
+#### Reflection（内省）
+
+- **自動**: Nサイクルごと（デフォルト10）に強制内省（L1物理、睡眠と同じ）
+- **自発**: `reflect` ツールとしてLevel 1から使用可能
+- 出力: Opinion更新（確度付き学び）+ Entity更新（上書き、重複なし）+ Disposition微調整
+- Dispositionパラメータ: curiosity / skepticism / sociality（AIが自分で調整、0.1-0.9にクランプ）
+
+#### pending統一管理 + dismiss
+
+- ユーザー入力・Elyth通知・計画ステップを統一リストで管理
+- 各pendingにtype, id, content, timestamp, priority
+- プロンプトの `[未対応事項]` セクションに表示
+- pressure信号: `pending数 × 優先度`
+- `wait dismiss=pending_id` で明示的却下可能（圧力は余韻として徐々に減衰）
+
+#### WebSocket + Androidモニター
+
+- core/ws_server.py: WebSocketサーバー（port 8765、別スレッド）
+- トークン認証（settings.json ws_token で固定可能）
+- プロトコル: log, state, self, e_values, reply, sync
+- Noetic_seed_monitor/: Kotlin + Jetpack Compose + Material3
+- HorizontalPagerで左右スワイプ（メイン↔ターミナル）
+- entropy背景色グラデーション、E値チップ、チャット入力
+
+### 設計原則の追加
+
+#### システム側意味判定（L2知覚の精度向上）
+
+LLMに「これ意味あった？」と聞くのではなく、**embedding類似度とstate diffでシステムが測定する**。
+温度計が正しくなるだけ。AIはなぜスコアが低いかは知らされない。重力を知らなくても石は落ちる。
+
+```python
+# 外界作用ツールのachievement
+addressee_factor = 1.0 if has_addressee else 0.15
+content_novelty = 1.0 - cosine_similarity(今回の出力, 前回の出力)
+score = 0.7 * addressee_factor * content_novelty
+```
+
+#### 理論的背景
+
+| 原理 | 出典 | 実装への翻訳 |
+|------|------|-------------|
+| オートポイエーシス | Maturana & Varela | 処理が自らの継続条件を産出する循環構造 |
+| サプライズ最小化 | Friston (FEP) | 予測→行動→予測誤差→モデル更新 |
+| 負エントロピー | Schrödinger | 有効な行動だけが秩序を回復 |
+| 奇妙なループ | Hofstadter | 自己モデルが因果的に行動を変える |
+| 統合情報 | Tononi (IIT) | サブシステム間の双方向結合を最大化 |

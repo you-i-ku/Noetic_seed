@@ -190,15 +190,39 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
     elif any(n == "read_file" for n in tool_names):
         score += 0.1  # 既読再読
 
-    # --- 外界への不可逆な作用 ---
+    # --- 外界への作用（システム側意味判定: 相手×新規性。LLM不使用）---
     for tn in tool_names:
         if tn in EXTERNAL_ACTION_TOOLS:
-            score += 0.7
-            break  # 1回分のみ
+            # ① 相手がいるか（構造判定）
+            pending = state_after.get("pending", [])
+            has_addressee = (
+                any(p.get("type") == "user_message" for p in pending) or
+                state_after.get("unresponded_external_count", 0) > 0
+            )
+            addressee_factor = 1.0 if has_addressee else 0.15
+
+            # ② 内容の新規性（embedding類似度。LLM不使用）
+            log = state_after.get("log", [])
+            recent_same = [str(e.get("result", ""))[:300]
+                           for e in log[-10:] if e.get("tool") == tn]
+            content_novelty = 1.0
+            if recent_same and _vector_ready:
+                try:
+                    texts = [tool_result[:300]] + recent_same[-3:]
+                    vecs = _embed_sync(texts)
+                    if vecs and len(vecs) >= 2:
+                        sims = [cosine_similarity(vecs[0], vecs[i + 1])
+                                for i in range(len(vecs) - 1)]
+                        content_novelty = max(0.0, 1.0 - max(sims))
+                except Exception:
+                    pass
+
+            score += 0.7 * addressee_factor * content_novelty
+            break
 
     # --- エラー（変化なし）---
     if "エラー" in tool_result:
-        score *= 0.2  # エラーは変化量を大幅減
+        score *= 0.2
 
     # --- 計画変更 ---
     old_plan = state_before.get("plan", {}).get("goal", "")

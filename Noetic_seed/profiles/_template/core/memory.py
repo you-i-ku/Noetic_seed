@@ -1,10 +1,156 @@
-"""長期記憶管理（アーカイブ・要約・圧縮）"""
+"""長期記憶管理（アーカイブ・要約・圧縮 + Entity/Opinionネットワーク）"""
 import json
 import re
+import uuid
 from datetime import datetime
 from core.config import MEMORY_DIR, LOG_HARD_LIMIT, LOG_KEEP, SUMMARY_HARD_LIMIT, META_SUMMARY_RAW
 from core.state import load_pref, save_pref
 from core.llm import call_llm
+from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+
+# === Entity/Opinion Network ===
+_VALID_NETWORKS = {"world", "experience", "opinion", "entity"}
+
+
+def _network_file(network: str):
+    MEMORY_DIR.mkdir(exist_ok=True)
+    return MEMORY_DIR / f"{network}.jsonl"
+
+
+def memory_store(network: str, content: str, metadata: dict = None) -> dict:
+    """記憶を保存。"""
+    if network not in _VALID_NETWORKS:
+        raise ValueError(f"Invalid network: {network}")
+    entry = {
+        "id": f"mem_{uuid.uuid4().hex[:12]}",
+        "network": network,
+        "content": content,
+        "metadata": metadata or {},
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with open(_network_file(network), "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return entry
+
+
+def memory_update(memory_id: str, content: str = None, metadata: dict = None) -> str:
+    """既存記憶を更新。"""
+    for network in _VALID_NETWORKS:
+        fpath = _network_file(network)
+        if not fpath.exists():
+            continue
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+        updated = False
+        new_lines = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("id") == memory_id:
+                    if content is not None:
+                        entry["content"] = content
+                    if metadata is not None:
+                        entry["metadata"].update(metadata)
+                    entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    updated = True
+                new_lines.append(json.dumps(entry, ensure_ascii=False))
+            except Exception:
+                new_lines.append(line)
+        if updated:
+            fpath.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            return f"更新完了: {memory_id}"
+    return f"エラー: {memory_id} が見つかりません"
+
+
+def memory_forget(memory_id: str) -> str:
+    """記憶を削除。"""
+    for network in _VALID_NETWORKS:
+        fpath = _network_file(network)
+        if not fpath.exists():
+            continue
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+        new_lines = [l for l in lines if l.strip() and memory_id not in l]
+        if len(new_lines) < len(lines):
+            fpath.write_text("\n".join(new_lines) + "\n" if new_lines else "", encoding="utf-8")
+            return f"削除完了: {memory_id}"
+    return f"エラー: {memory_id} が見つかりません"
+
+
+def memory_network_search(query: str, networks: list = None, limit: int = 5) -> list:
+    """Entity/Opinionネットワークをベクトル検索。"""
+    if not networks:
+        networks = list(_VALID_NETWORKS)
+    all_entries = []
+    for network in networks:
+        if network not in _VALID_NETWORKS:
+            continue
+        fpath = _network_file(network)
+        if not fpath.exists():
+            continue
+        for line in fpath.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                all_entries.append(json.loads(line))
+            except Exception:
+                pass
+    if not all_entries:
+        return []
+    if _vector_ready:
+        try:
+            texts = [e.get("content", "")[:400] for e in all_entries]
+            vecs = _embed_sync([query] + texts)
+            if vecs and len(vecs) == 1 + len(all_entries):
+                q_vec = vecs[0]
+                scored = [(cosine_similarity(q_vec, vecs[i + 1]), all_entries[i])
+                          for i in range(len(all_entries))]
+                scored.sort(key=lambda x: x[0], reverse=True)
+                return [{"score": s, **e} for s, e in scored[:limit]]
+        except Exception:
+            pass
+    # フォールバック: キーワード
+    query_tokens = set(re.findall(r'\w+', query.lower()))
+    scored = []
+    for entry in all_entries:
+        tokens = set(re.findall(r'\w+', entry.get("content", "").lower()))
+        if query_tokens & tokens:
+            scored.append((len(query_tokens & tokens) / max(len(query_tokens), 1), entry))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [{"score": s, **e} for s, e in scored[:limit]]
+
+
+def get_relevant_memories(state: dict, limit: int = 8) -> list:
+    """プロンプト用: 直近intentに関連する記憶を全ネットワークから取得。"""
+    recent_intents = [e.get("intent", "") for e in state.get("log", [])[-5:] if e.get("intent")]
+    if not recent_intents:
+        return []
+    query = " ".join(recent_intents)[:500]
+    return memory_network_search(query, limit=limit)
+
+
+def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
+    """記憶をプロンプト用テキストに整形。"""
+    if not memories:
+        return ""
+    lines = []
+    total = 0
+    for m in memories:
+        network = m.get("network", "?")
+        content = m.get("content", "")[:200]
+        meta = m.get("metadata", {})
+        if network == "entity" and "entity_name" in meta:
+            line = f"  [entity:{meta['entity_name']}] {content}"
+        elif network == "opinion" and "confidence" in meta:
+            line = f"  [opinion] {content} (確度:{meta['confidence']})"
+        else:
+            line = f"  [{network}] {content}"
+        if total + len(line) > max_chars:
+            break
+        lines.append(line)
+        total += len(line)
+    return "\n".join(lines)
 
 
 def _archive_entries(entries: list):

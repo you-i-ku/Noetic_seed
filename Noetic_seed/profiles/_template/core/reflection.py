@@ -2,7 +2,7 @@
 Nサイクルごと or 高prediction_error時に発火。
 Opinion/Entity/Dispositionを更新。
 """
-from core.memory import memory_store, memory_update, memory_search
+from core.memory import memory_store, memory_update, memory_network_search
 from core.state import load_state, save_state, append_debug_log
 
 
@@ -61,25 +61,24 @@ def reflect(state: dict, call_llm_fn) -> dict:
 [未対応事項]
 {pending_text}
 
-以下の形式で出力してください:
+以下の形式で出力してください。直近の行動の文脈に沿った内容のみ。無関係なエンティティの更新は不要。
 
 OPINIONS:
 - content: 学んだこと/気づいたこと (confidence: 0.0-1.0)
 
 ENTITIES:
-- name: エンティティ名, content: その存在について学んだこと
+- name: エンティティ名, content: その存在について新たに学んだこと
+（自分自身についての気づきも「name: 自分」で記録可。既に知っていることの繰り返しは不要）
 
 DISPOSITION:
 - curiosity_delta: -0.1~+0.1の変化量
 - skepticism_delta: -0.1~+0.1の変化量
 - sociality_delta: -0.1~+0.1の変化量
 
-短く、具体的に。"""
+短く、具体的に。繰り返し禁止。"""
 
     try:
-        messages = [{"role": "user", "content": prompt}]
-        result = call_llm_fn(messages, max_tokens=1000, temperature=0.3)
-        text = result.get("text", "")
+        text = call_llm_fn(prompt, max_tokens=1000, temperature=0.3)
         append_debug_log("Reflection", text)
         return _parse_reflection(text, state)
     except Exception as e:
@@ -129,9 +128,18 @@ def _parse_reflection(text: str, state: dict) -> dict:
                 name = m.group(1).strip()
                 desc = m.group(2).strip()
                 if name and desc:
-                    entry = memory_store("entity", desc, {"entity_name": name})
-                    entities.append(entry)
-                    print(f"  [reflection] entity: {name} = {desc[:60]}")
+                    # 既存entityがあればupdate、なければstore
+                    existing = memory_network_search(name, networks=["entity"], limit=3)
+                    matched = [e for e in existing if e.get("metadata", {}).get("entity_name", "") == name]
+                    if matched:
+                        entry_id = matched[0].get("id", "")
+                        memory_update(entry_id, content=desc)
+                        entities.append(matched[0])
+                        print(f"  [reflection] entity update: {name} = {desc[:60]}")
+                    else:
+                        entry = memory_store("entity", desc, {"entity_name": name})
+                        entities.append(entry)
+                        print(f"  [reflection] entity new: {name} = {desc[:60]}")
 
         elif in_disposition and line.startswith("-"):
             m = re.search(r'(\w+)_delta:\s*([-+]?[\d.]+)', line)
