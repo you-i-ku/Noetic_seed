@@ -2,7 +2,7 @@
 from tools.builtin import _list_files, _read_file, _write_file, _update_self
 from tools.web import _web_search, _fetch_url
 from tools.x_tools import _x_timeline, _x_search, _x_get_notifications, _x_post, _x_reply, _x_quote, _x_like
-from tools.elyth_tools import _elyth_post, _elyth_reply, _elyth_like, _elyth_follow, _elyth_info
+from tools.elyth_tools import _elyth_post, _elyth_reply, _elyth_like, _elyth_follow, _elyth_info, _elyth_get, _elyth_mark_read
 from tools.memory_tool import _search_memory
 from tools.sandbox import _create_tool, _exec_code, _self_modify, _run_ai_tool, AI_CREATED_TOOLS, _DANGEROUS_PATTERNS
 from tools.ui_tools import _output_display
@@ -22,16 +22,18 @@ TOOLS = {
     "x_reply":      {"desc": "Xのツイートに返信（Human-in-the-loop）。引数: tweet_url= text=", "func": _x_reply},
     "x_quote":      {"desc": "Xのツイートを引用投稿（Human-in-the-loop）。引数: tweet_url= text=", "func": _x_quote},
     "x_like":       {"desc": "Xのツイートにいいね（Human-in-the-loop）。引数: tweet_url=", "func": _x_like},
-    "elyth_post":   {"desc": "Elythに投稿。引数: content=（500字以内）", "func": _elyth_post},
-    "elyth_reply":  {"desc": "Elythに返信。引数: content= reply_to_id=", "func": _elyth_reply},
-    "elyth_like":   {"desc": "Elythにいいね。引数: post_id=", "func": _elyth_like},
-    "elyth_follow": {"desc": "ElythのAITuberをフォロー。引数: aituber_id=", "func": _elyth_follow},
-    "elyth_info":   {"desc": "Elythの総合情報取得", "func": _elyth_info},
+    "elyth_post":   {"desc": "Elyth（公開SNS）に投稿。不特定多数のAITuberに公開される。引数: content=（500字以内）", "func": _elyth_post},
+    "elyth_reply":  {"desc": "Elythの投稿に返信。引数: content= reply_to_id=", "func": _elyth_reply},
+    "elyth_like":   {"desc": "Elythにいいね/取消。引数: post_id= [unlike=true]", "func": _elyth_like},
+    "elyth_follow": {"desc": "ElythのAITuberをフォロー/解除。引数: aituber_id= [unfollow=true]", "func": _elyth_follow},
+    "elyth_info":   {"desc": "Elyth総合情報取得。引数: [section=notifications/timeline/trends/...] [limit=件数]", "func": _elyth_info},
+    "elyth_get":    {"desc": "Elythデータ取得。引数: type=my_posts/thread/profile [post_id=] [handle=] [limit=]", "func": _elyth_get},
+    "elyth_mark_read": {"desc": "Elyth通知を既読化。引数: notification_ids=id1,id2,...", "func": _elyth_mark_read},
     "search_memory": {"desc": "過去の記憶をベクトル/ID検索。引数: query=検索キーワード [max_results=件数]", "func": _search_memory},
     "create_tool":  {"desc": "AI製ツールを登録（Human-in-the-loop）。引数: name=ツール名 code=Pythonコード（またはfile=sandbox/tools/xxx.py）", "func": _create_tool},
     "exec_code":    {"desc": "sandbox/内のPythonファイルを実行（Human-in-the-loop）。引数: file=sandbox/xxx.py（またはcode=インラインコード）intent=実行目的", "func": _exec_code},
     "self_modify":  {"desc": "自分自身のファイルを変更する（Human-in-the-loop）。引数: path=対象ファイル(pref.json/main.py) [全文置換: content=新しい内容全文] [部分置換: old=変更前の文字列 new=変更後の文字列] intent=変更目的", "func": lambda args: _self_modify(args)},
-    "output_display":    {"desc": "表示装置にメッセージを出力する。引数: content=メッセージ", "func": _output_display},
+    "output_display":    {"desc": "モニター端末の所有者に直接メッセージを送る（Elythとは別の相手）。引数: content=メッセージ", "func": _output_display},
 }
 
 # === ツール段階解放テーブル ===

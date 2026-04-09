@@ -45,6 +45,8 @@ import re
 import time
 import random
 import uuid
+import math
+import copy
 from datetime import datetime
 
 # DualLoggerの設定（printをファイルにも書き出す）
@@ -57,7 +59,9 @@ sys.stdout = DualLogger(RAW_LOG_FILE)
 from core.state import load_state, save_state, load_pref, save_pref, append_debug_log
 from core.llm import call_llm, _get_base_url
 from core.embedding import _init_vector, _compare_expect_result
-from core.eval import _calc_e4, _update_energy, eval_with_llm, calc_state_change_bonus, calc_spiral_vector, calc_measured_entropy
+from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_change_bonus,
+                       calc_spiral_vector, calc_measured_entropy,
+                       calc_effective_change, apply_effective_change_to_e2, EXTERNAL_ACTION_TOOLS)
 from core.parser import parse_tool_calls, parse_candidates, parse_plan
 from core.entropy import (
     ENTROPY_PARAMS, tick_entropy, calc_dynamic_threshold,
@@ -135,30 +139,53 @@ def main():
             if _tick_count % 10 == 0:
                 main._cached_measured = calc_measured_entropy(state, state.get("log", []))
                 main._cached_spiral = calc_spiral_vector(state, state.get("log", []))
+                # behavioral_entropy: ツール使用分布の情報エントロピー（パターン化検出用）
+                from collections import Counter as _Counter
+                _recent_tools = [e.get("tool", "unknown") for e in state.get("log", [])[-20:]]
+                if len(_recent_tools) >= 2:
+                    _counts = _Counter(_recent_tools)
+                    _total = sum(_counts.values())
+                    _H = -sum((c/_total) * math.log2(c/_total) for c in _counts.values())
+                    _max_H = math.log2(len(_counts)) if len(_counts) > 1 else 1.0
+                    main._cached_behavioral = _H / _max_H if _max_H > 0 else 0.0
+                else:
+                    main._cached_behavioral = 1.0
             _measured = getattr(main, '_cached_measured', None)
             _spiral = getattr(main, '_cached_spiral', None)
+            _behavioral = getattr(main, '_cached_behavioral', None)
 
-            tick_entropy(state, measured_entropy=_measured)
+            tick_entropy(state, measured_entropy=_measured, behavioral_entropy=_behavioral)
             signals = calc_pressure_signals(state, spiral=_spiral)
             signal_total = sum(signals.values())
             pressure = pressure * pp.get("decay", 0.97) + signal_total
             threshold = calc_dynamic_threshold(state, base_threshold)
 
-            # ユーザー入力チェック（chatキューからstate.logに注入 + pressure加算）
+            # ユーザー入力チェック（chatキューからstate.logに注入 + pressure加算 + archive）
             for chat_text in get_pending_chats():
                 state = load_state()
-                state["log"].append({
-                    "id": f"{state.get('session_id','?')}_ext",
+                _ext_id = f"{state.get('session_id','?')}_ext{int(time.time()*1000)%100000}"
+                _ext_entry = {
+                    "id": _ext_id,
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "tool": "[external]",
                     "type": "external",
                     "result": f"user: {chat_text}",
-                })
+                }
+                _archive_entries([_ext_entry])
+                state["log"].append(_ext_entry)
+                # 未応答カウンター（booleanではなく件数で追跡）
+                state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
                 _chat_line = f"  [external] user: {chat_text[:80]}"
                 print(_chat_line)
                 broadcast_log(_chat_line)
+
+            # 未応答外部入力のleak蓄積（毎tick +0.15、上限0.5）
+            if state.get("unresponded_external_count", 0) > 0:
+                _ue = state.get("unresolved_external", 0.0)
+                state["unresolved_external"] = min(0.5, _ue + 0.15)
+                save_state(state)
 
             if pressure >= threshold:
                 break
@@ -182,10 +209,15 @@ def main():
                 except Exception:
                     pass
                 try:
-                    el_raw = _elyth_get_info({})
-                    if not el_raw.startswith("エラー") and el_raw != "通知なし":
-                        el_count = len([l for l in el_raw.split("---") if l.strip()])
-                        notif_parts.append(f"Elyth: {el_count}件")
+                    el_raw = _elyth_get_info({"section": "notifications", "limit": "10"})
+                    if not el_raw.startswith("エラー"):
+                        import json as _json
+                        try:
+                            _el_data = _json.loads(el_raw)
+                            _notifs = _el_data.get("notifications", [])
+                            notif_parts.append(f"Elyth: {len(_notifs)}件")
+                        except Exception:
+                            notif_parts.append(f"Elyth: ?件")
                     else:
                         notif_parts.append(f"Elyth: 0件")
                 except Exception:
@@ -194,13 +226,15 @@ def main():
                     notif_summary = f"[通知サマリー {tick_dt.strftime('%H:%M')}] " + " / ".join(notif_parts)
                     print(f"  {notif_summary}")
                     state = load_state()
-                    state["log"].append({
-                        "id": f"{state.get('session_id','?')}_{state.get('cycle_id',0):04d}",
+                    _sys_entry = {
+                        "id": f"{state.get('session_id','?')}_sys{int(time.time()*1000)%100000}",
                         "time": tick_dt.strftime("%Y-%m-%d %H:%M:%S"),
                         "tool": "[system]",
                         "type": "system",
                         "result": notif_summary,
-                    })
+                    }
+                    _archive_entries([_sys_entry])
+                    state["log"].append(_sys_entry)
                     state["last_notification_fetch"] = _fetch_key
                     save_state(state)
 
@@ -211,7 +245,9 @@ def main():
                 _ent = state.get("entropy", 0.65)
                 _s = signals
                 _sp = _spiral or {}
-                _log_line = f"  [pressure] p={pressure:.2f}/{threshold:.1f} ent={_ent:.3f} mag={_sp.get('magnitude',0):.2f} | e={_s.get('entropy',0):.2f} s={_s.get('surprise',0):.2f} u={_s.get('unresolved',0):.2f} n={_s.get('novelty',0):.2f} st={_s.get('stagnation',0):.2f} c={_s.get('custom',0):.2f}"
+                _ue = _s.get('unresolved_ext', 0)
+                _ue_str = f" ue={_ue:.2f}" if _ue > 0 else ""
+                _log_line = f"  [pressure] p={pressure:.2f}/{threshold:.1f} ent={_ent:.3f} mag={_sp.get('magnitude',0):.2f} | e={_s.get('entropy',0):.2f} s={_s.get('surprise',0):.2f} u={_s.get('unresolved',0):.2f} n={_s.get('novelty',0):.2f} st={_s.get('stagnation',0):.2f}{_ue_str} c={_s.get('custom',0):.2f}"
                 print(_log_line)
                 broadcast_log(_log_line)
                 broadcast_state(state)
@@ -285,6 +321,13 @@ def main():
         broadcast_log(_sel_line)
 
         # ③ LLM: チェーン実行
+        # state_before: effective_change計算用スナップショット
+        _state_before_snapshot = {
+            "self": copy.deepcopy(state.get("self", {})),
+            "files_written": list(state.get("files_written", [])),
+            "files_read": list(state.get("files_read", [])),
+            "plan": copy.deepcopy(state.get("plan", {})),
+        }
         chain_tools = selected.get("tools", [selected["tool"]])
         all_results = []
         all_tool_names = []
@@ -404,10 +447,21 @@ def main():
         if expect:
             print(f"  expect: {expect}")
 
-        # state変化量（行動前のstateを記録しておく必要→簡易版: files_read/written/selfの差分）
+        # state変化量（スナップショット vs 現在のstate差分）
         state_after = load_state()
-        sc_bonus = calc_state_change_bonus(state, state_after)
+        sc_bonus = calc_state_change_bonus(_state_before_snapshot, state_after)
+        eff_change = calc_effective_change(all_tool_names, result_str, _state_before_snapshot, state_after)
         state = state_after
+
+        # 外界作用ツール実行時: 未応答カウンターをデクリメント
+        if any(tn in EXTERNAL_ACTION_TOOLS for tn in all_tool_names):
+            _uec = state.get("unresponded_external_count", 0)
+            if _uec > 0:
+                state["unresponded_external_count"] = _uec - 1
+            if state.get("unresponded_external_count", 0) <= 0:
+                state["unresolved_external"] = 0.0
+                state["unresponded_external_count"] = 0
+            save_state(state)
 
         # E1-E4評価（ベクトル類似度）
         e1_vec = _compare_expect_result(intent, expect) if intent and expect else ""
@@ -428,16 +482,23 @@ def main():
             return vec_str  # LLM失敗→ベクトルのみ
 
         e1 = _blend_e(e1_vec, llm_eval, "e1")
-        e2 = _blend_e(e2_vec, llm_eval, "e2")
+        e2_raw = _blend_e(e2_vec, llm_eval, "e2")
         e3 = _blend_e(e3_vec, llm_eval, "e3")
         if llm_eval and "e4" in llm_eval:
             m4 = re.search(r'(\d+)', str(e4))
             e4_vec_v = int(m4.group(1)) / 100.0 if m4 else 0.5
             e4 = f"{round((e4_vec_v * 0.3 + llm_eval['e4'] * 0.7) * 100)}%"
 
+        # E2をeffective_changeで変調（変化ゼロ→E2上限30%）
+        _e2_raw_m = re.search(r'(\d+)', str(e2_raw))
+        _e2_raw_f = int(_e2_raw_m.group(1)) / 100.0 if _e2_raw_m else 0.5
+        _e2_adj_f = apply_effective_change_to_e2(_e2_raw_f, eff_change)
+        e2 = f"{round(_e2_adj_f * 100)}%"
+
         if e1 or e2 or e3 or e4:
             _eval_src = "LLM+vec" if llm_eval else "vec"
-            print(f"  E1={e1} E2={e2} E3={e3} E4={e4} ({_eval_src})")
+            _ec_str = f" ec={eff_change:.2f}" if eff_change < 0.5 else ""
+            print(f"  E1={e1} E2={e2} E3={e3} E4={e4} ({_eval_src}{_ec_str})")
 
         delta = _update_energy(state, e2, e3, e4)
         if delta != 0:

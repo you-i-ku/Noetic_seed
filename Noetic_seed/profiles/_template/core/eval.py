@@ -1,8 +1,16 @@
-"""E値計算（E4多様性・energy更新・LLM評価・state変化量・螺旋ベクトル）"""
+"""E値計算（E4多様性・energy更新・LLM評価・state変化量・螺旋ベクトル・effective_change）"""
 import re
 import json
 import math
+from difflib import SequenceMatcher
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+
+# 外界に不可逆な作用を及ぼすツール（output_display + SNSポスト系）
+EXTERNAL_ACTION_TOOLS = {
+    "output_display",
+    "elyth_post", "elyth_reply", "elyth_like", "elyth_follow",
+    "x_post", "x_reply", "x_quote", "x_like",
+}
 
 
 def _calc_e4(current_intent: str, current_result: str, recent_entries: list, n: int = 5) -> str:
@@ -147,6 +155,65 @@ def calc_state_change_bonus(state_before: dict, state_after: dict) -> float:
         changes += 1.0  # 計画が変わった
 
     return min(1.0, changes * 0.3)
+
+
+def calc_effective_change(tool_names: list[str], tool_result: str,
+                          state_before: dict, state_after: dict) -> float:
+    """行動の実質的な情報変化量を測定する。
+    変化ゼロの行動（同じkeyに同じようなvalue書き込み等）を正しくゼロ評価する。
+    戻り値: 0.0（変化なし）〜 1.5（大きな変化）"""
+    score = 0.0
+
+    # --- self model の変化量（value差分で測定）---
+    old_self = state_before.get("self", {})
+    new_self = state_after.get("self", {})
+    for key in new_self:
+        if key == "name":
+            continue
+        if key not in old_self:
+            score += 1.0  # 新しいkey = 新しい認識
+        elif str(new_self[key]) != str(old_self[key]):
+            old_v, new_v = str(old_self[key]), str(new_self[key])
+            dist = 1.0 - SequenceMatcher(None, old_v, new_v).ratio()
+            score += dist * 0.5  # 既存keyの更新: 差分が大きいほど高い
+
+    # --- ファイル操作 ---
+    old_fw = set(state_before.get("files_written", []))
+    new_fw = set(state_after.get("files_written", []))
+    if new_fw - old_fw:
+        score += 0.8  # 新規ファイル作成
+
+    old_fr = set(state_before.get("files_read", []))
+    new_fr = set(state_after.get("files_read", []))
+    if new_fr - old_fr:
+        score += 0.5  # 新しいファイルを読んだ（情報獲得）
+    elif any(n == "read_file" for n in tool_names):
+        score += 0.1  # 既読再読
+
+    # --- 外界への不可逆な作用 ---
+    for tn in tool_names:
+        if tn in EXTERNAL_ACTION_TOOLS:
+            score += 0.7
+            break  # 1回分のみ
+
+    # --- エラー（変化なし）---
+    if "エラー" in tool_result:
+        score *= 0.2  # エラーは変化量を大幅減
+
+    # --- 計画変更 ---
+    old_plan = state_before.get("plan", {}).get("goal", "")
+    new_plan = state_after.get("plan", {}).get("goal", "")
+    if new_plan != old_plan and new_plan:
+        score += 0.8
+
+    return min(1.5, score)
+
+
+def apply_effective_change_to_e2(e2_raw: float, effective_change: float) -> float:
+    """effective_changeでE2を変調する。
+    変化ゼロ→E2上限30%、変化大→E2そのまま。"""
+    change_factor = min(1.0, 0.3 + effective_change * 0.7)
+    return e2_raw * change_factor
 
 
 def calc_spiral_vector(state: dict, log: list, k: int = 20) -> dict:

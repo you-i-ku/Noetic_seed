@@ -18,13 +18,28 @@ ENTROPY_PARAMS = {
     "w_unresolved": 0.25,
     "w_novelty": 0.2,
     "w_stagnation": 0.3,
+    "w_unresolved_ext": 0.2,
     "tunnel_prob": 0.001,
     "measured_feedback_rate": 0.1,
+    "entropy_floor_base": 0.15,
+    "entropy_floor_energy_coeff": 0.001,
+    "entropy_floor_cap": 0.30,
+    "stagnation_coeff": 0.3,
 }
 
 
-def tick_entropy(state: dict, measured_entropy: float | None = None) -> float:
-    """エントロピーを1tick分更新する。E値で増加率を変調 + measured_entropyで補正。"""
+def _entropy_floor(state: dict) -> float:
+    """動的entropy floor: energy依存。成長するほど完全な安定は不可能になる。"""
+    ep = ENTROPY_PARAMS
+    energy = state.get("energy", 50)
+    floor = ep["entropy_floor_base"] + energy * ep["entropy_floor_energy_coeff"]
+    return min(ep["entropy_floor_cap"], floor)
+
+
+def tick_entropy(state: dict, measured_entropy: float | None = None,
+                 behavioral_entropy: float | None = None) -> float:
+    """エントロピーを1tick分更新する。E値で増加率を変調 + measured_entropyで補正。
+    behavioral_entropy低（パターン化）→増加率加速。"""
     ep = ENTROPY_PARAMS
     entropy = state.get("entropy", 0.65)
 
@@ -39,6 +54,12 @@ def tick_entropy(state: dict, measured_entropy: float | None = None) -> float:
     e3_factor = 1.0 + max(0, last_e3 - 0.5) * 1.5
 
     rate = ep["base_rate"] * e2_factor * e4_factor * e1_factor * e3_factor
+
+    # 行動パターン化（behavioral_entropy低）→entropy増加加速
+    if behavioral_entropy is not None:
+        stagnation_factor = 1.0 + (1.0 - behavioral_entropy) * ep["stagnation_coeff"]
+        rate *= stagnation_factor
+
     if state.get("plan", {}).get("goal"):
         rate *= ep["plan_multiplier"]
 
@@ -49,7 +70,8 @@ def tick_entropy(state: dict, measured_entropy: float | None = None) -> float:
         gap = measured_entropy - entropy
         entropy += gap * ep["measured_feedback_rate"]
 
-    entropy = max(0.05, min(1.0, entropy))
+    floor = _entropy_floor(state)
+    entropy = max(floor, min(1.0, entropy))
     state["entropy"] = entropy
     return entropy
 
@@ -73,7 +95,7 @@ def calc_dynamic_threshold(state: dict, base_threshold: float) -> float:
 
 
 def calc_pressure_signals(state: dict, spiral: dict | None = None) -> dict:
-    """pressure蓄積層の信号を計算する。自由エネルギー勾配 + 螺旋停滞検出。"""
+    """pressure蓄積層の信号を計算する。自由エネルギー勾配 + 螺旋停滞検出 + 未応答外部入力。"""
     ep = ENTROPY_PARAMS
     entropy = state.get("entropy", 0.65)
     last_e2 = state.get("last_e2", 0.5)
@@ -86,6 +108,10 @@ def calc_pressure_signals(state: dict, spiral: dict | None = None) -> dict:
         "unresolved": max(0, 0.7 - last_e2) * ep["w_unresolved"],
         "novelty":    max(0, last_e4) * ep["w_novelty"],
     }
+
+    # 未応答の外部入力による持続的圧力
+    unresolved_ext = min(0.5, state.get("unresolved_external", 0.0))
+    signals["unresolved_ext"] = unresolved_ext * ep["w_unresolved_ext"]
 
     if spiral:
         signals["stagnation"] = max(0, 0.3 - spiral.get("magnitude", 0)) * ep["w_stagnation"]
@@ -116,4 +142,5 @@ def apply_negentropy(state: dict, e1_val: float, e2_val: float, e3_val: float, e
     spiral_factor = 1.0 + max(0, consistency_bonus) * 0.5
 
     neg = e2_factor * e4_factor * e1_factor * surprise_bonus * change_factor * spiral_factor * ep["neg_scale"]
-    state["entropy"] = max(0.05, state.get("entropy", 0.65) - neg)
+    floor = _entropy_floor(state)
+    state["entropy"] = max(floor, state.get("entropy", 0.65) - neg)

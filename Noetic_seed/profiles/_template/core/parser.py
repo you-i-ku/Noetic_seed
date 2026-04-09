@@ -78,26 +78,26 @@ def _parse_args(args_str: str) -> dict:
         json_args, remaining = _extract_json_args(args_str)
         if json_args:
             args.update(json_args)
-            key_positions = list(re.finditer(r'(?:^|\s)(\w+)=', remaining))
+            key_positions = list(re.finditer(r'(?:^|[\s\[])(\w+)=', remaining))
             if len(key_positions) >= 2:
                 for i, kp in enumerate(key_positions):
                     k = kp.group(1)
                     val_start = kp.end()
                     val_end = key_positions[i + 1].start() if i + 1 < len(key_positions) else len(remaining)
                     if k not in args:
-                        args[k] = remaining[val_start:val_end].strip()
+                        args[k] = remaining[val_start:val_end].strip().rstrip(']')
             elif key_positions:
                 single = re.match(r'\s*(\w+)=(.*)', remaining, re.DOTALL)
                 if single and single.group(1) not in args:
                     args[single.group(1)] = single.group(2).strip()
         else:
-            key_positions = list(re.finditer(r'(?:^|\s)(\w+)=', args_str))
+            key_positions = list(re.finditer(r'(?:^|[\s\[])(\w+)=', args_str))
             if len(key_positions) >= 2:
                 for i, kp in enumerate(key_positions):
                     key = kp.group(1)
                     val_start = kp.end()
                     val_end = key_positions[i + 1].start() if i + 1 < len(key_positions) else len(args_str)
-                    args[key] = args_str[val_start:val_end].strip()
+                    args[key] = args_str[val_start:val_end].strip().rstrip(']')
             elif key_positions:
                 single = re.match(r'(\w+)=(.*)', args_str, re.DOTALL)
                 if single:

@@ -48,7 +48,7 @@ def attention_filter(log: list, max_entries: int = 20) -> list:
 
 # === プロンプト用ツール表示 ===
 _X_TOOLS = ["x_post","x_reply","x_timeline","x_search","x_quote","x_like","x_get_notifications"]
-_ELYTH_TOOLS = ["elyth_post","elyth_reply","elyth_timeline","elyth_notifications","elyth_like","elyth_follow","elyth_info"]
+_ELYTH_TOOLS = ["elyth_post","elyth_reply","elyth_like","elyth_follow","elyth_info","elyth_get","elyth_mark_read"]
 _X_ARGS_HINT = {
     "x_post": 'text=（140字以内）',
     "x_reply": 'tweet_url= text=',
@@ -61,11 +61,11 @@ _X_ARGS_HINT = {
 _ELYTH_ARGS_HINT = {
     "elyth_post": 'content=（500字以内）',
     "elyth_reply": 'content= reply_to_id=',
-    "elyth_timeline": 'limit=',
-    "elyth_notifications": 'limit=',
-    "elyth_like": 'post_id=',
-    "elyth_follow": 'aituber_id=',
-    "elyth_info": '',
+    "elyth_like": 'post_id= [unlike=true]',
+    "elyth_follow": 'aituber_id= [unfollow=true]',
+    "elyth_info": '[section=notifications/timeline/trends/...] [limit=]',
+    "elyth_get": 'type=my_posts/thread/profile [post_id=] [handle=] [limit=]',
+    "elyth_mark_read": 'notification_ids=id1,id2,...',
 }
 
 
@@ -214,9 +214,14 @@ def build_prompt_execute(state: dict, ctrl: dict, candidate: dict, tools_dict: d
         example = f"[TOOL:{t} {hint} intent=目的 expect=予測]".replace("  ", " ")
     elif t in _ELYTH_TOOLS:
         hint = _ELYTH_ARGS_HINT.get(t, "")
-        example = f"[TOOL:{t} {hint} intent=目的 expect=予測]".replace("  ", " ")
+        if t == "elyth_reply":
+            example = '[TOOL:elyth_reply content="返信内容" reply_to_id=投稿ID intent=目的 expect=予測]'
+        elif t == "elyth_post":
+            example = '[TOOL:elyth_post content="投稿内容" intent=目的 expect=予測]'
+        else:
+            example = f"[TOOL:{t} {hint} intent=目的 expect=予測]".replace("  ", " ")
     elif t == "output_display":
-        example = '[TOOL:output_display content="メッセージ内容" intent=目的 expect=予測]'
+        example = '[TOOL:output_display content="メッセージ内容" intent=目的 expect=予測]\n注意: output_displayはモニター端末の所有者への直接メッセージです。Elyth投稿とは異なる相手に届きます。'
     else:
         example = f"[TOOL:{t} intent=目的 expect=予測]"
 
