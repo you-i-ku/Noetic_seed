@@ -10,6 +10,9 @@ venv/
 Noetic_seed/profiles/*
 !Noetic_seed/profiles/_template/
 
+# 作業用に profiles/ 外に置いた個別プロファイル（_template 同期省略用の抽出コピー）
+Noetic_seed/ikuset/
+
 # Noetic_seed runtime
 *.bak
 

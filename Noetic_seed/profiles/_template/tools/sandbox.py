@@ -2,6 +2,7 @@
 import threading
 from core.config import BASE_DIR, SANDBOX_DIR, SANDBOX_TOOLS_DIR
 from core.state import load_state, save_state
+from core.ws_server import request_approval
 
 AI_CREATED_TOOLS: dict = {}  # name -> func
 _AI_TOOL_TIMEOUT = 10  # 秒
@@ -53,16 +54,9 @@ def _create_tool(args: dict) -> str:
             return f"エラー: {file_path} が見つかりません"
         code = target.read_text(encoding="utf-8")
     warns = [p for p in _DANGEROUS_PATTERNS if p in code]
-    warn_str = f"\n⚠ 危険パターン検出: {warns}" if warns else "\n危険パターン: なし"
-    print(f"\n[create_tool 承認待ち]")
-    print(f"  ツール名: {name}  説明: {desc or '（説明なし）'}")
-    print(f"  ファイル: {file_path}{warn_str}")
-    print(f"  --- コード ---")
-    print(code[:1000] + ("..." if len(code) > 1000 else ""))
-    print(f"  --------------")
-    ans = input("  登録しますか？ [y/N]: ").strip().lower()
-    if ans != "y":
-        return "キャンセル: ツール登録を見送りました"
+    if warns:
+        return f"エラー: 危険パターン検出 {warns}。登録できません"
+    print(f"  [create_tool] {name} → {file_path}")
     target.write_text(code, encoding="utf-8")
     state = load_state()
     tc = state.setdefault("tools_created", [])
@@ -97,15 +91,17 @@ def _exec_code(args: dict) -> str:
         run_target = tmp.name
         tmp_path = tmp.name
     warnings = [p for p in _DANGEROUS_PATTERNS if p in code]
-    warn_str = f"\n⚠ 危険パターン検出: {warnings}" if warnings else "\n危険パターン: なし"
-    print(f"\n[exec_code 承認待ち]")
-    print(f"  AIの意図: {intent}")
-    print(f"  実行ファイル: {file_path or '(インラインコード)'}{warn_str}")
-    print(f"  --- コード ---")
-    print(code[:800] + ("..." if len(code) > 800 else ""))
-    print(f"  --------------")
-    ans = input("  実行しますか？ [y/N]: ").strip().lower()
-    if ans != "y":
+    warn_str = f" ⚠{warnings}" if warnings else ""
+    message = args.get("message", "").strip()
+    preview_lines = [f"[exec_code] ファイル: {file_path or '(inline)'}{warn_str}"]
+    if intent:
+        preview_lines.append(f"意図: {intent}")
+    if message:
+        preview_lines.append(f"メッセージ: {message}")
+    preview_lines.append(f"---\n{code[:500]}")
+    preview = "\n".join(preview_lines)
+    print(f"\n[exec_code 承認待ち] {file_path or '(inline)'}")
+    if not request_approval("exec_code", preview):
         if tmp_path:
             os.unlink(tmp_path)
         return "キャンセル: 実行を見送りました"
@@ -167,20 +163,20 @@ def _self_modify(args: dict) -> str:
         warn_str = f"\n⚠ 危険パターン検出: {warnings}" if warnings else "\n危険パターン: なし"
     else:
         warn_str = ""
-    print(f"\n[self_modify 承認待ち]")
-    print(f"  対象: {path}  モード: {'部分置換' if mode == 'partial' else '全文置換'}")
-    print(f"  AIの意図: {intent}{warn_str}")
     if mode == "partial":
-        print(f"  --- 変更前 ---")
-        print(old[:400] + ("..." if len(old) > 400 else ""))
-        print(f"  --- 変更後 ---")
-        print(new[:400] + ("..." if len(new) > 400 else ""))
+        diff_str = f"--- 変更前 ---\n{old[:300]}\n--- 変更後 ---\n{new[:300]}"
     else:
-        print(f"  --- 変更後の内容（先頭400字）---")
-        print(new_content[:400] + ("..." if len(new_content) > 400 else ""))
-    print(f"  --------------------------------")
-    ans = input("  変更を適用しますか？ [y/N]: ").strip().lower()
-    if ans != "y":
+        diff_str = f"--- 新しい内容 ---\n{new_content[:400]}"
+    message = args.get("message", "").strip()
+    preview_lines = [f"[self_modify] {path} ({('部分' if mode == 'partial' else '全文')}置換){warn_str}"]
+    if intent and intent != "（意図なし）":
+        preview_lines.append(f"意図: {intent}")
+    if message:
+        preview_lines.append(f"メッセージ: {message}")
+    preview_lines.append(diff_str)
+    preview = "\n".join(preview_lines)
+    print(f"\n[self_modify 承認待ち] {path}")
+    if not request_approval("self_modify", preview):
         return "キャンセル: 変更を見送りました"
     if path == "main.py":
         backup = target.with_suffix(".py.bak")

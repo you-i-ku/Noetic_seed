@@ -1,11 +1,12 @@
 """ツール定義・段階解放テーブル"""
-from tools.builtin import _list_files, _read_file, _write_file, _update_self, _wait_or_dismiss
+from tools.builtin import _list_files, _read_file, _write_file, _update_self, _wait_or_dismiss, _view_image
 from tools.web import _web_search, _fetch_url
 from tools.x_tools import _x_timeline, _x_search, _x_get_notifications, _x_post, _x_reply, _x_quote, _x_like
 from tools.elyth_tools import _elyth_post, _elyth_reply, _elyth_like, _elyth_follow, _elyth_info, _elyth_get, _elyth_mark_read
 from tools.memory_tool import _search_memory, _tool_memory_store, _tool_memory_update, _tool_memory_forget, _tool_search_memory
 from tools.sandbox import _create_tool, _exec_code, _self_modify, _run_ai_tool, AI_CREATED_TOOLS, _DANGEROUS_PATTERNS
 from tools.ui_tools import _output_display
+from tools.device_tools import _camera_stream, _camera_stream_stop
 
 TOOLS = {
     "list_files":   {"desc": "ディレクトリの一覧を取得。引数: path=相対パス", "func": lambda args: _list_files(args.get("path", "."))},
@@ -38,14 +39,17 @@ TOOLS = {
     "exec_code":    {"desc": "sandbox/内のPythonファイルを実行（Human-in-the-loop）。引数: file=sandbox/xxx.py（またはcode=インラインコード）intent=実行目的", "func": _exec_code},
     "self_modify":  {"desc": "自分自身のファイルを変更する（Human-in-the-loop）。引数: path=対象ファイル(pref.json/main.py) [全文置換: content=新しい内容全文] [部分置換: old=変更前の文字列 new=変更後の文字列] intent=変更目的", "func": lambda args: _self_modify(args)},
     "output_display":    {"desc": "モニター端末の所有者に直接メッセージを送る（Elythとは別の相手）。引数: content=メッセージ", "func": _output_display},
+    "camera_stream":     {"desc": "端末のカメラ経由で連続撮影を非同期に開始する。フレームが到着するたびに視覚入力に入る（次サイクル以降で認識可）。AIは観察中も別ツールを並行実行でき、camera_stream_stopで能動的に停止できる。単発撮影は frames=1。引数: [facing=back/front] [frames=枚数 1-30 default=5] [interval_sec=間隔 0.3-5.0 default=1.0]", "func": _camera_stream},
+    "camera_stream_stop": {"desc": "アクティブな camera_stream を停止する。観察対象を把握した後、リソース節約のために呼ぶ。引数なし", "func": _camera_stream_stop},
+    "view_image":   {"desc": "プロファイル内の画像を同期で認識し、描写を結果として返す。camera_streamの結果を見直したり、任意の画像を能動的に注視する。intent=目的を指定するとその観点で描写される。引数: path=画像パス（jpg/png/webp）", "func": _view_image},
 }
 
 # === ツール段階解放テーブル ===
 _LV3_TOOLS = set(TOOLS.keys()) - {"create_tool", "exec_code", "self_modify"}
 LEVEL_TOOLS = {
-    0: {"list_files", "read_file", "wait", "update_self", "output_display"},
-    1: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display"},
-    2: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "web_search", "fetch_url", "output_display"},
+    0: {"list_files", "read_file", "wait", "update_self", "output_display", "view_image"},
+    1: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image"},
+    2: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "web_search", "fetch_url", "output_display", "view_image"},
     3: _LV3_TOOLS,
     4: _LV3_TOOLS | {"create_tool"},
     5: set(TOOLS.keys()) - {"self_modify"},

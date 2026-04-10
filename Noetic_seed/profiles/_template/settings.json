@@ -2,7 +2,10 @@
   "provider": "lmstudio",
   "base_url": "http://127.0.0.1:1234/v1",
   "api_key": "",
-  "model": "default",
+  "model": "gemma-4-26b-a4b-it",
+  "vision_max_size": 896,
   "brave_api_key": "",
-  "elyth_api_key": ""
+  "elyth_api_key": "",
+  "ws_token": "iku2026"
+
 }

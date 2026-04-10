@@ -105,13 +105,9 @@ def _x_get_tweets_from_page(page, n=10):
 
 
 def _x_confirm(action: str, preview: str) -> bool:
-    print(f"\n[X {action} 承認待ち]")
-    print(f"  {preview}")
-    try:
-        answer = input("  実行しますか？[y/N]: ").strip().lower()
-    except EOFError:
-        return False
-    return answer == "y"
+    """X操作は自動承認（Human-in-the-loopはexec_code/self_modifyのみ）"""
+    print(f"  [X {action}] {preview[:80]}")
+    return True
 
 
 def _x_timeline(args):

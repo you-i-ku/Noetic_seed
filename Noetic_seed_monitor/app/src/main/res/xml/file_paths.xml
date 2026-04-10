@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 一時撮影ファイル用（app internal cache）-->
+    <cache-path name="camera_captures" path="captures/" />
+</paths>

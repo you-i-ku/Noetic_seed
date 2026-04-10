@@ -54,6 +54,14 @@ dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
     // ViewModel
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    // CameraX
+    implementation("androidx.camera:camera-core:1.4.1")
+    implementation("androidx.camera:camera-camera2:1.4.1")
+    implementation("androidx.camera:camera-lifecycle:1.4.1")
+    implementation("androidx.camera:camera-view:1.4.1")
+    // Location
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

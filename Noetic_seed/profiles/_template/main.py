@@ -1,4 +1,4 @@
-"""最小自律AIテスト — ターミナルで動く最小構造"""
+"""Noetic_seed"""
 # === venv ブートストラップ（初回起動時に自動セットアップ） ===
 import sys
 import os
@@ -36,10 +36,19 @@ def _bootstrap_venv():
         print("[bootstrap] セットアップ完了。venvで再起動します...\n")
 
     # venv の Python で自分自身を再実行
-    os.execv(str(_venv_python), [str(_venv_python)] + sys.argv)
+    # os.execv は Windows でスペース含むパスをクォートしないため subprocess で代替
+    result = subprocess.run([str(_venv_python)] + sys.argv)
+    sys.exit(result.returncode)
 
 _bootstrap_venv()
 # ================================================================
+
+# Windows: Ctrl+C 即時終了（httpx等のブロッキング呼び出しでも確実に死なせる）
+import signal
+def _force_exit_on_sigint(_signum, _frame):
+    print("\n[Ctrl+C] 強制終了します。", flush=True)
+    os._exit(0)
+signal.signal(signal.SIGINT, _force_exit_on_sigint)
 
 import re
 import time
@@ -52,7 +61,7 @@ from datetime import datetime
 # DualLoggerの設定（printをファイルにも書き出す）
 from core.config import (
     DualLogger, RAW_LOG_FILE, STATE_FILE, DEFAULT_PRESSURE_PARAMS,
-    ENV_INJECT_INTERVAL, _NOTIFICATION_HOURS, llm_cfg
+    ENV_INJECT_INTERVAL, _NOTIFICATION_HOURS, llm_cfg, BASE_DIR
 )
 sys.stdout = DualLogger(RAW_LOG_FILE)
 
@@ -81,7 +90,7 @@ from core.ws_server import start_ws_server, broadcast_log, broadcast_state, broa
 
 # === メインループ ===
 def main():
-    print("=== 最小自律AIテスト ===")
+    print("=== Noetic_seed ===")
     print(f"LLM: {llm_cfg.get('model','?')} @ {_get_base_url()} [{llm_cfg.get('provider','lmstudio')}]")
     print(f"state: {STATE_FILE}")
     _init_vector()
@@ -200,6 +209,30 @@ def main():
                 print(_chat_line)
                 broadcast_log(_chat_line)
 
+            # テストタブからのツール実行要求（同期実行）
+            # 自律動作と同じ挙動にするため、承認待ちもカメラもmainが待つ
+            from core.ws_server import get_pending_test_tools
+            for test_req in get_pending_test_tools():
+                _tn = test_req.get("tool", "")
+                _ta = test_req.get("args", {})
+                if _tn not in TOOLS:
+                    _uline = f"  [test] 未知のツール: {_tn}"
+                    print(_uline)
+                    broadcast_log(_uline)
+                    continue
+                _tline = f"  [test] {_tn} args={_ta}"
+                print(_tline)
+                broadcast_log(_tline)
+                try:
+                    _tres = TOOLS[_tn]["func"](_ta)
+                    _rline = f"  [test] → {str(_tres)[:200]}"
+                    print(_rline)
+                    broadcast_log(_rline)
+                except Exception as _te:
+                    _eline = f"  [test] エラー: {_te}"
+                    print(_eline)
+                    broadcast_log(_eline)
+
             # 未応答外部入力の圧力管理
             if state.get("unresponded_external_count", 0) > 0:
                 # 未応答あり → 圧力蓄積 (+0.15/tick, cap 0.5)
@@ -296,6 +329,10 @@ def main():
         # Controller
         ctrl = controller(state, TOOLS, LEVEL_TOOLS, AI_CREATED_TOOLS, _DANGEROUS_PATTERNS, _run_ai_tool)
         allowed = ctrl["allowed_tools"]
+        # 動的フィルタ: camera_stream_stop はストリームがアクティブな時のみ見せる
+        if not state.get("stream_active"):
+            allowed = allowed - {"camera_stream_stop"}
+            ctrl["allowed_tools"] = allowed
         new_lv = ctrl.get("tool_level", 0)
         prev_lv = ctrl.get("tool_level_prev", 0)
         lv_msg = ""
@@ -321,14 +358,116 @@ def main():
 
         # ① LLM: 候補提案
         propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause)
+
+        # 画像入力の決定: 優先順位
+        # 1. camera_stream のローリングバッファに新フレームが到着していればそれを使う
+        # 2. view_image / 旧 pending_images(state) があればそれを使う
+        # 3. なければ画像なし（Q2: 前回と同じフレームは再度見せない）
+        from core.ws_server import get_stream_snapshot
+        _last_seen_counter = state.get("last_seen_stream_counter", 0)
+        _stream_frames, _stream_counter, _stream_ended = get_stream_snapshot()
+        _pending_img_paths = []
+        _first_pending_rel = None
+        _pending_meta = {}
+        _is_stream = False
+
+        if _stream_frames and _stream_counter > _last_seen_counter:
+            # ストリーム由来の新フレームがある
+            for _rel, _m in _stream_frames:
+                _full = BASE_DIR / _rel
+                if _full.exists():
+                    _pending_img_paths.append(str(_full))
+            if _pending_img_paths:
+                _first_pending_rel = _stream_frames[0][0]
+                _pending_meta = _stream_frames[-1][1] if _stream_frames else {}
+                _pending_meta["stream_active"] = state.get("stream_active", False)
+                _is_stream = True
+                state["last_seen_stream_counter"] = _stream_counter
+        else:
+            # ストリーム以外のソース（view_image / 旧 pending_image）
+            _pending_imgs_rel = state.get("pending_images") or []
+            if not _pending_imgs_rel:
+                _single = state.get("pending_image")
+                if _single:
+                    _pending_imgs_rel = [_single]
+            if _pending_imgs_rel:
+                for _rel in _pending_imgs_rel:
+                    _full = BASE_DIR / _rel
+                    if _full.exists():
+                        _pending_img_paths.append(str(_full))
+                if _pending_img_paths:
+                    _first_pending_rel = _pending_imgs_rel[0]
+                    _pending_meta = state.get("pending_images_meta") or state.get("pending_image_meta", {})
+
+        if _pending_img_paths:
+            _n = len(_pending_img_paths)
+            if _is_stream:
+                stream_active = state.get("stream_active", False)
+                active_hint = (
+                    "ストリームは継続中です。camera_stream_stop で停止できます。"
+                    if stream_active else
+                    "ストリームは終了しています。"
+                )
+                if _n == 1:
+                    propose_prompt += (
+                        f"\n\n[視覚入力: camera_streamから1枚の画像が視覚に届いています。"
+                        f"この画像は既にあなたに見えています。{active_hint}"
+                        f"候補の意図欄には「画像で見えたもの」に言及してください]"
+                    )
+                else:
+                    propose_prompt += (
+                        f"\n\n[視覚入力: camera_streamから{_n}枚の時系列画像が視覚に届いています。"
+                        f"これは直近の連続撮影フレームです。時間経過による変化や動きを観察してください。"
+                        f"画像は既にあなたに見えており、read_fileは不要です。{active_hint}"
+                        f"候補の意図欄には「画像で見えたもの・その変化」に言及してください]"
+                    )
+            else:
+                if _n == 1:
+                    propose_prompt += (
+                        f"\n\n[視覚入力: 1枚の画像があなたの視覚に直接届いています。"
+                        f"この画像は既にあなたに見えており、read_fileで読む必要はありません。"
+                        f"画像で見えたものを踏まえて候補を提案してください。"
+                        f"候補の意図欄には「画像で見えたもの」に具体的に言及してください]"
+                    )
+                else:
+                    propose_prompt += (
+                        f"\n\n[視覚入力: {_n}枚の画像（時系列順）があなたの視覚に直接届いています。"
+                        f"これは直近の連続撮影フレームです。時間経過による変化や動きを観察してください。"
+                        f"画像は既にあなたに見えており、read_fileは不要です。"
+                        f"候補の意図欄には「画像で見えたもの・その変化」に具体的に言及してください]"
+                    )
+            if _pending_meta:
+                propose_prompt += f"\nmeta: {_pending_meta}"
+
+        # ストリーム終了通知を受け取ったら state も更新
+        if _stream_ended and state.get("stream_active"):
+            state["stream_active"] = False
+            state["stream_id"] = None
+            state["stream_params"] = None
+            print("  [stream] ストリーム終了を検知")
+
         try:
-            propose_resp = call_llm(propose_prompt, max_tokens=24000, temperature=1.0)
+            propose_resp = call_llm(propose_prompt, max_tokens=24000, temperature=1.0,
+                                    image_paths=_pending_img_paths if _pending_img_paths else None)
             append_debug_log("LLM1 (Propose)", propose_resp)
         except Exception as e:
             print(f"  LLM①エラー: {e}")
             pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
             time.sleep(10)
             continue
+
+        # 画像を使い終わったらクリア（1回限りの知覚）
+        # ストリーム由来の場合は state 経由ではなくバッファ経由なので state.pending_images はクリア不要
+        # カウンタだけ更新（ストリーム中は next cycle で新フレームが来れば counter が進むので自動的に見える）
+        if _pending_img_paths:
+            if not _is_stream:
+                state["pending_images"] = None
+                state["pending_images_meta"] = None
+                state["pending_image"] = None
+                state["pending_image_meta"] = None
+            save_state(state)
+            _src = "stream" if _is_stream else "pending"
+            print(f"  [vision] 画像を認識: {len(_pending_img_paths)}枚 ({_src}: {_first_pending_rel})")
         candidates = parse_candidates(propose_resp, ctrl["allowed_tools"])
         print(f"  LLM①raw: {propose_resp.strip()[:300]}")
         print(f"  候補({len(candidates)}件): {[(c['tool'], c['reason'][:40]) for c in candidates]}")

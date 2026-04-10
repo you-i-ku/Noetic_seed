@@ -58,6 +58,47 @@ def _read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
     except Exception as e:
         return f"エラー: {e}"
 
+def _view_image(args: dict) -> str:
+    """画像ファイルを視覚入力として取り込み、その場でLLMに描写させて結果として返す。
+    同期実行: view_imageを呼んだサイクル内で「見た結果」が得られるのでE値評価が機能する。
+    プロファイルディレクトリ内のjpg/png/webpが対象。"""
+    path = args.get("path", "").strip()
+    if not path:
+        return "エラー: path= が必要です"
+    target = (BASE_DIR / path).resolve()
+    if not str(target).startswith(str(BASE_DIR.resolve())):
+        return "エラー: プロファイル外のファイルは対象外です"
+    if not target.exists():
+        return f"エラー: {path} が見つかりません"
+    if target.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+        return "エラー: JPG/PNG/WebP のみ対応"
+
+    # 同期で LLM を呼んで画像を描写させる（結果がサイクルのログに残る）
+    intent = args.get("intent", "").strip()
+    if intent:
+        describe_prompt = (
+            f"画像を見る目的: {intent}\n\n"
+            f"この画像を 1-3 文で簡潔に描写してください。目的に関連する情報を優先してください。"
+        )
+    else:
+        describe_prompt = "この画像を 1-3 文で簡潔に描写してください。"
+
+    try:
+        from core.llm import call_llm
+        description = call_llm(
+            describe_prompt,
+            max_tokens=500,
+            temperature=0.7,
+            image_paths=[str(target)],
+        )
+        description = description.strip()
+    except Exception as e:
+        return f"エラー: 画像認識失敗: {e}"
+
+    rel_path = str(target.relative_to(BASE_DIR)).replace("\\", "/")
+    return f"画像で見えたもの ({rel_path}):\n{description}"
+
+
 def _write_file(path: str, content: str) -> str:
     if not path:
         return "エラー: pathが空です"
@@ -74,9 +115,13 @@ def _write_file(path: str, content: str) -> str:
 def _update_self(key: str, value: str) -> str:
     if not key:
         return "エラー: keyが空です"
-    if key == "name":
-        return "エラー: nameは変更できません"
     state = load_state()
+    if key == "name":
+        current = str(state["self"].get("name", "")).strip()
+        if current:
+            return f"エラー: nameは既に「{current}」として確定しています。変更できません"
+        if not value.strip():
+            return "エラー: 空のnameは設定できません"
     state["self"][key] = value
     ds = state.setdefault("drives_state", {})
     ds["last_self_update"] = time.time()

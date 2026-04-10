@@ -19,13 +19,12 @@ class IkuWebSocketClient(
     private var serverUrl: String = ""
     private var token: String = ""
     private var shouldReconnect = true
-    private var reconnectDelay = 1000L
+    private val reconnectDelay = 200L  // 固定200ms（指数バックオフなし）
 
     fun connect(url: String, authToken: String) {
         serverUrl = url
         token = authToken
         shouldReconnect = true
-        reconnectDelay = 1000L
         doConnect()
     }
 
@@ -33,13 +32,11 @@ class IkuWebSocketClient(
         val request = Request.Builder().url(serverUrl).build()
         ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                // 認証トークンを送信
                 val auth = JsonObject().apply {
                     addProperty("type", "auth")
                     addProperty("token", token)
                 }
                 webSocket.send(gson.toJson(auth))
-                reconnectDelay = 1000L
                 onConnected()
             }
 
@@ -73,7 +70,6 @@ class IkuWebSocketClient(
         if (!shouldReconnect) return
         Thread {
             Thread.sleep(reconnectDelay)
-            reconnectDelay = (reconnectDelay * 2).coerceAtMost(30000L)
             if (shouldReconnect) doConnect()
         }.start()
     }

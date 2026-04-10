@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -34,10 +35,148 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.window.Dialog
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
+import java.util.Date
+import java.text.SimpleDateFormat
 
 class MainActivity : ComponentActivity() {
+
+    private val vm: IkuViewModel by viewModels()
+
+    // 撮影中の一時ファイル（TakePicture は URI に直接書く）
+    private var pendingCameraFile: java.io.File? = null
+    private var pendingCameraUri: android.net.Uri? = null
+
+    // Activity-level カメラlauncher（Compose外で登録）
+    // TakePicture: フル解像度の JPEG を指定 URI に書き込む
+    private val cameraLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.TakePicture()
+    ) { success ->
+        val file = pendingCameraFile
+        pendingCameraFile = null
+        pendingCameraUri = null
+        if (!success || file == null || !file.exists() || file.length() == 0L) {
+            vm.finishCameraCapture(null, null)
+            file?.delete()
+            return@registerForActivityResult
+        }
+        try {
+            val jpegBytes = file.readBytes()
+            // 画像サイズ取得（デコードせず寸法だけ読む）
+            val opts = android.graphics.BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            android.graphics.BitmapFactory.decodeFile(file.absolutePath, opts)
+            // 長辺 1920px を超えるならリサイズ（LM Studio vision の既知制約）
+            val maxSide = 1920
+            val longest = maxOf(opts.outWidth, opts.outHeight)
+            val finalBytes: ByteArray
+            val finalW: Int
+            val finalH: Int
+            if (longest > maxSide) {
+                val scale = maxSide.toFloat() / longest
+                val newW = (opts.outWidth * scale).toInt()
+                val newH = (opts.outHeight * scale).toInt()
+                val sampleSize = run {
+                    var s = 1
+                    while (opts.outWidth / (s * 2) >= newW) s *= 2
+                    s
+                }
+                val decodeOpts = android.graphics.BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                }
+                val decoded = android.graphics.BitmapFactory.decodeFile(file.absolutePath, decodeOpts)
+                val scaled = android.graphics.Bitmap.createScaledBitmap(decoded, newW, newH, true)
+                decoded.recycle()
+                val baos = java.io.ByteArrayOutputStream()
+                scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, baos)
+                finalBytes = baos.toByteArray()
+                finalW = scaled.width
+                finalH = scaled.height
+                scaled.recycle()
+            } else {
+                finalBytes = jpegBytes
+                finalW = opts.outWidth
+                finalH = opts.outHeight
+            }
+            val b64 = android.util.Base64.encodeToString(finalBytes, android.util.Base64.NO_WRAP)
+            val now = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(java.util.Date())
+            val meta = mutableMapOf<String, Any>(
+                "captured_at" to now,
+                "facing" to vm.pendingCameraFacing,
+                "width" to finalW,
+                "height" to finalH,
+                "size_bytes" to finalBytes.size,
+            )
+            vm.finishCameraCapture(b64, meta)
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "camera read failed", e)
+            vm.finishCameraCapture(null, null)
+        } finally {
+            file.delete()
+        }
+    }
+
+    private val cameraPermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            launchCameraWithTempFile()
+        } else {
+            vm.finishCameraCapture(null, null)
+        }
+    }
+
+    private fun launchCameraStreamActivity(facing: String, frames: Int, intervalSec: Float) {
+        try {
+            // async モード: Activity がフレーム毎に直接 WebSocket 送信するためのコールバック
+            CameraStreamBridge.sendMessage = { json -> vm.sendWsMessage(json) }
+            // 旧バッチ版の onComplete も一応セット（Activity が null を渡して終了通知する）
+            CameraStreamBridge.onComplete = { _ ->
+                // async 版では使わない。Activity 側で stream_end を送ってくれる
+                vm.finishCameraStream(null, null)
+            }
+            val intent = android.content.Intent(this, CameraStreamActivity::class.java).apply {
+                putExtra(CameraStreamActivity.EXTRA_FACING, facing)
+                putExtra(CameraStreamActivity.EXTRA_FRAMES, frames)
+                putExtra(CameraStreamActivity.EXTRA_INTERVAL_SEC, intervalSec)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "launchCameraStreamActivity failed", e)
+            CameraStreamBridge.sendMessage = null
+            CameraStreamBridge.onComplete = null
+            vm.finishCameraStream(null, null)
+        }
+    }
+
+    private fun launchCameraWithTempFile() {
+        try {
+            val dir = java.io.File(cacheDir, "captures").apply { mkdirs() }
+            val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss").format(java.util.Date())
+            val file = java.io.File(dir, "cap_$ts.jpg")
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this, "${packageName}.fileprovider", file
+            )
+            pendingCameraFile = file
+            pendingCameraUri = uri
+            cameraLauncher.launch(uri)
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "launchCamera failed", e)
+            vm.finishCameraCapture(null, null)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -48,8 +187,33 @@ class MainActivity : ComponentActivity() {
         controller.systemBarsBehavior =
             androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
+        // ViewModelにカメラ起動トリガーを登録
+        vm.setCameraTrigger {
+            val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(
+                this, android.Manifest.permission.CAMERA
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (hasCam) {
+                launchCameraWithTempFile()
+            } else {
+                cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+            }
+        }
+
+        // ViewModelに camera_stream 起動トリガーを登録
+        vm.setCameraStreamTrigger { facing, frames, intervalSec ->
+            val hasCam = androidx.core.content.ContextCompat.checkSelfPermission(
+                this, android.Manifest.permission.CAMERA
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (hasCam) {
+                launchCameraStreamActivity(facing, frames, intervalSec)
+            } else {
+                // 権限なしならコールバック null で通知
+                vm.finishCameraStream(null, null)
+            }
+        }
+
         setContent {
-            IkuApp()
+            IkuApp(vm = vm)
         }
     }
 }
@@ -67,21 +231,63 @@ fun entropyToColor(entropy: Float): Color {
 }
 
 // ===== Navigation =====
-enum class Screen { Main, Terminal }
+enum class Screen { Main, Dashboard, Terminal, Test }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun IkuApp(vm: IkuViewModel = viewModel()) {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) { vm.setContext(context) }
+
+    // Android 13+ 通知権限リクエスト
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val launcher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { _ -> }
+        LaunchedEffect(Unit) {
+            launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     val state by vm.state.collectAsState()
     var hasConnected by remember { mutableStateOf(false) }
     if (state.connected) hasConnected = true
 
-    if (!hasConnected) {
-        ConnectScreen(onConnect = { url, token -> vm.connect(url, token) })
-    } else {
-        AppWithDrawer(state = state, vm = vm)
+    when {
+        !hasConnected -> ConnectScreen(onConnect = { url, token -> vm.connect(url, token) })
+        !state.profileSelected -> {
+            if (state.profiles.isNotEmpty()) {
+                ProfileSelectScreen(
+                    profiles = state.profiles,
+                    onSelect = { name -> vm.selectProfile(name) },
+                )
+            } else {
+                LoadingScreen("プロファイル一覧を取得中...")
+            }
+        }
+        !state.profileStarted -> LoadingScreen("プロファイル起動中...")
+        else -> AppWithDrawer(state = state, vm = vm)
     }
 }
+
+@Composable
+fun LoadingScreen(message: String) {
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A1A)) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("noetic-seed", style = MaterialTheme.typography.headlineMedium, color = Color(0xFF4FC3F7))
+            Spacer(modifier = Modifier.height(32.dp))
+            CircularProgressIndicator(color = Color(0xFF4FC3F7))
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(message, color = Color.Gray, fontSize = 13.sp)
+        }
+    }
+}
+
+// CameraCaptureDialog は IkuApp 内のLaunchedEffectに統合済み
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -120,6 +326,19 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
                 NavigationDrawerItem(
+                    label = { Text("ダッシュボード", color = Color.White) },
+                    selected = currentScreen == Screen.Dashboard,
+                    onClick = {
+                        currentScreen = Screen.Dashboard
+                        scope.launch { drawerState.close() }
+                    },
+                    colors = NavigationDrawerItemDefaults.colors(
+                        selectedContainerColor = Color(0xFF2A2A4A),
+                        unselectedContainerColor = Color.Transparent,
+                    ),
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                )
+                NavigationDrawerItem(
                     label = { Text("ターミナル", color = Color.White) },
                     selected = currentScreen == Screen.Terminal,
                     onClick = {
@@ -132,21 +351,44 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
                     ),
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
+                NavigationDrawerItem(
+                    label = { Text("🧪 Test", color = Color.White) },
+                    selected = currentScreen == Screen.Test,
+                    onClick = {
+                        currentScreen = Screen.Test
+                        scope.launch { drawerState.close() }
+                    },
+                    colors = NavigationDrawerItemDefaults.colors(
+                        selectedContainerColor = Color(0xFF2A2A4A),
+                        unselectedContainerColor = Color.Transparent,
+                    ),
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                )
                 // 将来: 承認、設定
             }
         }
     ) {
-        val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
+        val pagerState = rememberPagerState(initialPage = 0, pageCount = { 4 })
 
         // ドロワーのクリックとpagerを同期
         LaunchedEffect(currentScreen) {
-            val target = if (currentScreen == Screen.Main) 0 else 1
+            val target = when (currentScreen) {
+                Screen.Main -> 0
+                Screen.Dashboard -> 1
+                Screen.Terminal -> 2
+                Screen.Test -> 3
+            }
             if (pagerState.currentPage != target) {
                 pagerState.animateScrollToPage(target)
             }
         }
         LaunchedEffect(pagerState.currentPage) {
-            currentScreen = if (pagerState.currentPage == 0) Screen.Main else Screen.Terminal
+            currentScreen = when (pagerState.currentPage) {
+                0 -> Screen.Main
+                1 -> Screen.Dashboard
+                2 -> Screen.Terminal
+                else -> Screen.Test
+            }
         }
 
         HorizontalPager(
@@ -158,10 +400,20 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
                     state = state,
                     onMenuClick = { scope.launch { drawerState.open() } },
                     onSendChat = { text -> vm.sendChat(text) },
+                    onApproval = { id, approved -> vm.sendApproval(id, approved) },
                 )
-                1 -> TerminalScreen(
+                1 -> DashboardScreen(
                     state = state,
                     onMenuClick = { scope.launch { drawerState.open() } },
+                )
+                2 -> TerminalScreen(
+                    state = state,
+                    onMenuClick = { scope.launch { drawerState.open() } },
+                )
+                3 -> TestScreen(
+                    state = state,
+                    onMenuClick = { scope.launch { drawerState.open() } },
+                    onRunTool = { name, args -> vm.runTestTool(name, args) },
                 )
             }
         }
@@ -218,17 +470,67 @@ fun ConnectScreen(onConnect: (String, String) -> Unit) {
     }
 }
 
+// ===== Profile Select Screen =====
+@Composable
+fun ProfileSelectScreen(profiles: List<ProfileInfo>, onSelect: (String) -> Unit) {
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A1A)) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(modifier = Modifier.height(60.dp))
+            Text("noetic-seed", style = MaterialTheme.typography.headlineLarge, color = Color(0xFF4FC3F7))
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Select Profile", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+            Spacer(modifier = Modifier.height(32.dp))
+
+            for (profile in profiles) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xFF1A1A2E))
+                        .clickable { onSelect(profile.name) }
+                        .padding(20.dp)
+                ) {
+                    Column {
+                        Text(
+                            profile.name,
+                            color = Color.White,
+                            fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Text(
+                                "cycle: ${profile.cycleId}",
+                                color = Color.Gray, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                            )
+                            Text(
+                                "entropy: ${"%.3f".format(profile.entropy)}",
+                                color = entropyToColor(profile.entropy),
+                                fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                            )
+                            Text(
+                                "energy: ${"%.0f".format(profile.energy)}",
+                                color = Color.Gray, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ===== Main Screen =====
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(state: IkuState, onMenuClick: () -> Unit, onSendChat: (String) -> Unit = {}) {
+fun MainScreen(state: IkuState, onMenuClick: () -> Unit, onSendChat: (String) -> Unit = {}, onApproval: (String, Boolean) -> Unit = { _, _ -> }) {
     val bgColor by animateColorAsState(
         targetValue = entropyToColor(state.entropy),
         animationSpec = tween(durationMillis = 2000), label = "bg",
     )
-    val sheetState = rememberModalBottomSheetState()
-    var showDashboard by remember { mutableStateOf(false) }
-
     Box(modifier = Modifier.fillMaxSize()) {
         // 背景グラデーション（entropy連動）
         Box(
@@ -312,6 +614,97 @@ fun MainScreen(state: IkuState, onMenuClick: () -> Unit, onSendChat: (String) ->
                 }
             }
 
+            // 承認リクエスト表示
+            for (req in state.approvalRequests) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFFEF5350).copy(alpha = 0.2f))
+                        .padding(12.dp)
+                ) {
+                    Column {
+                        Text(
+                            "🔐 ${req.tool} 承認待ち",
+                            color = Color(0xFFEF5350),
+                            fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            req.preview.take(200),
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                            maxLines = 6, overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            OutlinedButton(
+                                onClick = { onApproval(req.id, false) },
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF5350)),
+                            ) { Text("却下") }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = { onApproval(req.id, true) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF76FF03)),
+                            ) { Text("承認", color = Color.Black) }
+                        }
+                    }
+                }
+            }
+
+            // pending（未対応事項）表示 — タップで展開
+            if (state.pendingCount > 0) {
+                var pendingExpanded by remember { mutableStateOf(false) }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFFFF6D00).copy(alpha = 0.15f))
+                        .clickable { pendingExpanded = !pendingExpanded }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("⏳", fontSize = 16.sp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "未対応: ${state.pendingCount}件",
+                                color = Color(0xFFFFAB40),
+                                fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            Text(
+                                if (pendingExpanded) "▲" else "▼",
+                                color = Color(0xFFFFAB40), fontSize = 12.sp,
+                            )
+                        }
+                        if (pendingExpanded && state.pendingItems.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            for (item in state.pendingItems) {
+                                val typeLabel = when (item["type"]) {
+                                    "user_message" -> "💬"
+                                    "elyth_notification" -> "🔔"
+                                    "plan_step" -> "📋"
+                                    else -> "•"
+                                }
+                                Text(
+                                    "$typeLabel ${item["content"]?.take(60) ?: ""}",
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.padding(vertical = 2.dp),
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // AIからの返信表示（最新1件）
             if (state.replies.isNotEmpty()) {
                 Box(
@@ -377,26 +770,33 @@ fun MainScreen(state: IkuState, onMenuClick: () -> Unit, onSendChat: (String) ->
             Spacer(modifier = Modifier.height(16.dp))
         }
 
-        // ダッシュボードFAB
-        FloatingActionButton(
-            onClick = { showDashboard = true },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 16.dp, bottom = 80.dp),
-            containerColor = Color(0xFF4FC3F7).copy(alpha = 0.8f),
-            contentColor = Color.Black,
-        ) {
-            Icon(Icons.Default.BarChart, "dashboard")
-        }
+    }
+}
 
-        // ダッシュボード BottomSheet
-        if (showDashboard) {
-            ModalBottomSheet(
-                onDismissRequest = { showDashboard = false },
-                sheetState = sheetState,
-                containerColor = Color(0xFF1A1A2E).copy(alpha = 0.95f),
+// ===== Dashboard Screen =====
+@Composable
+fun DashboardScreen(state: IkuState, onMenuClick: () -> Unit) {
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A1A)) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 40.dp, start = 16.dp, end = 16.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                DashboardContent(state = state)
+                IconButton(onClick = onMenuClick) {
+                    Icon(Icons.Default.Menu, "menu", tint = Color.White)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Dashboard", style = MaterialTheme.typography.titleLarge, color = Color(0xFF4FC3F7))
+            }
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+            ) {
+                item { DashboardContent(state = state) }
             }
         }
     }
@@ -409,9 +809,6 @@ fun DashboardContent(state: IkuState) {
             .fillMaxWidth()
             .padding(24.dp)
     ) {
-        Text("Dashboard", style = MaterialTheme.typography.titleMedium, color = Color(0xFF4FC3F7))
-        Spacer(modifier = Modifier.height(16.dp))
-
         DashRow("entropy", "${"%.4f".format(state.entropy)}", state.entropy)
         DashRow("energy", "${"%.1f".format(state.energy)}", state.energy / 100f)
         DashRow("pressure", "${"%.2f".format(state.pressure)}", (state.pressure / 15f).coerceIn(0f, 1f))
@@ -431,18 +828,106 @@ fun DashboardContent(state: IkuState) {
             EValueBar("E4", state.e4)
         }
 
+        // E値推移グラフ
+        if (state.eHistory.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("E-value Trend (${state.eHistory.size} cycles)", style = MaterialTheme.typography.titleSmall, color = Color.Gray)
+            Spacer(modifier = Modifier.height(8.dp))
+            EValueTrendChart(history = state.eHistory)
+        }
+
+        // Disposition
+        if (state.disposition.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("disposition", style = MaterialTheme.typography.titleSmall, color = Color.Gray)
+            Spacer(modifier = Modifier.height(8.dp))
+            for ((key, value) in state.disposition) {
+                DashRow(key, "${"%.2f".format(value)}", value.coerceIn(0f, 1f))
+            }
+        }
+
         Spacer(modifier = Modifier.height(16.dp))
         Text("self_model", style = MaterialTheme.typography.titleSmall, color = Color.Gray)
         Spacer(modifier = Modifier.height(8.dp))
         for ((key, value) in state.selfModel) {
-            Text(
-                "$key: ${value.take(80)}",
-                color = Color.White, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-                modifier = Modifier.padding(vertical = 2.dp),
-            )
+            if (key == "name") {
+                Text(
+                    "$key: $value",
+                    color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(vertical = 2.dp),
+                )
+            } else {
+                Text(
+                    key, color = Color(0xFF4FC3F7), fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                Text(
+                    value.take(300),
+                    color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp,
+                    modifier = Modifier.padding(start = 8.dp, bottom = 2.dp),
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(32.dp))
+    }
+}
+
+@Composable
+fun EValueTrendChart(history: List<List<Float>>) {
+    val colors = listOf(
+        Color(0xFF4FC3F7),  // E1 - blue
+        Color(0xFF76FF03),  // E2 - green
+        Color(0xFFFFEB3B),  // E3 - yellow
+        Color(0xFFFF6D00),  // E4 - orange
+    )
+    val labels = listOf("E1", "E2", "E3", "E4")
+
+    // ラベル行
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        labels.forEachIndexed { i, label ->
+            Text(
+                "$label ",
+                color = colors[i],
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+
+    Spacer(modifier = Modifier.height(4.dp))
+
+    // Canvas描画
+    androidx.compose.foundation.Canvas(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(120.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xFF1A1A2E))
+    ) {
+        if (history.size < 2) return@Canvas
+        val w = size.width
+        val h = size.height
+        val padding = 8f
+        val chartW = w - padding * 2
+        val chartH = h - padding * 2
+
+        for (eIdx in 0..3) {
+            val path = androidx.compose.ui.graphics.Path()
+            history.forEachIndexed { i, values ->
+                val x = padding + (i.toFloat() / (history.size - 1)) * chartW
+                val y = padding + (1f - values.getOrElse(eIdx) { 0f }.coerceIn(0f, 1f)) * chartH
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            drawPath(
+                path = path,
+                color = colors[eIdx],
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f),
+            )
+        }
     }
 }
 
@@ -502,6 +987,142 @@ fun StatusChip(label: String, value: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(value, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
         Text(label, color = Color.White.copy(alpha = 0.5f), fontSize = 10.sp)
+    }
+}
+
+// ===== Test Screen =====
+@Composable
+fun TestScreen(state: IkuState, onMenuClick: () -> Unit, onRunTool: (String, Map<String, String>) -> Unit) {
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A1A)) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 40.dp, start = 16.dp, end = 16.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onMenuClick) {
+                    Icon(Icons.Default.Menu, "menu", tint = Color.White)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("🧪 Test", style = MaterialTheme.typography.titleLarge, color = Color(0xFFFFAB40))
+            }
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+            ) {
+                item {
+                    Text(
+                        "ツールをAI経由ではなく直接実行してフローをテスト",
+                        color = Color.Gray, fontSize = 11.sp,
+                        modifier = Modifier.padding(bottom = 16.dp),
+                    )
+                }
+
+                item {
+                    TestSection("📸 カメラ (stream)") {
+                        TestButton("背面1枚 (frames=1)") {
+                            onRunTool("camera_stream", mapOf(
+                                "facing" to "back", "frames" to "1", "interval_sec" to "0.5",
+                                "intent" to "test single", "expect" to "1 jpeg"
+                            ))
+                        }
+                        TestButton("背面5枚 1秒間隔") {
+                            onRunTool("camera_stream", mapOf(
+                                "facing" to "back", "frames" to "5", "interval_sec" to "1.0",
+                                "intent" to "test stream", "expect" to "5 jpegs"
+                            ))
+                        }
+                        TestButton("背面10枚 0.5秒間隔") {
+                            onRunTool("camera_stream", mapOf(
+                                "facing" to "back", "frames" to "10", "interval_sec" to "0.5",
+                                "intent" to "test stream", "expect" to "10 jpegs"
+                            ))
+                        }
+                        TestButton("前面5枚 1秒間隔") {
+                            onRunTool("camera_stream", mapOf(
+                                "facing" to "front", "frames" to "5", "interval_sec" to "1.0",
+                                "intent" to "test stream", "expect" to "5 jpegs"
+                            ))
+                        }
+                    }
+                }
+
+                item {
+                    TestSection("💬 出力") {
+                        TestButton("output_displayテスト") {
+                            onRunTool("output_display", mapOf("content" to "テストメッセージ from test tab", "intent" to "test", "expect" to "reply appears on main"))
+                        }
+                    }
+                }
+
+                item {
+                    TestSection("🔍 記憶") {
+                        TestButton("search_memory テスト") {
+                            onRunTool("search_memory", mapOf("query" to "test", "intent" to "test search", "expect" to "results"))
+                        }
+                        TestButton("memory_store テスト") {
+                            onRunTool("memory_store", mapOf("network" to "experience", "content" to "テスト記憶 from test tab", "intent" to "test", "expect" to "stored"))
+                        }
+                    }
+                }
+
+                item {
+                    TestSection("🌸 Elyth") {
+                        TestButton("elyth_info 通知取得") {
+                            onRunTool("elyth_info", mapOf("section" to "notifications", "limit" to "5", "intent" to "test", "expect" to "notification list"))
+                        }
+                    }
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text("直近のログ (末尾10件):", color = Color.Gray, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    for (line in state.logLines.takeLast(10)) {
+                        Text(
+                            line,
+                            color = if ("[test]" in line) Color(0xFFFFAB40) else Color(0xFFAAAAAA),
+                            fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(vertical = 1.dp),
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(64.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TestSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF1A1A2E))
+            .padding(12.dp)
+    ) {
+        Text(title, color = Color(0xFFFFAB40), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(8.dp))
+        content()
+    }
+}
+
+@Composable
+fun TestButton(label: String, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Color(0xFF2A2A4A),
+            contentColor = Color.White,
+        ),
+    ) {
+        Text(label, fontSize = 13.sp)
     }
 }
 

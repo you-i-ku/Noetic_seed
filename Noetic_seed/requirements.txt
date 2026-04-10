@@ -7,3 +7,5 @@ onnxruntime
 tokenizers
 huggingface-hub
 playwright
+Pillow
+lmstudio>=1.1.0

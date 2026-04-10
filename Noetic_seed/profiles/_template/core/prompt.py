@@ -237,9 +237,15 @@ def build_prompt_execute(state: dict, ctrl: dict, candidate: dict, tools_dict: d
     elif t == "create_tool":
         example = '[TOOL:create_tool name=ツール名 code="def run(args): return str(args)" intent=目的 expect=予測]'
     elif t == "exec_code":
-        example = '[TOOL:exec_code file=sandbox/xxx.py intent=目的 expect=予測]'
+        example = '[TOOL:exec_code file=sandbox/xxx.py intent=目的 message="端末所有者に伝えたい理由" expect=予測]\n承認必須。message= はデバイス所有者が承認を判断するための説明文。'
     elif t == "self_modify":
-        example = '[TOOL:self_modify path=pref.json old="変更前" new="変更後" intent=目的 expect=予測]'
+        example = '[TOOL:self_modify path=pref.json old="変更前" new="変更後" intent=目的 message="端末所有者に伝えたい理由" expect=予測]\n承認必須。message= はデバイス所有者が承認を判断するための説明文。'
+    elif t == "camera_stream":
+        example = '[TOOL:camera_stream facing=back frames=5 interval_sec=1.0 intent=目的 message="端末所有者に撮影をお願いする理由" expect=予測]\n非同期ストリーム開始。フレームが到着するたびに視覚入力に入る。観察中も他ツールを並行実行でき、camera_stream_stop で能動停止できる。単発は frames=1。承認必須。'
+    elif t == "camera_stream_stop":
+        example = '[TOOL:camera_stream_stop intent=観察完了 expect=予測]\nアクティブなcamera_streamを停止する。観察対象を十分に把握した後に呼ぶ。'
+    elif t == "view_image":
+        example = '[TOOL:view_image path=sandbox/captures/stream_xxxx.jpg intent=何を確認したいか expect=予測]\n画像を同期で認識し、intent に沿った描写を結果として返します。'
     elif t in _X_TOOLS:
         hint = _X_ARGS_HINT.get(t, "")
         example = f"[TOOL:{t} {hint} intent=目的 expect=予測]".replace("  ", " ")
