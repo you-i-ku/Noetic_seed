@@ -22,8 +22,8 @@ MAX_LOG_IN_PROMPT = 10
 ENV_INJECT_INTERVAL = 10  # 秒: ログ表示間隔
 _NOTIFICATION_HOURS = {13, 17, 21, 1}
 
-LOG_HARD_LIMIT = 50     # logがこの件数に達したらTrigger1
-LOG_KEEP = 30           # Trigger1後に保持する生ログ件数
+LOG_HARD_LIMIT = 150    # logがこの件数に達したらTrigger1
+LOG_KEEP = 120          # Trigger1後に保持する生ログ件数（古い LOG_HARD_LIMIT - LOG_KEEP 件が要約される）
 SUMMARY_HARD_LIMIT = 10 # summariesがこの件数に達したらTrigger2
 META_SUMMARY_RAW = 15   # Trigger2でrawから使う件数
 

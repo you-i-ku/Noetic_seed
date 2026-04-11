@@ -44,7 +44,8 @@ def _render_log_entry(entry: dict, result_cap: int, intent_cap: int, with_evals:
 def _pack_log_block(log: list, budget_tok: int, with_evals: bool = False) -> str:
     """log を鮮度勾配（log-scale tier）で pack する。
     settings の log_gradient.boundaries/caps/intent_cap を使う。
-    予算オーバー時は attention_filter にフォールバック。"""
+    予算オーバー時は段階的縮退 — caps をステップごとに厳しくしてリトライ、
+    最終的に attention_filter にフォールバック。"""
     grad = prompt_budget["log_gradient"]
     boundaries = grad["boundaries"]
     caps = grad["caps"]
@@ -54,27 +55,38 @@ def _pack_log_block(log: list, budget_tok: int, with_evals: bool = False) -> str
         return "  (なし)"
 
     n = len(log)
-    lines = []
-    for i, entry in enumerate(log):
-        pos_from_end = n - 1 - i
-        cap = _tier_cap(pos_from_end, boundaries, caps)
-        lines.append(_render_log_entry(entry, cap, intent_cap, with_evals))
 
-    text = "\n".join(lines)
+    def _render_with_caps(entries: list, tier_caps: list, cap_override: int | None = None) -> str:
+        ent_n = len(entries)
+        lines = []
+        for i, entry in enumerate(entries):
+            pos_from_end = ent_n - 1 - i
+            cap = _tier_cap(pos_from_end, boundaries, tier_caps)
+            if cap_override is not None:
+                cap = min(cap, cap_override)
+            lines.append(_render_log_entry(entry, cap, intent_cap, with_evals))
+        return "\n".join(lines)
+
+    # Step 1: 通常の caps で全件レンダ
+    text = _render_with_caps(log, caps)
     if estimate_tokens(text) <= budget_tok:
         return text
 
-    # フォールバック: 予算超過時は attention_filter で件数を絞り、最小 cap で再レンダ
+    # Step 2: caps を半分に縮めて全件リトライ
+    tighter_caps = [max(50, c // 2) for c in caps]
+    text = _render_with_caps(log, tighter_caps)
+    if estimate_tokens(text) <= budget_tok:
+        return text
+
+    # Step 3: さらに 1/4 まで縮めて全件リトライ
+    even_tighter = [max(40, c // 4) for c in caps]
+    text = _render_with_caps(log, even_tighter)
+    if estimate_tokens(text) <= budget_tok:
+        return text
+
+    # Step 4: attention_filter で件数を絞り、最小 cap で再レンダ
     filtered = attention_filter(log)
-    min_cap = caps[-1]
-    filt_n = len(filtered)
-    fb_lines = []
-    for i, entry in enumerate(filtered):
-        pos_from_end = filt_n - 1 - i
-        cap = _tier_cap(pos_from_end, boundaries, caps)
-        cap = min(cap, min_cap * 4)  # 予算超過時は上限も 4 倍以内に抑制
-        fb_lines.append(_render_log_entry(entry, cap, intent_cap, with_evals))
-    return "\n".join(fb_lines)
+    return _render_with_caps(filtered, even_tighter, cap_override=caps[-1] * 2)
 
 
 def attention_filter(log: list, max_entries: int = 20) -> list:
@@ -319,8 +331,10 @@ def build_prompt_execute(state: dict, ctrl: dict, candidate: dict, tools_dict: d
         example = '[TOOL:self_modify path=pref.json old="変更前" new="変更後" intent=目的 message="外部への説明" expect=予測]\n承認必須。message= は外部が承認を判断するための説明文。'
     elif t == "camera_stream":
         example = '[TOOL:camera_stream facing=back frames=15 interval_sec=2.0 intent=目的 message="外部への撮影依頼理由" expect=予測]\n非同期ストリーム開始（例は約30秒の連続観察）。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着（ローリング最新5枚）。観察中は他ツールを並行実行可能。単発は frames=1、無制限は frames=0（camera_stream_stop で明示終了）。承認必須。'
+    elif t == "screen_peek":
+        example = '[TOOL:screen_peek frames=5 interval_sec=2.0 intent=目的 message="外部への画面キャプチャ依頼理由" expect=予測]\n端末スクリーンの非同期キャプチャ開始。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着。観察中は他ツール並行実行可。frames=0 で無制限（camera_stream_stop で終了）。毎セッション所有者の MediaProjection 許可ダイアログが出る。承認必須。'
     elif t == "camera_stream_stop":
-        example = '[TOOL:camera_stream_stop intent=観察完了 expect=予測]\nアクティブなcamera_streamを停止する。観察対象を十分に把握した後に呼ぶ。'
+        example = '[TOOL:camera_stream_stop intent=観察完了 expect=予測]\nアクティブな camera_stream / screen_peek を停止する。観察対象を十分に把握した後に呼ぶ。'
     elif t == "view_image":
         example = '[TOOL:view_image path=sandbox/captures/stream_xxxx.jpg intent=何を確認したいか expect=予測]\n画像を同期で認識し、intent に沿った描写を結果として返します。'
     elif t == "secret_read":

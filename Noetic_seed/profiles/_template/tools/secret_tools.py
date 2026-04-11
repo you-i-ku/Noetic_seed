@@ -38,7 +38,15 @@ def secret_read(args: dict) -> str:
 
     path = _secret_path(name)
     if not path.exists():
-        return f"エラー: secret '{name}' は存在しません"
+        # ファイル名風（拡張子付き）なら混同の可能性が高い → 明示的なヒント
+        if "." in name:
+            return (
+                f"該当なし: sandbox/secrets/{name}\n"
+                f"※ secret_read は sandbox/secrets/ 配下の iku 固有の秘密情報用です。\n"
+                f"※ プロファイル直下の secrets.json（auth_profiles / llm_providers）は別物で、"
+                f"auth_profile_info ツールで型情報のみ参照できます。"
+            )
+        return f"該当なし: sandbox/secrets/{name}"
     try:
         content = path.read_text(encoding="utf-8")
     except Exception as e:

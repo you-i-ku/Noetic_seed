@@ -93,11 +93,21 @@ def _read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
     # sandbox/secrets/ は secret_read 経由のみアクセス可（誤爆防止）
     _secrets_dir = (SANDBOX_DIR / "secrets").resolve()
     if str(target).startswith(str(_secrets_dir)):
-        return "エラー: sandbox/secrets/ は read_file ではアクセスできません（secret_read を使ってください）"
+        return (
+            "sandbox/secrets/ は read_file から直接参照できません。\n"
+            "secret_read ツールを使ってください:\n"
+            "  [TOOL:secret_read name=<secret名>]"
+        )
     # secrets.json 本体もガード（auth_profiles の型情報は auth_profile_info で取得、LLM キーは露出させない）
     _secrets_file = (BASE_DIR / "secrets.json").resolve()
     if target == _secrets_file:
-        return "エラー: secrets.json は read_file でアクセスできません（auth_profile_info で型情報のみ参照可、LLM キーは露出不可）"
+        return (
+            "secrets.json は read_file から直接参照できません。\n"
+            "auth_profile_info ツールで型情報を取得してください:\n"
+            "  [TOOL:auth_profile_info]                  ← 登録プロファイル名の一覧\n"
+            "  [TOOL:auth_profile_info name=<profile>]   ← 特定プロファイルのメタ情報\n"
+            "※ LLM の api_key は設計上 iku からは見えません（プロセス内で llm.py が直接使用）。"
+        )
     if not target.exists():
         # 近似マッチ（基名の完全一致）: 1件だけならそれを自動採用
         from pathlib import Path

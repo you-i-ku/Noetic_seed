@@ -81,10 +81,30 @@ object DeviceHandler {
                 }
             }
             "camera_stream_stop" -> {
-                // AI 側からの停止命令: Bridge のフラグを立てるだけ
+                // AI 側からの停止命令: Bridge のフラグを立てるだけ（camera/screen 共通）
                 CameraStreamBridge.stopRequested = true
                 Log.d("DeviceHandler", "camera_stream_stop: stopRequested flag set")
                 sendResponse(buildResponse(id, true, null, null, null))
+            }
+            "screen_peek" -> {
+                // async: ScreenCaptureActivity を launch → permission → Service で capture loop
+                val frames = params.get("frames")?.asInt ?: 5
+                val intervalSec = params.get("interval_sec")?.asFloat?.coerceIn(0.3f, 5.0f) ?: 1.0f
+                // frames = 0 or 1-30 を許可
+                val framesValidated = if (frames == 0) 0 else frames.coerceIn(1, 30)
+                scope.launch {
+                    Log.d("DeviceHandler", "screen_peek (async): frames=$framesValidated interval=$intervalSec")
+                    val intent = android.content.Intent(context, ScreenCaptureActivity::class.java).apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        putExtra(ScreenCaptureActivity.EXTRA_FRAMES, framesValidated)
+                        putExtra(ScreenCaptureActivity.EXTRA_INTERVAL_SEC, intervalSec)
+                    }
+                    try {
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        Log.e("DeviceHandler", "ScreenCaptureActivity 起動失敗", e)
+                    }
+                }
             }
             else -> {
                 sendResponse(buildResponse(id, false, null, null, "unknown action: $action"))

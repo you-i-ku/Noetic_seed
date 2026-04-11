@@ -182,6 +182,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        // Foreground Service を早めに起動（バックグラウンド動作のため）
+        IkuMonitorService.setContext(this)
+        IkuMonitorService.startIfNeeded(this)
+
         // ナビゲーションバーを隠す（スワイプで一時表示）
         val controller = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
         controller.hide(androidx.core.view.WindowInsetsCompat.Type.navigationBars())
