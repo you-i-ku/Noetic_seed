@@ -289,3 +289,67 @@ def _screen_peek(args) -> str:
         f"最初のフレーム観察: {description}\n"
         f"観察は継続中（後続フレームは次サイクル以降で視覚入力に入る）。camera_stream_stop で能動停止できます。"
     )
+
+
+def _mic_record(args) -> str:
+    """端末のマイク経由で短時間録音し、音声書き起こし + 環境音分類を返す。
+    view_image / 旧 camera_capture と同じ完全同期パターン。
+    AI のサイクル内で結果が確定するので E 値評価が機能する。
+
+    動作:
+    - 承認ゲート (approval)
+    - Android に device_request 送信、応答（base64 WAV）を同期で待つ
+    - WAV を sandbox/audio/ に保存
+    - core.audio.analyze_audio で whisper + YAMNet を実行
+    - 結果文字列を返す
+
+    引数:
+    - duration_sec: 録音時間（1.0-30.0 default 5.0）
+    - language: Whisper 言語ヒント（"ja"/"en" 等、未指定なら自動検出）
+    - intent / message: 承認プレビュー用
+    """
+    try:
+        duration_sec = float(args.get("duration_sec", "5.0"))
+    except (ValueError, TypeError):
+        duration_sec = 5.0
+    if not (1.0 <= duration_sec <= 30.0):
+        return "エラー: duration_sec は 1.0-30.0 の範囲で指定してください"
+
+    language = (args.get("language", "") or "").strip() or None
+
+    summary = f"duration={duration_sec:.1f}s" + (f" lang={language}" if language else "")
+    preview = _build_approval_preview("mic_record", summary, args)
+    if not request_approval("mic_record", preview, timeout_sec=60):
+        return "キャンセル: 録音は承認されませんでした"
+
+    # Android にリクエスト（同期、応答待ち）
+    # タイムアウトは録音時間 + 余裕（録音準備 + 送信 + 余裕）
+    timeout = int(duration_sec + 15)
+    response = request_device("mic_record", {"duration_sec": duration_sec}, timeout_sec=timeout)
+    if not response or not response.get("success"):
+        err = (response or {}).get("error", "不明なエラー")
+        return f"録音失敗: {err}"
+
+    audio_b64 = response.get("data", "")
+    if not audio_b64:
+        return "録音失敗: data が空です"
+
+    # WAV を sandbox/audio/ に保存
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    wav_path = AUDIO_DIR / f"mic_{ts}.wav"
+    try:
+        wav_path.write_bytes(base64.b64decode(audio_b64))
+    except Exception as e:
+        return f"WAV 保存失敗: {e}"
+
+    # 解析
+    try:
+        from core.audio import analyze_audio, format_audio_result
+        result = analyze_audio(str(wav_path), language=language)
+    except Exception as e:
+        return f"音声解析失敗: {type(e).__name__}: {e}"
+
+    rel = wav_path.relative_to(BASE_DIR).as_posix()
+    formatted = format_audio_result(result, duration_sec)
+    return f"{formatted}\n保存先: {rel}"

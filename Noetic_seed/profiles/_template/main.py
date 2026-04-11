@@ -30,6 +30,7 @@ def _bootstrap_venv():
             "httpx", "psutil", "numpy",
             "sqlalchemy", "aiosqlite",
             "onnxruntime", "tokenizers", "huggingface-hub",
+            "faster-whisper", "soundfile",  # mic_record 用
         ]
         print(f"[bootstrap] 依存ライブラリをインストール中: {', '.join(_deps)}")
         subprocess.run([str(_pip), "install", "--quiet"] + _deps, check=True)
@@ -243,6 +244,22 @@ def main():
                     _rline = f"  [test] → {str(_tres)[:200]}"
                     print(_rline)
                     broadcast_log(_rline)
+                    # テストタブ経由でも結果を state.log に積む（AI のコンテキストに入れる）
+                    # type="test" でマーク、intent には [test] プレフィックスを付けて出処を明示
+                    state = load_state()
+                    _test_id = f"{state.get('session_id','?')}_test{int(time.time()*1000)%100000}"
+                    _test_intent = _ta.get("intent", "").strip()
+                    _test_entry = {
+                        "id": _test_id,
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "tool": _tn,
+                        "type": "test",
+                        "intent": f"[test] {_test_intent}" if _test_intent else "[test] テストタブからの実行",
+                        "result": str(_tres),
+                    }
+                    _archive_entries([_test_entry])
+                    state["log"].append(_test_entry)
+                    save_state(state)
                 except Exception as _te:
                     _eline = f"  [test] エラー: {_te}"
                     print(_eline)

@@ -21,7 +21,9 @@ def _list_files(path: str) -> str:
     if not str(target).startswith(str(BASE_DIR.resolve())):
         return "エラー: このツールは特定のファイルにしか干渉できません"
     if not target.exists():
-        return f"エラー: {path} は存在しません"
+        # read_file と同じ tiered framing を使う（タイポ救済）
+        similar = _find_similar_files(path)
+        return _format_not_found(path, similar)
     items = []
     for item in sorted(target.iterdir()):
         if _is_hidden(item.name):
@@ -131,21 +133,37 @@ def _read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
         return f"エラー: {e}"
 
 def _view_image(args: dict) -> str:
-    """画像ファイルを視覚入力として取り込み、その場でLLMに描写させて結果として返す。
+    """画像を視覚入力として取り込み、その場でLLMに描写させて結果として返す。
     同期実行: view_imageを呼んだサイクル内で「見た結果」が得られるのでE値評価が機能する。
-    プロファイルディレクトリ内のjpg/png/webpが対象。"""
+    対象: プロファイル内ローカル画像 または http(s) URL の画像。
+    対応形式: jpg/png/webp"""
+    from tools.url_fetch import is_url, fetch_to_file
+    from core.config import SANDBOX_DIR
+
     path = args.get("path", "").strip()
     if not path:
-        return "エラー: path= が必要です"
-    target = (BASE_DIR / path).resolve()
-    if not str(target).startswith(str(BASE_DIR.resolve())):
-        return "エラー: プロファイル外のファイルは対象外です"
-    if not target.exists():
-        return f"エラー: {path} が見つかりません"
-    if target.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
-        return "エラー: JPG/PNG/WebP のみ対応"
+        return "エラー: path= が必要です（ローカル相対パスまたは http(s) URL）"
 
-    # 同期で LLM を呼んで画像を描写させる（結果がサイクルのログに残る）
+    fetched_meta = None
+    if is_url(path):
+        # URL: ダウンロードして sandbox/captures/url_cache/ に保存
+        try:
+            cache_dir = SANDBOX_DIR / "captures" / "url_cache"
+            saved, fetched_meta = fetch_to_file(path, cache_dir, kind="image")
+            target = saved.resolve()
+        except Exception as e:
+            return f"エラー: URL取得失敗: {type(e).__name__}: {e}"
+    else:
+        target = (BASE_DIR / path).resolve()
+        if not str(target).startswith(str(BASE_DIR.resolve())):
+            return "エラー: プロファイル外のファイルは対象外です"
+        if not target.exists():
+            similar = _find_similar_files(path)
+            return _format_not_found(path, similar)
+        if target.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+            return "エラー: JPG/PNG/WebP のみ対応"
+
+    # 同期で LLM を呼んで画像を描写させる
     intent = args.get("intent", "").strip()
     if intent:
         describe_prompt = (
@@ -167,8 +185,70 @@ def _view_image(args: dict) -> str:
     except Exception as e:
         return f"エラー: 画像認識失敗: {e}"
 
+    if fetched_meta:
+        return (
+            f"画像で見えたもの ({path}, {fetched_meta['bytes']} bytes, {fetched_meta['content_type']}):\n"
+            f"{description}"
+        )
     rel_path = str(target.relative_to(BASE_DIR)).replace("\\", "/")
     return f"画像で見えたもの ({rel_path}):\n{description}"
+
+
+def _listen_audio(args: dict) -> str:
+    """既存の音声ファイルまたは URL から音声を「聞きに行く」。
+    view_image の音声版。同期実行: 呼んだサイクル内で speech + ambient が結果として返る。
+    対応形式: WAV/MP3/M4A/OGG/FLAC/AAC/WEBM (PyAV 経由でデコード)。
+
+    引数:
+    - path: ローカル相対パス（プロファイル内）または http(s) URL
+    - language: Whisper 言語ヒント（"ja"/"en"等、未指定なら自動）
+    """
+    from tools.url_fetch import is_url, fetch_to_file
+    from core.config import SANDBOX_DIR
+
+    path = args.get("path", "").strip()
+    if not path:
+        return "エラー: path= が必要です（ローカル相対パスまたは http(s) URL）"
+    language = (args.get("language", "") or "").strip() or None
+
+    fetched_meta = None
+    if is_url(path):
+        try:
+            cache_dir = SANDBOX_DIR / "audio" / "url_cache"
+            saved, fetched_meta = fetch_to_file(path, cache_dir, kind="audio")
+            target = saved.resolve()
+        except Exception as e:
+            return f"エラー: URL取得失敗: {type(e).__name__}: {e}"
+    else:
+        target = (BASE_DIR / path).resolve()
+        if not str(target).startswith(str(BASE_DIR.resolve())):
+            return "エラー: プロファイル外のファイルは対象外です"
+        if not target.exists():
+            similar = _find_similar_files(path)
+            return _format_not_found(path, similar)
+        if target.suffix.lower() not in (".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm"):
+            return "エラー: 対応形式は WAV/MP3/M4A/OGG/FLAC/AAC/WEBM のみ"
+
+    try:
+        from core.audio import analyze_audio, format_audio_result
+        result = analyze_audio(str(target), language=language)
+    except Exception as e:
+        return f"エラー: 音声解析失敗: {type(e).__name__}: {e}"
+
+    # ファイルの長さを av で取得（メタ表示用）
+    try:
+        import av
+        with av.open(str(target)) as container:
+            stream = container.streams.audio[0]
+            duration_sec = float(stream.duration * stream.time_base) if stream.duration else 0.0
+    except Exception:
+        duration_sec = 0.0
+
+    formatted = format_audio_result(result, duration_sec)
+    if fetched_meta:
+        return f"{formatted}\nソース: {path} ({fetched_meta['bytes']} bytes, {fetched_meta['content_type']})"
+    rel = str(target.relative_to(BASE_DIR)).replace("\\", "/")
+    return f"{formatted}\nソース: {rel}"
 
 
 def _write_file(path: str, content: str) -> str:

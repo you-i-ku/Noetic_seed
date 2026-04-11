@@ -86,6 +86,54 @@ object DeviceHandler {
                 Log.d("DeviceHandler", "camera_stream_stop: stopRequested flag set")
                 sendResponse(buildResponse(id, true, null, null, null))
             }
+            "mic_record" -> {
+                // MicRecordActivity を launch して PIP + 波形 + 停止ボタン UI で録音
+                // 完了 → MicRecordBridge.onResult 経由で結果を受け取り device_response 返却
+                val durationSec = params.get("duration_sec")?.asFloat?.coerceIn(1.0f, 30.0f) ?: 5.0f
+                CoroutineScope(Dispatchers.Main).launch {
+                    Log.d("DeviceHandler", "mic_record (Activity): duration=${durationSec}s")
+                    if (!MicRecorder.hasPermission(context)) {
+                        sendResponse(buildResponse(id, false, null, null, "RECORD_AUDIO permission missing"))
+                        return@launch
+                    }
+                    // Bridge にコールバック登録 → Activity 起動
+                    MicRecordBridge.reset()
+                    MicRecordBridge.onResult = { wavBytes, actualDurationSec, error ->
+                        if (wavBytes == null) {
+                            sendResponse(buildResponse(id, false, null, null, error ?: "録音失敗"))
+                        } else {
+                            val b64 = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
+                            val metaObj = JsonObject().apply {
+                                addProperty("requested_duration_sec", durationSec)
+                                addProperty("actual_duration_sec", actualDurationSec)
+                                addProperty("sample_rate", 16000)
+                                addProperty("channels", 1)
+                                addProperty("format", "wav_pcm16")
+                                addProperty("bytes", wavBytes.size)
+                            }
+                            val resp = JsonObject().apply {
+                                addProperty("type", "device_response")
+                                addProperty("id", id)
+                                addProperty("success", true)
+                                addProperty("data", b64)
+                                add("meta", metaObj)
+                            }
+                            sendResponse(resp)
+                        }
+                    }
+                    val activityIntent = android.content.Intent(context, MicRecordActivity::class.java).apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        putExtra(MicRecordActivity.EXTRA_DURATION_SEC, durationSec)
+                    }
+                    try {
+                        context.startActivity(activityIntent)
+                    } catch (e: Exception) {
+                        Log.e("DeviceHandler", "MicRecordActivity 起動失敗", e)
+                        MicRecordBridge.onResult = null
+                        sendResponse(buildResponse(id, false, null, null, "Activity 起動失敗: ${e.message}"))
+                    }
+                }
+            }
             "screen_peek" -> {
                 // async: ScreenCaptureActivity を launch → permission → Service で capture loop
                 val frames = params.get("frames")?.asInt ?: 5

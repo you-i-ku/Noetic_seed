@@ -259,6 +259,20 @@ fun IkuApp(vm: IkuViewModel = viewModel()) {
         }
     }
 
+    // マイク権限を起動時にプリリクエスト（mic_record は IkuMonitorService の IO スレッドで
+    // 動くので Activity 経由でのリクエストができない。先に取っておく）
+    val micPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+    LaunchedEffect(Unit) {
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     val state by vm.state.collectAsState()
     var hasConnected by remember { mutableStateOf(false) }
     if (state.connected) hasConnected = true
@@ -1231,6 +1245,33 @@ fun TestScreen(state: IkuState, onMenuClick: () -> Unit, onRunTool: (String, Map
                             onRunTool("camera_stream", mapOf(
                                 "facing" to "front", "frames" to "5", "interval_sec" to "1.0",
                                 "intent" to "test stream", "expect" to "5 jpegs"
+                            ))
+                        }
+                    }
+                }
+
+                item {
+                    TestSection("🎙 マイク") {
+                        TestButton("3秒録音") {
+                            onRunTool("mic_record", mapOf(
+                                "duration_sec" to "3.0",
+                                "intent" to "test mic 3s",
+                                "message" to "テスト録音"
+                            ))
+                        }
+                        TestButton("5秒録音 (日本語)") {
+                            onRunTool("mic_record", mapOf(
+                                "duration_sec" to "5.0",
+                                "language" to "ja",
+                                "intent" to "test mic 5s ja",
+                                "message" to "テスト録音"
+                            ))
+                        }
+                        TestButton("10秒録音 (環境音)") {
+                            onRunTool("mic_record", mapOf(
+                                "duration_sec" to "10.0",
+                                "intent" to "test ambient 10s",
+                                "message" to "テスト録音"
                             ))
                         }
                     }

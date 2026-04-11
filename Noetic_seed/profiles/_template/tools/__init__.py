@@ -1,12 +1,12 @@
 """ツール定義・段階解放テーブル"""
-from tools.builtin import _list_files, _read_file, _write_file, _update_self, _wait_or_dismiss, _view_image
+from tools.builtin import _list_files, _read_file, _write_file, _update_self, _wait_or_dismiss, _view_image, _listen_audio
 from tools.web import _web_search, _fetch_url
 from tools.x_tools import _x_timeline, _x_search, _x_get_notifications, _x_post, _x_reply, _x_quote, _x_like
 from tools.elyth_tools import _elyth_post, _elyth_reply, _elyth_like, _elyth_follow, _elyth_info, _elyth_get, _elyth_mark_read
 from tools.memory_tool import _search_memory, _tool_memory_store, _tool_memory_update, _tool_memory_forget, _tool_search_memory
 from tools.sandbox import _create_tool, _exec_code, _self_modify, _run_ai_tool, AI_CREATED_TOOLS, _DANGEROUS_PATTERNS
 from tools.ui_tools import _output_display
-from tools.device_tools import _camera_stream, _camera_stream_stop, _screen_peek
+from tools.device_tools import _camera_stream, _camera_stream_stop, _screen_peek, _mic_record
 from tools.http_tool import http_request
 from tools.secret_tools import secret_read, secret_write
 from tools.auth_tools import auth_profile_info
@@ -45,7 +45,9 @@ TOOLS = {
     "camera_stream":     {"desc": "端末のカメラ経由で連続撮影を非同期に開始する。最初のフレームは実行時に視覚入力（描写付きで返る）。後続フレームはローリング最新5枚として次サイクル以降の視覚入力に到着。観察中も他ツールを並行実行可能（read_file/reflect/memory_store等）。引数: [facing=back/front] [frames=枚数 0=無制限/1-30 default=5] [interval_sec=間隔 0.3-5.0 default=1.0] [message=外部への撮影依頼理由]。frames=0 は camera_stream_stop で明示終了（Android側絶対上限10分）、frames=1 は単発。承認必須。", "func": _camera_stream},
     "camera_stream_stop": {"desc": "アクティブな camera_stream / screen_peek を停止する。観察対象を把握した後、リソース節約のために呼ぶ。引数なし", "func": _camera_stream_stop},
     "screen_peek":       {"desc": "端末のスクリーンを非同期にキャプチャする（camera_streamの画面版）。最初のフレームは実行時に視覚入力、後続は次サイクル以降の視覚入力に到着（ローリング最新5枚）。観察中も他ツールを並行実行可能。引数: [frames=枚数 0=無制限/1-30 default=5] [interval_sec=間隔 0.3-5.0 default=1.0] [message=外部への画面キャプチャ依頼理由]。frames=0 は camera_stream_stop で明示終了（Android側絶対上限10分）。毎セッション MediaProjection 許可ダイアログが出る。承認必須。", "func": _screen_peek},
-    "view_image":   {"desc": "プロファイル内の画像を同期で認識し、描写を結果として返す。camera_streamの結果を見直したり、任意の画像を能動的に注視する。intent=目的を指定するとその観点で描写される。引数: path=画像パス（jpg/png/webp）", "func": _view_image},
+    "mic_record":        {"desc": "端末のマイク経由で短時間録音し、音声書き起こし（faster-whisper）+ 環境音分類（YAMNet 521クラス）の両方を結果として返す。完全同期実行（view_imageと同じ）。引数: [duration_sec=秒 1.0-30.0 default=5.0] [language=ja/en等 未指定なら自動検出] [message=外部への録音依頼理由]。承認必須。", "func": _mic_record},
+    "view_image":   {"desc": "画像を同期で認識し、描写を結果として返す。camera_streamの結果を見直したり、任意の画像を能動的に注視する。intent=目的を指定するとその観点で描写される。引数: path=画像パス（プロファイル内相対パスまたは http(s) URL、jpg/png/webp）", "func": _view_image},
+    "listen_audio": {"desc": "既存の音声ファイルまたは URL から音声を聞きに行く。view_image の音声版。同期実行で speech 書き起こし + ambient 環境音分類を返す。引数: path=音声パス（プロファイル内相対パスまたは http(s) URL、wav/mp3/m4a/ogg/flac/aac/webm 対応） [language=ja/en等 未指定なら自動]", "func": _listen_audio},
     "http_request": {"desc": "任意URLに HTTP リクエストを送る汎用ツール。GET以外（POST/PUT/DELETE/PATCH）は承認必要。引数: url=URL [method=GET/POST/...] [headers=JSON] [params=JSON] [body=JSON文字列 or 辞書] [auth=auth_profile名] [timeout=秒 default=60]", "func": http_request},
     "secret_read":  {"desc": "sandbox/secrets/ に保存された秘密情報を読む（承認不要）。引数: name=secret名【name= を使う。read_file の path= と混同しないこと】", "func": secret_read},
     "secret_write": {"desc": "sandbox/secrets/ に秘密情報を書き込む（承認必要）。引数: name=secret名 content=内容 intent=目的 [message=外部への説明]", "func": secret_write},
@@ -55,9 +57,9 @@ TOOLS = {
 # === ツール段階解放テーブル ===
 _LV3_TOOLS = set(TOOLS.keys()) - {"create_tool", "exec_code", "self_modify"}
 LEVEL_TOOLS = {
-    0: {"list_files", "read_file", "wait", "update_self", "output_display", "view_image"},
-    1: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image"},
-    2: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "web_search", "fetch_url", "output_display", "view_image"},
+    0: {"list_files", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio"},
+    1: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio"},
+    2: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "web_search", "fetch_url", "output_display", "view_image", "listen_audio"},
     3: _LV3_TOOLS,
     4: _LV3_TOOLS | {"create_tool"},
     5: set(TOOLS.keys()) - {"self_modify"},
