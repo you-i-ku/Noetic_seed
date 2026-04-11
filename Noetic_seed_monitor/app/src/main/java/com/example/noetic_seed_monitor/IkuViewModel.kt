@@ -25,6 +25,18 @@ data class ProfileInfo(
     val energy: Float = 50f,
 )
 
+data class LlmProviderInfo(
+    val provider: String,
+    val baseUrl: String = "",
+    val lastModel: String = "",
+    val hasKey: Boolean = false,
+)
+
+data class LlmActiveConfig(
+    val provider: String = "",
+    val model: String = "",
+)
+
 data class IkuState(
     val connected: Boolean = false,
     val entropy: Float = 0.65f,
@@ -49,6 +61,9 @@ data class IkuState(
     val profileSelected: Boolean = false,
     val profileStarted: Boolean = false,  // WS再接続後、profileのmain.pyから最初のメッセージが来たか
     val pendingCameraCapture: Boolean = false,
+    val llmProviders: List<LlmProviderInfo> = emptyList(),
+    val llmActive: LlmActiveConfig = LlmActiveConfig(),
+    val llmSetResult: String? = null,  // set_llm の結果メッセージ（成功/失敗）
     val error: String? = null,
 )
 
@@ -380,6 +395,41 @@ class IkuViewModel : ViewModel() {
                     _state.value = current.copy(logLines = lines.takeLast(maxLogLines))
                 }
             }
+            "llm_providers_list" -> {
+                val arr = json.getAsJsonArray("providers")
+                val providers = arr?.map { item ->
+                    val obj = item.asJsonObject
+                    LlmProviderInfo(
+                        provider = obj.get("provider")?.asString ?: "",
+                        baseUrl = obj.get("base_url")?.asString ?: "",
+                        lastModel = obj.get("last_model")?.asString ?: "",
+                        hasKey = obj.get("has_key")?.asBoolean ?: false,
+                    )
+                } ?: emptyList()
+                val activeObj = json.getAsJsonObject("active")
+                val active = if (activeObj != null) {
+                    LlmActiveConfig(
+                        provider = activeObj.get("provider")?.asString ?: "",
+                        model = activeObj.get("model")?.asString ?: "",
+                    )
+                } else {
+                    current.llmActive
+                }
+                _state.value = current.copy(llmProviders = providers, llmActive = active)
+            }
+            "set_llm_result" -> {
+                val ok = json.get("ok")?.asBoolean ?: false
+                val msg = if (ok) {
+                    val p = json.get("provider")?.asString ?: ""
+                    val m = json.get("model")?.asString ?: ""
+                    "設定完了: $p / $m（次サイクルから反映）"
+                } else {
+                    "エラー: ${json.get("error")?.asString ?: "unknown"}"
+                }
+                _state.value = current.copy(llmSetResult = msg)
+                // 設定完了後、最新の状態をリフレッシュ
+                if (ok) requestLlmProviders()
+            }
         }
     }
 
@@ -424,6 +474,28 @@ class IkuViewModel : ViewModel() {
             profileSelected = true,
             profileStarted = false,  // 再接続待ち
         )
+    }
+
+    fun requestLlmProviders() {
+        val msg = com.google.gson.JsonObject().apply {
+            addProperty("type", "get_llm_providers")
+        }
+        wsClient?.send(msg)
+    }
+
+    fun setLlm(provider: String, model: String, apiKey: String = "", baseUrl: String = "") {
+        val msg = com.google.gson.JsonObject().apply {
+            addProperty("type", "set_llm")
+            addProperty("provider", provider)
+            addProperty("model", model)
+            addProperty("api_key", apiKey)
+            addProperty("base_url", baseUrl)
+        }
+        wsClient?.send(msg)
+    }
+
+    fun clearLlmSetResult() {
+        _state.value = _state.value.copy(llmSetResult = null)
     }
 
     fun sendApproval(id: String, approved: Boolean) {

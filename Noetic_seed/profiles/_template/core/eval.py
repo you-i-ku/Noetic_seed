@@ -12,6 +12,12 @@ EXTERNAL_ACTION_TOOLS = {
     "x_post", "x_reply", "x_quote", "x_like",
 }
 
+# 内省系ツール（外界作用はないが繰り返し判定の対象にする）
+INTERNAL_REFLECT_TOOLS = {"reflect"}
+
+# 意味的重複ペナルティをかけるツール全体
+ACTIONABLE_TOOLS = EXTERNAL_ACTION_TOOLS | INTERNAL_REFLECT_TOOLS
+
 
 def _calc_e4(current_intent: str, current_result: str, recent_entries: list, n: int = 5) -> str:
     """現在の(intent+result)が直近n件と異なるほど高い（反復=低、新規性=高）。"""
@@ -149,22 +155,20 @@ def calc_state_change_bonus(state_before: dict, state_after: dict) -> float:
     if new_fr - old_fr:
         changes += 0.5  # 新しいファイルを読んだ
 
-    old_plan = state_before.get("plan", {}).get("goal", "")
-    new_plan = state_after.get("plan", {}).get("goal", "")
-    if new_plan != old_plan:
-        changes += 1.0  # 計画が変わった
-
     return min(1.0, changes * 0.3)
 
 
 def calc_effective_change(tool_names: list[str], tool_result: str,
-                          state_before: dict, state_after: dict) -> float:
+                          state_before: dict, state_after: dict,
+                          current_intent: str = "") -> float:
     """行動の実質的な情報変化量を測定する。
     変化ゼロの行動（同じkeyに同じようなvalue書き込み等）を正しくゼロ評価する。
+    current_intent: 今回の行動の intent。過去の同ツール呼び出し intent との
+    embedding 類似度で「意味的な繰り返し」を検出するのに使う。
     戻り値: 0.0（変化なし）〜 1.5（大きな変化）"""
     score = 0.0
 
-    # --- self model の変化量（value差分で測定）---
+    # --- self model の変化量（value差分で測定、微小更新は無視）---
     old_self = state_before.get("self", {})
     new_self = state_after.get("self", {})
     for key in new_self:
@@ -175,7 +179,9 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
         elif str(new_self[key]) != str(old_self[key]):
             old_v, new_v = str(old_self[key]), str(new_self[key])
             dist = 1.0 - SequenceMatcher(None, old_v, new_v).ratio()
-            score += dist * 0.5  # 既存keyの更新: 差分が大きいほど高い
+            # 15%未満の微小差分はカウントしない（reflectのdisposition_delta等を弾く）
+            if dist >= 0.15:
+                score += dist * 0.5
 
     # --- ファイル操作 ---
     old_fw = set(state_before.get("files_written", []))
@@ -190,47 +196,130 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
     elif any(n == "read_file" for n in tool_names):
         score += 0.1  # 既読再読
 
-    # --- 外界への作用（システム側意味判定: 相手×新規性。LLM不使用）---
+    # --- 行動の意味的新規性（外界作用 or 内省の繰り返し検出）---
+    # intent + result を過去の同ツール呼び出しと embedding 類似度で比較
+    # 改良: window を広げ、result snippet も比較対象に含め、非線形で中程度類似もペナルティ化
+    log = state_after.get("log", [])
     for tn in tool_names:
+        if tn not in ACTIONABLE_TOOLS:
+            continue
+
+        # ① 相手がいるか（外界作用のみ適用、内省は常に 1.0）
         if tn in EXTERNAL_ACTION_TOOLS:
-            # ① 相手がいるか（構造判定）
             pending = state_after.get("pending", [])
             has_addressee = (
-                any(p.get("type") == "user_message" for p in pending) or
+                any(p.get("type") == "external_message" for p in pending) or
                 state_after.get("unresponded_external_count", 0) > 0
             )
             addressee_factor = 1.0 if has_addressee else 0.15
+        else:
+            addressee_factor = 1.0
 
-            # ② 内容の新規性（embedding類似度。LLM不使用）
-            log = state_after.get("log", [])
-            recent_same = [str(e.get("result", ""))[:300]
-                           for e in log[-10:] if e.get("tool") == tn]
-            content_novelty = 1.0
-            if recent_same and _vector_ready:
-                try:
-                    texts = [tool_result[:300]] + recent_same[-3:]
-                    vecs = _embed_sync(texts)
-                    if vecs and len(vecs) >= 2:
-                        sims = [cosine_similarity(vecs[0], vecs[i + 1])
-                                for i in range(len(vecs) - 1)]
-                        content_novelty = max(0.0, 1.0 - max(sims))
-                except Exception:
-                    pass
+        # ② 意図の新規性: 過去30件から同ツールを含むチェーンの intent + result を抽出
+        #    reflect のように intent が毎回違う表現でも、OPINIONS (result) が似ていれば
+        #    繰り返しとして検出される
+        recent_texts = []
+        for e in log[-30:]:
+            past_chain = str(e.get("tool", "")).split("+")
+            if tn in past_chain and e.get("intent"):
+                # intent + result snippet で reflect の OPINIONS も比較対象に含める
+                combined = f"{str(e['intent'])[:300]} {str(e.get('result', ''))[:200]}"
+                recent_texts.append(combined[:500])
 
-            score += 0.7 * addressee_factor * content_novelty
-            break
+        content_novelty = 1.0
+        if recent_texts and current_intent and _vector_ready:
+            try:
+                # 現在の行動: 今の intent + 実行結果（reflect なら OPINIONS が tool_result に入ってる）
+                current_text = f"{current_intent[:300]} {tool_result[:200]}"[:500]
+                texts = [current_text] + recent_texts[-5:]
+                vecs = _embed_sync(texts)
+                if vecs and len(vecs) >= 2:
+                    sims = [cosine_similarity(vecs[0], vecs[i + 1])
+                            for i in range(len(vecs) - 1)]
+                    max_sim = max(sims)
+                    # 非線形: sqrt で中程度類似（sim=0.5 等）でも確実にペナルティが効く
+                    # sim=0.9 → novelty=0.05 (強抑制)
+                    # sim=0.7 → novelty=0.16 (中抑制)
+                    # sim=0.5 → novelty=0.29 (弱抑制)
+                    # sim=0.3 → novelty=0.45 (僅か抑制)
+                    content_novelty = max(0.0, 1.0 - max_sim ** 0.5)
+            except Exception:
+                pass
+
+        score += 0.7 * addressee_factor * content_novelty
+        break  # 複数の actionable がチェーンにあっても1回だけ加算
 
     # --- エラー（変化なし）---
     if "エラー" in tool_result:
         score *= 0.2
 
-    # --- 計画変更 ---
-    old_plan = state_before.get("plan", {}).get("goal", "")
-    new_plan = state_after.get("plan", {}).get("goal", "")
-    if new_plan != old_plan and new_plan:
-        score += 0.8
-
     return min(1.5, score)
+
+
+def update_unresolved_intents(state: dict, intent: str, e3_str: str, cycle_id: int) -> None:
+    """E3から予測誤差 gap=1-E3 を計算し、unresolved_intent として pending に追加。
+    rate-distortion 的: 閾値なし、動的容量 N で上位gap順に自動選別。
+    semantic merge: 既存 unresolved と類似度 > 0.72 なら attempts を加算してマージ。
+    N = max(3, min(20, len(log)//5)) で log 成長に応じて枠が広がる。"""
+    import time
+    from datetime import datetime
+
+    if not intent or not e3_str:
+        return
+
+    m = re.search(r'(\d+)', str(e3_str))
+    if not m:
+        return
+    e3_val = int(m.group(1)) / 100.0
+    gap = max(0.0, 1.0 - e3_val)
+
+    pending = state.setdefault("pending", [])
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 既存 unresolved_intent との意味的マージ
+    merged = False
+    unresolved = [p for p in pending if p.get("type") == "unresolved_intent"]
+    if unresolved and _vector_ready:
+        try:
+            texts = [intent[:200]] + [u.get("content", "")[:200] for u in unresolved]
+            vecs = _embed_sync(texts)
+            if vecs and len(vecs) == len(texts):
+                for i, u in enumerate(unresolved):
+                    sim = cosine_similarity(vecs[0], vecs[i + 1])
+                    if sim > 0.72:
+                        u["attempts"] = u.get("attempts", 1) + 1
+                        u["last_cycle"] = cycle_id
+                        u["gap"] = gap  # 最新の gap で上書き（回復したら低くなる→自然に選別外）
+                        u["timestamp"] = now_ts
+                        u["priority"] = gap * 3.0
+                        merged = True
+                        break
+        except Exception:
+            pass
+
+    if not merged:
+        pending.append({
+            "type": "unresolved_intent",
+            "id": f"uri_{cycle_id:04d}_{int(time.time() * 1000) % 10000}",
+            "content": intent[:200],
+            "gap": gap,
+            "attempts": 1,
+            "origin_cycle": cycle_id,
+            "last_cycle": cycle_id,
+            "timestamp": now_ts,
+            "priority": gap * 3.0,
+        })
+
+    # 動的容量: log 成長で枠が広がる。gap 上位 N のみ保持
+    log_count = len(state.get("log", []))
+    n_cap = max(3, min(20, log_count // 5))
+    unresolved_now = [p for p in pending if p.get("type") == "unresolved_intent"]
+    unresolved_now.sort(key=lambda p: -p.get("gap", 0.0))
+    keep_ids = {u["id"] for u in unresolved_now[:n_cap]}
+    state["pending"] = [
+        p for p in pending
+        if p.get("type") != "unresolved_intent" or p.get("id") in keep_ids
+    ]
 
 
 def apply_effective_change_to_e2(e2_raw: float, effective_change: float) -> float:

@@ -51,7 +51,8 @@ import java.text.SimpleDateFormat
 
 class MainActivity : ComponentActivity() {
 
-    private val vm: IkuViewModel by viewModels()
+    private val vm: IkuViewModel by
+    viewModels()
 
     // 撮影中の一時ファイル（TakePicture は URI に直接書く）
     private var pendingCameraFile: java.io.File? = null
@@ -231,7 +232,9 @@ fun entropyToColor(entropy: Float): Color {
 }
 
 // ===== Navigation =====
-enum class Screen { Main, Dashboard, Terminal, Test }
+// Main/Dashboard/Terminal/Test は HorizontalPager の4ページ
+// Settings は独立画面（Pager とは別経路、ドロワー経由でのみ到達）
+enum class Screen { Main, Dashboard, Terminal, Test, Settings }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -253,13 +256,38 @@ fun IkuApp(vm: IkuViewModel = viewModel()) {
     var hasConnected by remember { mutableStateOf(false) }
     if (state.connected) hasConnected = true
 
+    // プロファイル選択 → 起動前に LLM 設定を経由させるための中間状態
+    var pendingProfileName by remember { mutableStateOf<String?>(null) }
+    // プロファイル選択確定後はクリア（再接続時に古い値を引きずらないため）
+    LaunchedEffect(state.profileSelected) {
+        if (state.profileSelected) pendingProfileName = null
+    }
+
     when {
         !hasConnected -> ConnectScreen(onConnect = { url, token -> vm.connect(url, token) })
         !state.profileSelected -> {
-            if (state.profiles.isNotEmpty()) {
+            val pending = pendingProfileName
+            if (pending != null) {
+                // プロファイル選択後の LLM 設定画面
+                PreLaunchConfigScreen(
+                    profileName = pending,
+                    state = state,
+                    onRequestProviders = { vm.requestLlmProviders() },
+                    onCancel = { pendingProfileName = null },
+                    onConfirm = { provider, model, apiKey, baseUrl ->
+                        // まず LLM 設定を保存、続けてプロファイル起動
+                        vm.setLlm(provider, model, apiKey, baseUrl)
+                        vm.selectProfile(pending)
+                    },
+                )
+            } else if (state.profiles.isNotEmpty()) {
                 ProfileSelectScreen(
                     profiles = state.profiles,
-                    onSelect = { name -> vm.selectProfile(name) },
+                    onSelect = { name ->
+                        // 即起動せず、LLM 設定画面経由にする
+                        pendingProfileName = name
+                        vm.requestLlmProviders()
+                    },
                 )
             } else {
                 LoadingScreen("プロファイル一覧を取得中...")
@@ -364,57 +392,89 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
                     ),
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
-                // 将来: 承認、設定
+                HorizontalDivider(color = Color(0xFF333355), modifier = Modifier.padding(vertical = 8.dp))
+                NavigationDrawerItem(
+                    label = { Text("⚙ 設定", color = Color.White) },
+                    selected = currentScreen == Screen.Settings,
+                    onClick = {
+                        currentScreen = Screen.Settings
+                        scope.launch { drawerState.close() }
+                        // 設定画面を開いたら最新のプロバイダ一覧を取得
+                        vm.requestLlmProviders()
+                    },
+                    colors = NavigationDrawerItemDefaults.colors(
+                        selectedContainerColor = Color(0xFF2A2A4A),
+                        unselectedContainerColor = Color.Transparent,
+                    ),
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                )
             }
         }
     ) {
         val pagerState = rememberPagerState(initialPage = 0, pageCount = { 4 })
 
-        // ドロワーのクリックとpagerを同期
+        // ドロワーのクリックとpagerを同期（Settings は pager 外なので同期対象外）
         LaunchedEffect(currentScreen) {
             val target = when (currentScreen) {
                 Screen.Main -> 0
                 Screen.Dashboard -> 1
                 Screen.Terminal -> 2
                 Screen.Test -> 3
+                Screen.Settings -> null  // Settings は pager と独立
             }
-            if (pagerState.currentPage != target) {
+            if (target != null && pagerState.currentPage != target) {
                 pagerState.animateScrollToPage(target)
             }
         }
         LaunchedEffect(pagerState.currentPage) {
-            currentScreen = when (pagerState.currentPage) {
-                0 -> Screen.Main
-                1 -> Screen.Dashboard
-                2 -> Screen.Terminal
-                else -> Screen.Test
+            // Settings 表示中にスワイプされても Settings のまま（無視）
+            if (currentScreen != Screen.Settings) {
+                currentScreen = when (pagerState.currentPage) {
+                    0 -> Screen.Main
+                    1 -> Screen.Dashboard
+                    2 -> Screen.Terminal
+                    else -> Screen.Test
+                }
             }
         }
 
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.fillMaxSize(),
-        ) { page ->
-            when (page) {
-                0 -> MainScreen(
-                    state = state,
-                    onMenuClick = { scope.launch { drawerState.open() } },
-                    onSendChat = { text -> vm.sendChat(text) },
-                    onApproval = { id, approved -> vm.sendApproval(id, approved) },
-                )
-                1 -> DashboardScreen(
-                    state = state,
-                    onMenuClick = { scope.launch { drawerState.open() } },
-                )
-                2 -> TerminalScreen(
-                    state = state,
-                    onMenuClick = { scope.launch { drawerState.open() } },
-                )
-                3 -> TestScreen(
-                    state = state,
-                    onMenuClick = { scope.launch { drawerState.open() } },
-                    onRunTool = { name, args -> vm.runTestTool(name, args) },
-                )
+        if (currentScreen == Screen.Settings) {
+            SettingsScreen(
+                state = state,
+                onMenuClick = { scope.launch { drawerState.open() } },
+                onBack = { currentScreen = Screen.Main },
+                onRequestProviders = { vm.requestLlmProviders() },
+                onSetLlm = { provider, model, apiKey, baseUrl ->
+                    vm.setLlm(provider, model, apiKey, baseUrl)
+                },
+                onDismissResult = { vm.clearLlmSetResult() },
+            )
+        } else {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+            ) { page ->
+                when (page) {
+                    0 -> MainScreen(
+                        state = state,
+                        onMenuClick = { scope.launch { drawerState.open() } },
+                        onSendChat = { text -> vm.sendChat(text) },
+                        onApproval = { id, approved -> vm.sendApproval(id, approved) },
+                    )
+                    1 -> DashboardScreen(
+                        state = state,
+                        onMenuClick = { scope.launch { drawerState.open() } },
+                    )
+                    2 -> TerminalScreen(
+                        state = state,
+                        onMenuClick = { scope.launch { drawerState.open() } },
+                    )
+                    3 -> TestScreen(
+                        state = state,
+                        onMenuClick = { scope.launch { drawerState.open() } },
+                        onRunTool = { name, args -> vm.runTestTool(name, args) },
+                    )
+                }
             }
         }
     }
@@ -1123,6 +1183,459 @@ fun TestButton(label: String, onClick: () -> Unit) {
         ),
     ) {
         Text(label, fontSize = 13.sp)
+    }
+}
+
+// ===== Settings Screen =====
+// ドロワー経由で開く独立画面。HorizontalPager とは分離。
+// 現在は LLM プロバイダ選択のみ。将来的に他の設定も追加予定。
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+fun SettingsScreen(
+    state: IkuState,
+    onMenuClick: () -> Unit,
+    onBack: () -> Unit,
+    onRequestProviders: () -> Unit,
+    onSetLlm: (provider: String, model: String, apiKey: String, baseUrl: String) -> Unit,
+    onDismissResult: () -> Unit,
+) {
+    // 画面表示時にプロバイダ一覧を要求
+    LaunchedEffect(Unit) { onRequestProviders() }
+
+    // 選択中のプロバイダ（初期値はアクティブなもの）
+    var selectedProvider by remember(state.llmActive.provider) {
+        mutableStateOf(state.llmActive.provider)
+    }
+    // モデル入力欄（選択プロバイダの last_model を初期値に）
+    var modelInput by remember(selectedProvider) {
+        val defaultModel = state.llmProviders.find { it.provider == selectedProvider }?.lastModel
+            ?: state.llmActive.model
+        mutableStateOf(defaultModel)
+    }
+    // API Key 入力欄（空のままなら既存温存）
+    var apiKeyInput by remember(selectedProvider) { mutableStateOf("") }
+    var baseUrlInput by remember(selectedProvider) {
+        val defaultUrl = state.llmProviders.find { it.provider == selectedProvider }?.baseUrl ?: ""
+        mutableStateOf(defaultUrl)
+    }
+
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A1A)) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 40.dp, start = 16.dp, end = 16.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onMenuClick) {
+                    Icon(Icons.Default.Menu, "menu", tint = Color.White)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("⚙ 設定", style = MaterialTheme.typography.titleLarge, color = Color(0xFF4FC3F7))
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(onClick = onBack) {
+                    Text("戻る", color = Color(0xFF4FC3F7), fontSize = 13.sp)
+                }
+            }
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+            ) {
+                item {
+                    Text(
+                        "LLM プロバイダ選択",
+                        color = Color(0xFF4FC3F7),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    Text(
+                        "現在: ${state.llmActive.provider} / ${state.llmActive.model}",
+                        color = Color.Gray, fontSize = 12.sp,
+                        modifier = Modifier.padding(bottom = 12.dp),
+                    )
+                }
+
+                // プロバイダ選択チップ
+                item {
+                    SettingsSection("プロバイダ") {
+                        if (state.llmProviders.isEmpty()) {
+                            Text("(読み込み中...)", color = Color.Gray, fontSize = 12.sp)
+                        } else {
+                            androidx.compose.foundation.layout.FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                for (p in state.llmProviders) {
+                                    val isSelected = selectedProvider == p.provider
+                                    val isActive = state.llmActive.provider == p.provider
+                                    Surface(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(20.dp))
+                                            .clickable { selectedProvider = p.provider }
+                                            .padding(vertical = 4.dp),
+                                        color = when {
+                                            isSelected -> Color(0xFF4FC3F7)
+                                            isActive -> Color(0xFF2A4A5A)
+                                            else -> Color(0xFF2A2A4A)
+                                        },
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                        ) {
+                                            Text(
+                                                p.provider,
+                                                color = if (isSelected) Color.Black else Color.White,
+                                                fontSize = 13.sp,
+                                            )
+                                            if (p.hasKey) {
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("✓", color = if (isSelected) Color.Black else Color(0xFF4CAF50), fontSize = 11.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    SettingsSection("モデル名") {
+                        OutlinedTextField(
+                            value = modelInput,
+                            onValueChange = { modelInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("例: gemma-4-26b-a4b-it", color = Color.Gray) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF4FC3F7),
+                                unfocusedBorderColor = Color(0xFF333355),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                cursorColor = Color(0xFF4FC3F7),
+                            ),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                            singleLine = true,
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSection("API Key") {
+                        val hasExisting = state.llmProviders.find { it.provider == selectedProvider }?.hasKey ?: false
+                        Text(
+                            if (hasExisting) "保存済み（空欄のままなら既存を使用）"
+                            else "未登録（新規入力）",
+                            color = if (hasExisting) Color(0xFF4CAF50) else Color(0xFFFFAB40),
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(bottom = 4.dp),
+                        )
+                        OutlinedTextField(
+                            value = apiKeyInput,
+                            onValueChange = { apiKeyInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("sk-... or 空欄", color = Color.Gray) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF4FC3F7),
+                                unfocusedBorderColor = Color(0xFF333355),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                cursorColor = Color(0xFF4FC3F7),
+                            ),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                            singleLine = true,
+                            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSection("Base URL（任意）") {
+                        OutlinedTextField(
+                            value = baseUrlInput,
+                            onValueChange = { baseUrlInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("空欄ならデフォルト", color = Color.Gray) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF4FC3F7),
+                                unfocusedBorderColor = Color(0xFF333355),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                cursorColor = Color(0xFF4FC3F7),
+                            ),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                            singleLine = true,
+                        )
+                    }
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = {
+                            onSetLlm(selectedProvider, modelInput, apiKeyInput, baseUrlInput)
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF4FC3F7),
+                            contentColor = Color.Black,
+                        ),
+                        enabled = selectedProvider.isNotBlank() && modelInput.isNotBlank(),
+                    ) {
+                        Text("適用（次サイクルから反映）", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                item {
+                    val result = state.llmSetResult
+                    if (result != null) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)),
+                            color = if (result.startsWith("エラー")) Color(0xFF5A2A2A) else Color(0xFF2A5A2A),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    result,
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(onClick = onDismissResult) {
+                                    Text("×", color = Color.White, fontSize = 16.sp)
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(64.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF1A1A2E))
+            .padding(12.dp)
+    ) {
+        Text(title, color = Color(0xFF4FC3F7), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(8.dp))
+        content()
+    }
+}
+
+// ===== PreLaunch Config Screen =====
+// プロファイル選択 → main.py 起動前の LLM 設定画面。
+// SettingsScreen と内容はほぼ同じだが、確定ボタンが「起動」で、戻るは「プロファイル選択に戻る」。
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+fun PreLaunchConfigScreen(
+    profileName: String,
+    state: IkuState,
+    onRequestProviders: () -> Unit,
+    onCancel: () -> Unit,
+    onConfirm: (provider: String, model: String, apiKey: String, baseUrl: String) -> Unit,
+) {
+    LaunchedEffect(Unit) { onRequestProviders() }
+
+    var selectedProvider by remember(state.llmActive.provider, state.llmProviders.size) {
+        mutableStateOf(state.llmActive.provider.ifBlank {
+            state.llmProviders.firstOrNull()?.provider ?: ""
+        })
+    }
+    var modelInput by remember(selectedProvider, state.llmProviders.size) {
+        val defaultModel = state.llmProviders.find { it.provider == selectedProvider }?.lastModel
+            ?: state.llmActive.model
+        mutableStateOf(defaultModel)
+    }
+    var apiKeyInput by remember(selectedProvider) { mutableStateOf("") }
+    var baseUrlInput by remember(selectedProvider, state.llmProviders.size) {
+        val defaultUrl = state.llmProviders.find { it.provider == selectedProvider }?.baseUrl ?: ""
+        mutableStateOf(defaultUrl)
+    }
+
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A1A)) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 48.dp, start = 24.dp, end = 24.dp, bottom = 12.dp),
+            ) {
+                Text(
+                    "プロファイル起動",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = Color(0xFF4FC3F7),
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    profileName,
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = Color.White,
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "起動する LLM を選んでください",
+                    color = Color.Gray,
+                    fontSize = 12.sp,
+                )
+            }
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+            ) {
+                item {
+                    SettingsSection("プロバイダ") {
+                        if (state.llmProviders.isEmpty()) {
+                            Text("(読み込み中...)", color = Color.Gray, fontSize = 12.sp)
+                        } else {
+                            androidx.compose.foundation.layout.FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                for (p in state.llmProviders) {
+                                    val isSelected = selectedProvider == p.provider
+                                    Surface(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(20.dp))
+                                            .clickable { selectedProvider = p.provider }
+                                            .padding(vertical = 4.dp),
+                                        color = if (isSelected) Color(0xFF4FC3F7) else Color(0xFF2A2A4A),
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                        ) {
+                                            Text(
+                                                p.provider,
+                                                color = if (isSelected) Color.Black else Color.White,
+                                                fontSize = 13.sp,
+                                            )
+                                            if (p.hasKey) {
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    "✓",
+                                                    color = if (isSelected) Color.Black else Color(0xFF4CAF50),
+                                                    fontSize = 11.sp,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    SettingsSection("モデル名") {
+                        OutlinedTextField(
+                            value = modelInput,
+                            onValueChange = { modelInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("例: gemma-4-26b-a4b-it", color = Color.Gray) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF4FC3F7),
+                                unfocusedBorderColor = Color(0xFF333355),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                cursorColor = Color(0xFF4FC3F7),
+                            ),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                            singleLine = true,
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSection("API Key") {
+                        val hasExisting = state.llmProviders.find { it.provider == selectedProvider }?.hasKey ?: false
+                        Text(
+                            if (hasExisting) "保存済み（空欄のままなら既存を使用）"
+                            else "未登録（lmstudio以外は入力必須）",
+                            color = if (hasExisting) Color(0xFF4CAF50) else Color(0xFFFFAB40),
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(bottom = 4.dp),
+                        )
+                        OutlinedTextField(
+                            value = apiKeyInput,
+                            onValueChange = { apiKeyInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("sk-... or 空欄", color = Color.Gray) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF4FC3F7),
+                                unfocusedBorderColor = Color(0xFF333355),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                cursorColor = Color(0xFF4FC3F7),
+                            ),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                            singleLine = true,
+                            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        )
+                    }
+                }
+
+                item {
+                    SettingsSection("Base URL（任意）") {
+                        OutlinedTextField(
+                            value = baseUrlInput,
+                            onValueChange = { baseUrlInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("空欄ならデフォルト", color = Color.Gray) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF4FC3F7),
+                                unfocusedBorderColor = Color(0xFF333355),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                cursorColor = Color(0xFF4FC3F7),
+                            ),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                            singleLine = true,
+                        )
+                    }
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Button(
+                        onClick = {
+                            onConfirm(selectedProvider, modelInput, apiKeyInput, baseUrlInput)
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF4FC3F7),
+                            contentColor = Color.Black,
+                        ),
+                        enabled = selectedProvider.isNotBlank() && modelInput.isNotBlank(),
+                    ) {
+                        Text("この設定で起動", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = onCancel,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFAAAAAA)),
+                    ) {
+                        Text("プロファイル選択に戻る", fontSize = 13.sp)
+                    }
+                    Spacer(modifier = Modifier.height(64.dp))
+                }
+            }
+        }
     }
 }
 

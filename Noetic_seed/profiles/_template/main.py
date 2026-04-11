@@ -61,17 +61,18 @@ from datetime import datetime
 # DualLoggerの設定（printをファイルにも書き出す）
 from core.config import (
     DualLogger, RAW_LOG_FILE, STATE_FILE, DEFAULT_PRESSURE_PARAMS,
-    ENV_INJECT_INTERVAL, _NOTIFICATION_HOURS, llm_cfg, BASE_DIR
+    ENV_INJECT_INTERVAL, _NOTIFICATION_HOURS, llm_cfg, BASE_DIR, prompt_budget
 )
 sys.stdout = DualLogger(RAW_LOG_FILE)
 
 from core.state import load_state, save_state, load_pref, save_pref, append_debug_log
-from core.llm import call_llm, _get_base_url
+from core.llm import call_llm, _get_active_provider_config
 from core.embedding import _init_vector, _compare_expect_result
 from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_change_bonus,
                        calc_spiral_vector, calc_measured_entropy,
-                       calc_effective_change, apply_effective_change_to_e2, EXTERNAL_ACTION_TOOLS)
-from core.parser import parse_tool_calls, parse_candidates, parse_plan
+                       calc_effective_change, apply_effective_change_to_e2, EXTERNAL_ACTION_TOOLS,
+                       update_unresolved_intents)
+from core.parser import parse_tool_calls, parse_candidates
 from core.entropy import (
     ENTROPY_PARAMS, tick_entropy, calc_dynamic_threshold,
     calc_pressure_signals, apply_negentropy
@@ -91,7 +92,8 @@ from core.ws_server import start_ws_server, broadcast_log, broadcast_state, broa
 # === メインループ ===
 def main():
     print("=== Noetic_seed ===")
-    print(f"LLM: {llm_cfg.get('model','?')} @ {_get_base_url()} [{llm_cfg.get('provider','lmstudio')}]")
+    _p, _base, _k, _model = _get_active_provider_config()
+    print(f"LLM: {_model or llm_cfg.get('model','?')} @ {_base} [{_p}]")
     print(f"state: {STATE_FILE}")
     _init_vector()
     ws_token = start_ws_server()
@@ -181,7 +183,7 @@ def main():
             pressure = pressure * pp.get("decay", 0.97) + signal_total
             threshold = calc_dynamic_threshold(state, base_threshold)
 
-            # ユーザー入力チェック（chatキューからstate.logに注入 + pressure加算 + archive）
+            # 外部入力チェック（chatキューからstate.logに注入 + pressure加算 + archive）
             for chat_text in get_pending_chats():
                 state = load_state()
                 _ext_id = f"{state.get('session_id','?')}_ext{int(time.time()*1000)%100000}"
@@ -190,14 +192,14 @@ def main():
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "tool": "[external]",
                     "type": "external",
-                    "result": f"user: {chat_text}",
+                    "result": f"external: {chat_text}",
                 }
                 _archive_entries([_ext_entry])
                 state["log"].append(_ext_entry)
                 # 未応答カウンター + pending統一管理
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
                 state.setdefault("pending", []).append({
-                    "type": "user_message",
+                    "type": "external_message",
                     "id": _ext_id,
                     "content": chat_text,
                     "timestamp": _ext_entry["time"],
@@ -205,7 +207,7 @@ def main():
                 })
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
-                _chat_line = f"  [external] user: {chat_text[:80]}"
+                _chat_line = f"  [external] {chat_text[:80]}"
                 print(_chat_line)
                 broadcast_log(_chat_line)
 
@@ -318,6 +320,11 @@ def main():
             fire_cause = "tunnel"
 
         state = load_state()
+        # サイクル先頭で LLM 設定と secrets を再読み込み（次サイクルからのプロバイダ切替を反映）
+        from core.llm import _reload_active_config
+        from core.auth import reload_secrets
+        _reload_active_config()
+        reload_secrets()
         now = tick_dt.strftime("%H:%M:%S")
         _fire_type = "TUNNEL" if _tunnel_fire else "threshold"
         _cycle_line = f"--- cycle {state.get('cycle_id', 0) + 1} [{now}] p={pressure:.2f}/th={threshold:.1f} fire={fire_cause} ({_fire_type}) ---"
@@ -439,15 +446,32 @@ def main():
             if _pending_meta:
                 propose_prompt += f"\nmeta: {_pending_meta}"
 
-        # ストリーム終了通知を受け取ったら state も更新
+        # ストリーム終了通知を受け取ったら state も更新 + iku の log に system 通知注入
         if _stream_ended and state.get("stream_active"):
+            _ended_params = state.get("stream_params", {}) or {}
             state["stream_active"] = False
             state["stream_id"] = None
             state["stream_params"] = None
             print("  [stream] ストリーム終了を検知")
+            # iku が次サイクルで「終わった」事実を認識できるよう state.log に残す
+            _sys_end_id = f"{state.get('session_id','?')}_sys{int(time.time()*1000)%100000}"
+            _sys_end_entry = {
+                "id": _sys_end_id,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "tool": "[system]",
+                "type": "system",
+                "result": (
+                    f"camera_stream 自然終了: facing={_ended_params.get('facing','?')} "
+                    f"frames={_ended_params.get('frames','?')} "
+                    f"interval={_ended_params.get('interval_sec','?')}s"
+                ),
+            }
+            _archive_entries([_sys_end_entry])
+            state["log"].append(_sys_end_entry)
+            save_state(state)
 
         try:
-            propose_resp = call_llm(propose_prompt, max_tokens=24000, temperature=1.0,
+            propose_resp = call_llm(propose_prompt, max_tokens=prompt_budget["completion_reserve"], temperature=1.0,
                                     image_paths=_pending_img_paths if _pending_img_paths else None)
             append_debug_log("LLM1 (Propose)", propose_resp)
         except Exception as e:
@@ -489,7 +513,6 @@ def main():
             "self": copy.deepcopy(state.get("self", {})),
             "files_written": list(state.get("files_written", [])),
             "files_read": list(state.get("files_read", [])),
-            "plan": copy.deepcopy(state.get("plan", {})),
         }
         chain_tools = selected.get("tools", [selected["tool"]])
         all_results = []
@@ -511,7 +534,7 @@ def main():
 
             exec_prompt = build_prompt_execute(state, ctrl, chain_candidate, TOOLS)
             try:
-                response = call_llm(exec_prompt, max_tokens=24000, temperature=0.4)
+                response = call_llm(exec_prompt, max_tokens=prompt_budget["completion_reserve"], temperature=0.4)
                 append_debug_log(f"LLM2 (Execute chain {chain_idx+1}/{len(chain_tools)})", response)
             except Exception as e:
                 print(f"  LLM②エラー (chain {chain_idx+1}): {e}")
@@ -519,30 +542,6 @@ def main():
 
             response_clean = response.strip()
             print(f"  LLM② ({chain_idx+1}/{len(chain_tools)}): {response_clean[:200]}")
-
-            if chain_idx == 0:
-                plan_data = parse_plan(response_clean)
-                if plan_data:
-                    state["plan"] = plan_data
-                    ds = state.setdefault("drives_state", {})
-                    ds["plan_set_at"] = time.time()
-                    save_state(state)
-                    print(f"  計画更新: {plan_data['goal']} ({len(plan_data['steps'])}ステップ)")
-                    cid = state.get("cycle_id", 0) + 1
-                    state["cycle_id"] = cid
-                    entry = {
-                        "id": f"{state.get('session_id','x')}_{cid:04d}",
-                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "tool": "wait",
-                        "result": f"計画: {plan_data['goal']}",
-                    }
-                    _archive_entries([entry])
-                    state["log"].append(entry)
-                    maybe_compress_log(state, set(TOOLS.keys()))
-                    save_state(state)
-                    pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
-                    print()
-                    break
 
             raw_calls = parse_tool_calls(response_clean, set(TOOLS.keys()))
             if not raw_calls:
@@ -608,13 +607,6 @@ def main():
         tool_name = "+".join(all_tool_names)
         result_str = ("\n---\n".join(all_results))[:50000]
 
-        if any(n != "wait" for n in all_tool_names) and state.get("plan", {}).get("goal"):
-            plan = state["plan"]
-            if plan["current"] < len(plan["steps"]):
-                plan["current"] += 1
-                if plan["current"] >= len(plan["steps"]):
-                    print(f"  計画完了: {plan['goal']}")
-                    state["plan"] = {"goal": "", "steps": [], "current": 0}
         if intent:
             print(f"  intent: {intent}")
         if expect:
@@ -623,24 +615,13 @@ def main():
         # state変化量（スナップショット vs 現在のstate差分）
         state_after = load_state()
         sc_bonus = calc_state_change_bonus(_state_before_snapshot, state_after)
-        eff_change = calc_effective_change(all_tool_names, result_str, _state_before_snapshot, state_after)
+        eff_change = calc_effective_change(all_tool_names, result_str, _state_before_snapshot, state_after, current_intent=intent)
         state = state_after
 
-        # ツール種別に応じたpending消化（output_display→user_message, elyth系→elyth_notification）
+        # ツール種別に応じたpending消化（elyth系→elyth_notification）
+        # output_display は未応答ジレンマを構造化するため pending 消化しない
+        # （外部からの新しい声が来るまで external_message pending は残り続ける）
         _executed_tools = set(all_tool_names)
-        if "output_display" in _executed_tools:
-            # output_displayはuser_message pending を1件消化
-            _uec = state.get("unresponded_external_count", 0)
-            if _uec > 0:
-                state["unresponded_external_count"] = _uec - 1
-            if state.get("unresponded_external_count", 0) <= 0:
-                state["unresolved_external"] = 0.0
-                state["unresponded_external_count"] = 0
-            _pending = state.get("pending", [])
-            _user_msgs = [p for p in _pending if p.get("type") == "user_message"]
-            if _user_msgs:
-                state["pending"] = [p for p in _pending if p != _user_msgs[0]]
-            save_state(state)
         _elyth_action_tools = {"elyth_post", "elyth_reply", "elyth_like", "elyth_follow"}
         if _executed_tools & _elyth_action_tools:
             # elyth系ツールはelyth_notification pendingを1件消化
@@ -726,6 +707,9 @@ def main():
             entry["e4"] = e4
         _archive_entries([entry])
         state["log"].append(entry)
+
+        # 未達成ペンディング: E3 から gap を計算して unresolved_intent を更新
+        update_unresolved_intents(state, intent, e3, cid)
 
         maybe_compress_log(state, set(TOOLS.keys()))
         save_state(state)

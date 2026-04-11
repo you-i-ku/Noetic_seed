@@ -1,7 +1,14 @@
 package com.example.noetic_seed_monitor
 
 import android.annotation.SuppressLint
+import android.app.PendingIntent
 import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -44,6 +51,11 @@ class CameraStreamActivity : ComponentActivity() {
         const val EXTRA_FRAMES = "frames"
         const val EXTRA_INTERVAL_SEC = "interval_sec"
         private const val TAG = "CameraStream"
+        // frames=0 の無制限モードでの絶対安全上限（プライバシー・電池保護）
+        private const val HARD_MAX_DURATION_MS = 600_000L  // 10分
+        private const val HARD_MAX_FRAMES_SAFETY = 1000
+        // PIP 内の停止ボタン用 broadcast action
+        const val ACTION_STOP_STREAM = "com.example.noetic_seed_monitor.STOP_STREAM"
     }
 
     private lateinit var previewView: PreviewView
@@ -55,9 +67,19 @@ class CameraStreamActivity : ComponentActivity() {
     private var completed = false
 
     private var facing: String = "back"
-    private var frames: Int = 5
+    private var frames: Int = 5   // 0 = 無制限モード（stop or ハード上限で終了）
     private var intervalSec: Float = 1.0f
     private var startMs: Long = 0L
+
+    // PIP 内の停止ボタン用ブロードキャスト受信
+    private val stopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_STOP_STREAM) {
+                Log.d(TAG, "PIP stop action received")
+                CameraStreamBridge.stopRequested = true
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,11 +91,20 @@ class CameraStreamActivity : ComponentActivity() {
         stopButton = findViewById(R.id.stop_button)
 
         facing = intent.getStringExtra(EXTRA_FACING) ?: "back"
-        frames = intent.getIntExtra(EXTRA_FRAMES, 5).coerceIn(1, 30)
+        val rawFrames = intent.getIntExtra(EXTRA_FRAMES, 5)
+        frames = if (rawFrames == 0) 0 else rawFrames.coerceIn(1, 30)
         intervalSec = intent.getFloatExtra(EXTRA_INTERVAL_SEC, 1.0f).coerceIn(0.3f, 5.0f)
 
         // 開始時にフラグリセット
         CameraStreamBridge.reset()
+
+        // PIP 停止ボタンからのブロードキャスト受信を登録
+        val filter = IntentFilter(ACTION_STOP_STREAM)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(stopReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(stopReceiver, filter)
+        }
 
         stopButton.setOnClickListener {
             Log.d(TAG, "Stop button pressed")
@@ -121,37 +152,82 @@ class CameraStreamActivity : ComponentActivity() {
         delay(300)
         enterPipModeNow()
 
-        for (i in 0 until frames) {
+        // Pattern A (frames > 0): 指定枚数で自然終了
+        // Pattern B (frames == 0): camera_stream_stop または絶対上限まで継続
+        val unlimited = (frames == 0)
+        var i = 0
+        while (true) {
             if (completed) return
             if (CameraStreamBridge.stopRequested) {
-                Log.d(TAG, "Stop requested, exiting loop at frame ${i + 1}/${frames}")
+                Log.d(TAG, "Stop requested, exiting loop at frame ${i + 1}")
                 break
             }
+            // Pattern A: 指定枚数に達したら終了
+            if (!unlimited && i >= frames) break
+            // Pattern B の絶対上限（プライバシー・電池保護）
+            if (unlimited) {
+                val elapsed = System.currentTimeMillis() - startMs
+                if (elapsed > HARD_MAX_DURATION_MS) {
+                    Log.w(TAG, "Hard limit: duration > ${HARD_MAX_DURATION_MS / 1000}s, stopping")
+                    break
+                }
+                if (i >= HARD_MAX_FRAMES_SAFETY) {
+                    Log.w(TAG, "Hard limit: frame count > $HARD_MAX_FRAMES_SAFETY, stopping")
+                    break
+                }
+            }
+
             updateStatus(i)
             val bytes = captureOneFrame()
             if (bytes != null) {
                 sendFrame(bytes, i + 1)
                 framesSent++
-                Log.d(TAG, "Frame ${i + 1}/${frames} sent: ${bytes.size} bytes")
+                Log.d(TAG, "Frame ${i + 1}${if (unlimited) "" else "/$frames"} sent: ${bytes.size} bytes")
             } else {
                 Log.w(TAG, "Frame ${i + 1} capture failed")
             }
-            if (i < frames - 1 && !CameraStreamBridge.stopRequested) {
+            i++
+
+            // インターバル待機（最後のフレーム後はスキップ）
+            val hasNext = unlimited || i < frames
+            if (hasNext && !CameraStreamBridge.stopRequested) {
                 delay((intervalSec * 1000).toLong())
             }
         }
-        updateStatus(frames)
+        updateStatus(i)
         delay(200)
         finishWithEnd()
+    }
+
+    /** PIP パラメータ（停止ボタン action 付き）を構築する */
+    private fun buildPipParams(aspect: Rational = Rational(3, 4)): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder().setAspectRatio(aspect)
+        // API 26+: PIP 停止ボタン（RemoteAction）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val stopIntent = Intent(ACTION_STOP_STREAM).setPackage(packageName)
+                val pending = PendingIntent.getBroadcast(
+                    this, 0, stopIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                val stopAction = RemoteAction(
+                    Icon.createWithResource(this, android.R.drawable.ic_media_pause),
+                    "停止",
+                    "カメラストリームを停止",
+                    pending
+                )
+                builder.setActions(listOf(stopAction))
+            } catch (e: Exception) {
+                Log.w(TAG, "PIP stop action setup failed", e)
+            }
+        }
+        return builder.build()
     }
 
     private fun enterPipModeNow() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !completed && !isInPictureInPictureMode) {
             try {
-                val params = PictureInPictureParams.Builder()
-                    .setAspectRatio(Rational(3, 4))  // 縦長プレビュー
-                    .build()
-                enterPictureInPictureMode(params)
+                enterPictureInPictureMode(buildPipParams(Rational(3, 4)))
                 Log.d(TAG, "Entered PIP mode immediately")
             } catch (e: Exception) {
                 Log.w(TAG, "immediate enterPictureInPictureMode failed", e)
@@ -162,7 +238,11 @@ class CameraStreamActivity : ComponentActivity() {
     @SuppressLint("SetTextI18n")
     private fun updateStatus(capturedCount: Int) {
         val elapsed = (System.currentTimeMillis() - startMs) / 1000.0
-        statusText.text = "撮影中: ${capturedCount}/${frames} (${"%.1f".format(elapsed)}s)"
+        statusText.text = if (frames == 0) {
+            "撮影中: ${capturedCount}枚 (${"%.1f".format(elapsed)}s) [無制限・最大10分]"
+        } else {
+            "撮影中: ${capturedCount}/${frames} (${"%.1f".format(elapsed)}s)"
+        }
     }
 
     private suspend fun captureOneFrame(): ByteArray? = withContext(Dispatchers.Main) {
@@ -302,10 +382,7 @@ class CameraStreamActivity : ComponentActivity() {
         // ユーザーがホームボタンを押したら PIP モードに入る
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !completed) {
             try {
-                val params = PictureInPictureParams.Builder()
-                    .setAspectRatio(Rational(4, 3))  // プレビューに合わせる
-                    .build()
-                enterPictureInPictureMode(params)
+                enterPictureInPictureMode(buildPipParams(Rational(4, 3)))
             } catch (e: Exception) {
                 Log.w(TAG, "enterPictureInPictureMode failed", e)
             }
@@ -321,6 +398,7 @@ class CameraStreamActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        try { unregisterReceiver(stopReceiver) } catch (_: Exception) {}
         if (!completed) {
             completed = true
             captureJob?.cancel()

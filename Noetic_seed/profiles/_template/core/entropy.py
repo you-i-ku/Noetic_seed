@@ -11,7 +11,6 @@ from core.state import load_pref
 ENTROPY_PARAMS = {
     "base_rate": 0.001,
     "neg_scale": 0.15,
-    "plan_multiplier": 1.5,
     "custom_scale": 0.3,
     "w_entropy": 0.3,
     "w_surprise": 0.25,
@@ -59,9 +58,6 @@ def tick_entropy(state: dict, measured_entropy: float | None = None,
     if behavioral_entropy is not None:
         stagnation_factor = 1.0 + (1.0 - behavioral_entropy) * ep["stagnation_coeff"]
         rate *= stagnation_factor
-
-    if state.get("plan", {}).get("goal"):
-        rate *= ep["plan_multiplier"]
 
     entropy += rate
 

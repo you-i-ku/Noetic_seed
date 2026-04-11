@@ -27,6 +27,44 @@ LOG_KEEP = 30           # Trigger1後に保持する生ログ件数
 SUMMARY_HARD_LIMIT = 10 # summariesがこの件数に達したらTrigger2
 META_SUMMARY_RAW = 15   # Trigger2でrawから使う件数
 
+# === Prompt budget（settings.json の prompt_budget で上書き可）===
+DEFAULT_PROMPT_BUDGET = {
+    "context_window": 32768,
+    "completion_reserve": 8192,
+    "safety_margin": 512,
+    "log_gradient": {
+        "boundaries": [5, 15, 45],
+        "caps": [20000, 3000, 800, 200],
+        "intent_cap": 300,
+    },
+    "block_budgets": {
+        "ltm_self": 800,
+        "pending": 300,
+        "related_memory": 800,
+        "summaries": 1000,
+        "tools": 1500,
+        "instructions": 600,
+    },
+}
+
+
+def _deep_merge(default: dict, override: dict) -> dict:
+    """settings.json の prompt_budget を DEFAULT にマージ。dict は再帰、それ以外は上書き。"""
+    out = dict(default)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def estimate_tokens(text: str) -> int:
+    """雑な token 見積もり（日本語は 3 文字 ≒ 1 tok で上に寄せる）。"""
+    if not text:
+        return 0
+    return len(text) // 3 + 1
+
 # === 電脳気候パラメータのデフォルト（pref.jsonで上書き可）===
 DEFAULT_PRESSURE_PARAMS = {
     "decay": 0.97,
@@ -68,3 +106,6 @@ class DualLogger:
 # === LLM設定読み込み ===
 with open(LLM_SETTINGS, encoding="utf-8") as f:
     llm_cfg = json.load(f)
+
+# === Prompt budget 読み込み（settings.json の prompt_budget を DEFAULT にマージ）===
+prompt_budget = _deep_merge(DEFAULT_PROMPT_BUDGET, llm_cfg.get("prompt_budget", {}))

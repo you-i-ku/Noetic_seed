@@ -1,11 +1,33 @@
 {
-  "provider": "lmstudio",
-  "base_url": "http://127.0.0.1:1234/v1",
-  "api_key": "",
-  "model": "gemma-4-26b-a4b-it",
+  "provider": "gemini",
+  "model": "gemini-3.1-flash-lite-preview",
   "vision_max_size": 896,
-  "brave_api_key": "",
-  "elyth_api_key": "",
-  "ws_token": "iku2026"
-
+  "ws_token": "iku2026",
+  "prompt_budget": {
+    "context_window": 32768,
+    "completion_reserve": 8192,
+    "safety_margin": 512,
+    "log_gradient": {
+      "boundaries": [
+        5,
+        15,
+        45
+      ],
+      "caps": [
+        20000,
+        3000,
+        800,
+        200
+      ],
+      "intent_cap": 300
+    },
+    "block_budgets": {
+      "ltm_self": 800,
+      "pending": 300,
+      "related_memory": 800,
+      "summaries": 1000,
+      "tools": 1500,
+      "instructions": 600
+    }
+  }
 }

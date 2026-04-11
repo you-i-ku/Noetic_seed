@@ -1,6 +1,7 @@
-"""Web検索・URL取得ツール"""
+"""Web検索・URL取得ツール
+API キーは secrets.json の auth_profiles.brave から取得する。"""
 import httpx
-from core.config import llm_cfg
+from core.auth import get_auth_profile
 
 
 def _web_search(args):
@@ -8,9 +9,10 @@ def _web_search(args):
     if not query:
         return "エラー: queryを指定してください"
     n = min(int(args.get("max_results", "") or "5"), 10)
-    brave_key = llm_cfg.get("brave_api_key", "")
+    brave_profile = get_auth_profile("brave") or {}
+    brave_key = brave_profile.get("key", "")
     if not brave_key:
-        return "エラー: settings.jsonにbrave_api_keyを設定してください"
+        return "エラー: secrets.json の auth_profiles.brave.key を設定してください"
     try:
         resp = httpx.get(
             "https://api.search.brave.com/res/v1/web/search",

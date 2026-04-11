@@ -56,6 +56,11 @@ UIイメージ/
 
 # Secrets
 .env
+# iku profiles の認証情報（追跡対象の _template 配下も含めて除外）
+Noetic_seed/profiles/*/secrets.json
+Noetic_seed/profiles/*/sandbox/secrets/
+Noetic_seed/profiles/_template/secrets.json
+Noetic_seed/profiles/_template/sandbox/secrets/
 
 # IDE
 .vscode/

@@ -264,17 +264,3 @@ def parse_candidates(text: str, allowed_tools: set) -> list:
         for t in allowed_tools:
             candidates.append({"tool": t, "reason": "（フォールバック）"})
     return candidates
-
-
-def parse_plan(text: str):
-    """[PLAN:goal=目標 steps=ステップ1|ステップ2]をパース"""
-    m = re.search(r'\[PLAN:((?:[^\]"]|"(?:[^"\\]|\\.)*")*)\]', text, re.DOTALL)
-    if not m:
-        return None
-    args = _parse_args_fn(m.group(1).strip())
-    goal = args.get("goal", "").strip()
-    steps_raw = args.get("steps", "")
-    steps = [s.strip() for s in steps_raw.split("|") if s.strip()] if steps_raw else []
-    if not goal:
-        return None
-    return {"goal": goal, "steps": steps, "current": 0}

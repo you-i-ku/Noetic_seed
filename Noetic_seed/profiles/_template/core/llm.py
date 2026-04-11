@@ -1,11 +1,27 @@
-"""LLM呼び出し（OpenAI互換 / Claude API / Claude Code CLI）+ 画像対応"""
+"""LLM呼び出し（OpenAI互換 / Claude API / Claude Code CLI）+ 画像対応
+クレデンシャルは core.auth.get_llm_credentials から動的に取得する。
+settings.json の provider/model は呼び出し直前に再読み込み（次サイクルからの切替対応）。"""
 import httpx
 import subprocess
 import json
 import base64
 import io
 from pathlib import Path
-from core.config import llm_cfg
+from core.config import llm_cfg, LLM_SETTINGS
+from core.auth import get_llm_credentials
+
+
+def _reload_active_config() -> dict:
+    """settings.json から現在の provider/model/vision_max_size を再読み込み。
+    mid-cycle 切替を避けるため、サイクル先頭で呼ぶ想定。"""
+    try:
+        with open(LLM_SETTINGS, encoding="utf-8") as f:
+            fresh = json.load(f)
+        llm_cfg.clear()
+        llm_cfg.update(fresh)
+    except Exception:
+        pass
+    return llm_cfg
 
 
 def _get_vision_max_size() -> int:
@@ -61,17 +77,28 @@ _PROVIDER_BASE_URLS = {
     "claude":   "https://api.anthropic.com",
 }
 
-def _get_base_url() -> str:
-    """settings.jsonにbase_urlがあればそれを使い、なければproviderから決定"""
-    if "base_url" in llm_cfg and llm_cfg["base_url"]:
-        return llm_cfg["base_url"].rstrip("/")
-    provider = llm_cfg.get("provider", "lmstudio")
-    return _PROVIDER_BASE_URLS.get(provider, _PROVIDER_BASE_URLS["lmstudio"])
+
+def _get_active_provider_config() -> tuple[str, str, str, str]:
+    """現在アクティブな provider の (provider_name, base_url, api_key, model) を取得。
+    settings.json (provider/model) と secrets.json (llm_providers) を統合。
+    各値は strip して末尾改行などの不正文字を除去する（httpx の InvalidHeader 回避）。"""
+    provider = str(llm_cfg.get("provider", "lmstudio") or "").strip()
+    model = str(llm_cfg.get("model", "") or "").strip()
+
+    creds = get_llm_credentials(provider) or {}
+    base_url = str(creds.get("base_url", "") or "").strip()
+    if not base_url:
+        base_url = _PROVIDER_BASE_URLS.get(provider, "")
+    api_key = str(creds.get("api_key", "") or "").strip()
+    if not model:
+        model = str(creds.get("last_model", "default") or "").strip()
+
+    return provider, base_url.rstrip("/"), api_key, model
+
 
 def _call_openai_compat(prompt: str, max_tokens: int, temperature: float = 0.7, image_paths: list = None) -> str:
     """LM Studio / OpenAI / Gemini（OpenAI互換エンドポイント）。複数画像対応。"""
-    base_url = _get_base_url()
-    api_key = llm_cfg.get("api_key", "")
+    _, base_url, api_key, model = _get_active_provider_config()
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     # 画像あり → OpenAI vision形式でcontentを配列に
@@ -94,7 +121,7 @@ def _call_openai_compat(prompt: str, max_tokens: int, temperature: float = 0.7, 
         f"{base_url}/chat/completions",
         headers=headers,
         json={
-            "model": llm_cfg.get("model", "default"),
+            "model": model,
             "messages": [{"role": "user", "content": content}],
             "max_tokens": max_tokens,
             "temperature": temperature,
@@ -106,6 +133,9 @@ def _call_openai_compat(prompt: str, max_tokens: int, temperature: float = 0.7, 
 
 def _call_claude(prompt: str, max_tokens: int, image_paths: list = None) -> str:
     """Anthropic Claude API。複数画像対応。"""
+    _, base_url, api_key, model = _get_active_provider_config()
+    if not base_url:
+        base_url = "https://api.anthropic.com"
     if image_paths:
         content = [{"type": "text", "text": prompt}]
         loaded_count = 0
@@ -124,14 +154,14 @@ def _call_claude(prompt: str, max_tokens: int, image_paths: list = None) -> str:
         content = prompt
 
     resp = httpx.post(
-        "https://api.anthropic.com/v1/messages",
+        f"{base_url}/v1/messages",
         headers={
-            "x-api-key": llm_cfg.get("api_key", ""),
+            "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
         json={
-            "model": llm_cfg.get("model", "claude-sonnet-4-6"),
+            "model": model or "claude-sonnet-4-6",
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": content}],
         },
@@ -192,8 +222,8 @@ def _call_lmstudio_native(prompt: str, max_tokens: int, temperature: float = 0.7
     global _lmstudio_model_cache
     import lmstudio as lms
 
-    model_name = llm_cfg.get("model", "default")
-    if model_name == "default":
+    _, _, _, model_name = _get_active_provider_config()
+    if not model_name or model_name == "default":
         try:
             loaded = lms.list_loaded_models()
             if not loaded:
@@ -240,12 +270,13 @@ def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
              image_path: str = None, image_paths: list = None) -> str:
     """LLM呼び出し統一インターフェース。
     image_path (単一) / image_paths (複数) のどちらか、または両方なしで呼ぶ。
+    provider は llm_cfg から動的に読み出される（次サイクルから切替反映）。
     """
     # image_paths が未指定で image_path があれば [image_path] に昇格
     if image_paths is None:
         image_paths = [image_path] if image_path else None
 
-    provider = llm_cfg.get("provider", "lmstudio")
+    provider, _, _, _ = _get_active_provider_config()
     if provider == "claude":
         return _call_claude(prompt, max_tokens, image_paths=image_paths)
     elif provider == "claude_code":

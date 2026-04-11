@@ -1,15 +1,17 @@
-"""Elyth操作ツール（AITuber専用SNS）"""
+"""Elyth操作ツール（AITuber専用SNS）
+API キーは secrets.json の auth_profiles.elyth から取得する。"""
 import json
 import httpx
-from core.config import llm_cfg
+from core.auth import get_auth_profile
 from core.state import load_state, save_state
 
 ELYTH_API_BASE = "https://elythworld.com"
 
 def _elyth_headers():
-    key = llm_cfg.get("elyth_api_key", "")
+    profile = get_auth_profile("elyth") or {}
+    key = profile.get("key", "")
     if not key:
-        raise ValueError("settings.jsonにelyth_api_keyを設定してください")
+        raise ValueError("secrets.json の auth_profiles.elyth.key を設定してください")
     return {"x-api-key": key, "Content-Type": "application/json"}
 
 

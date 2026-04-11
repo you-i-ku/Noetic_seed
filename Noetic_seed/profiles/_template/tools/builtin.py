@@ -31,22 +31,84 @@ def _list_files(path: str) -> str:
     rel = path if path else "."
     return f"{rel}:\n" + "\n".join(items[:30]) if items else f"{rel}: (空)"
 
+def _find_similar_files(query_path: str, max_results: int = 3, min_ratio: float = 0.5) -> list[tuple[float, str]]:
+    """要求パスに似た既存ファイルを文字列類似度で検索。
+    戻り値: [(類似度, 相対パス), ...] を類似度降順で返す。
+    sandbox/secrets/ や __pycache__ 等は除外。"""
+    from difflib import SequenceMatcher
+    from pathlib import Path
+    query = Path(query_path).name.lower()
+    if not query:
+        return []
+    scored: list[tuple[float, str]] = []
+    _secrets_dir_str = str((SANDBOX_DIR / "secrets").resolve())
+    try:
+        for f in BASE_DIR.rglob("*"):
+            try:
+                if not f.is_file() or _is_hidden(f.name):
+                    continue
+                s = str(f.resolve())
+                if ("__pycache__" in s or ".venv" in s or ".git" in s
+                        or s.startswith(_secrets_dir_str)):
+                    continue
+                if f.name == "secrets.json" and f.parent.resolve() == BASE_DIR.resolve():
+                    continue
+                name = f.name.lower()
+                ratio = SequenceMatcher(None, query, name).ratio()
+                if ratio >= min_ratio:
+                    try:
+                        # Windows でも / 区切りで返す（プロンプトで統一表示）
+                        rel = f.relative_to(BASE_DIR).as_posix()
+                        scored.append((ratio, rel))
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+        scored.sort(key=lambda x: (-x[0], len(x[1])))
+        return scored[:max_results]
+    except Exception:
+        return []
+
+
+def _format_not_found(path: str, similar: list[tuple[float, str]]) -> str:
+    """類似度に応じた段階的な framing でファイル不在メッセージを組み立てる。
+    - 類似度 0.75+: 主語置換（高確度誘導）
+    - 類似度 0.5-0.75: 「もしかして」（中確度の控えめな示唆）
+    - 類似度 < 0.5 or 候補なし: 中立な「該当なし」のみ"""
+    if not similar:
+        return f"該当なし: {path}"
+    top_score, top_path = similar[0]
+    if top_score >= 0.75:
+        # 高確度: 主語置換で代替を主文に
+        return f"{top_path} を読もうとしていますか？（{path} は該当なし）"
+    # 中確度: 控えめな示唆
+    names = " / ".join(p for _, p in similar[:3])
+    return f"該当なし: {path}\nもしかして {names} のことですか？"
+
+
 def _read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
     target = (BASE_DIR / path).resolve()
     if not str(target).startswith(str(BASE_DIR.resolve())):
         return "エラー: このツールは特定のファイルにしか干渉できません"
+    # sandbox/secrets/ は secret_read 経由のみアクセス可（誤爆防止）
+    _secrets_dir = (SANDBOX_DIR / "secrets").resolve()
+    if str(target).startswith(str(_secrets_dir)):
+        return "エラー: sandbox/secrets/ は read_file ではアクセスできません（secret_read を使ってください）"
+    # secrets.json 本体もガード（auth_profiles の型情報は auth_profile_info で取得、LLM キーは露出させない）
+    _secrets_file = (BASE_DIR / "secrets.json").resolve()
+    if target == _secrets_file:
+        return "エラー: secrets.json は read_file でアクセスできません（auth_profile_info で型情報のみ参照可、LLM キーは露出不可）"
     if not target.exists():
-        # 近似マッチ: ファイル名だけで検索
+        # 近似マッチ（基名の完全一致）: 1件だけならそれを自動採用
         from pathlib import Path
-        candidates = [p for p in BASE_DIR.rglob(Path(path).name) if not _is_hidden(p.name) and p.is_file()]
-        if len(candidates) == 1:
-            target = candidates[0]
+        exact = [p for p in BASE_DIR.rglob(Path(path).name) if not _is_hidden(p.name) and p.is_file()]
+        if len(exact) == 1:
+            target = exact[0]
             path = str(target.relative_to(BASE_DIR))
         else:
-            hint = ""
-            if candidates:
-                hint = f" (候補: {', '.join(str(c.relative_to(BASE_DIR)) for c in candidates[:3])})"
-            return f"エラー: {path} は存在しません{hint}"
+            # 類似検索（文字列類似度、段階的 framing）
+            similar = _find_similar_files(path)
+            return _format_not_found(path, similar)
     if _is_hidden(target.name):
         return f"エラー: {path} は存在しません"
     try:
@@ -108,6 +170,10 @@ def _write_file(path: str, content: str) -> str:
     sandbox_resolved = SANDBOX_DIR.resolve()
     if not str(target).startswith(str(sandbox_resolved)):
         return "エラー: sandbox/以下にのみ書き込めます"
+    # sandbox/secrets/ は secret_write 経由のみ書き込み可（承認が要るので経路を制限）
+    _secrets_dir = (SANDBOX_DIR / "secrets").resolve()
+    if str(target).startswith(str(_secrets_dir)):
+        return "エラー: sandbox/secrets/ には write_file で書き込めません（secret_write を使ってください）"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"書き込み完了: {target.name} ({len(content)}文字)"
@@ -140,8 +206,8 @@ def _wait_or_dismiss(args: dict) -> str:
     if not target:
         return f"[dismiss] id={dismiss_id} は未対応リストにありません"
     state["pending"] = [p for p in pending if p.get("id") != dismiss_id]
-    # user_messageの場合: カウンター減算するが、圧力は即ゼロにしない（余韻として残る）
-    if target[0].get("type") == "user_message":
+    # external_messageの場合: カウンター減算するが、圧力は即ゼロにしない（余韻として残る）
+    if target[0].get("type") == "external_message":
         uec = state.get("unresponded_external_count", 0)
         if uec > 0:
             state["unresponded_external_count"] = uec - 1

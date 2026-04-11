@@ -130,6 +130,69 @@ async def _ws_handler(websocket):
                     if name:
                         _profile_queue.put(name)
                         print(f"  [ws] profile selected: {name}")
+                elif msg_type == "get_llm_providers":
+                    # プロバイダ一覧とメタ情報を返す（api_key は含めない）
+                    try:
+                        from core.auth import get_llm_provider_metadata
+                        import json as _json
+                        all_providers = ["lmstudio", "claude", "openai", "gemini"]
+                        providers_info = []
+                        for p in all_providers:
+                            meta = get_llm_provider_metadata(p)
+                            if meta:
+                                providers_info.append(meta)
+                            else:
+                                providers_info.append({
+                                    "provider": p,
+                                    "base_url": "",
+                                    "last_model": "",
+                                    "has_key": False,
+                                })
+                        # 現在アクティブな provider/model を settings.json から
+                        from core.config import LLM_SETTINGS
+                        with open(LLM_SETTINGS, encoding="utf-8") as f:
+                            active_cfg = _json.load(f)
+                        broadcast({
+                            "type": "llm_providers_list",
+                            "providers": providers_info,
+                            "active": {
+                                "provider": active_cfg.get("provider", ""),
+                                "model": active_cfg.get("model", ""),
+                            },
+                        })
+                    except Exception as e:
+                        print(f"  [ws] get_llm_providers error: {e}")
+                elif msg_type == "set_llm":
+                    # Android からの LLM 設定変更要求
+                    try:
+                        provider = data.get("provider", "").strip()
+                        model = data.get("model", "").strip()
+                        api_key = data.get("api_key", "")  # 空なら既存温存
+                        base_url = data.get("base_url", "")
+                        if not provider:
+                            broadcast({"type": "set_llm_result", "ok": False, "error": "provider required"})
+                        else:
+                            # secrets.json を更新
+                            from core.auth import save_llm_provider
+                            err = save_llm_provider(provider, base_url=base_url, api_key=api_key, last_model=model)
+                            if err:
+                                broadcast({"type": "set_llm_result", "ok": False, "error": err})
+                            else:
+                                # settings.json を更新（active provider/model）
+                                import json as _json
+                                from core.config import LLM_SETTINGS
+                                with open(LLM_SETTINGS, encoding="utf-8") as f:
+                                    cfg = _json.load(f)
+                                cfg["provider"] = provider
+                                if model:
+                                    cfg["model"] = model
+                                with open(LLM_SETTINGS, "w", encoding="utf-8") as f:
+                                    _json.dump(cfg, f, ensure_ascii=False, indent=2)
+                                print(f"  [ws] set_llm: provider={provider} model={model} (next cycle で反映)")
+                                broadcast({"type": "set_llm_result", "ok": True, "provider": provider, "model": model})
+                    except Exception as e:
+                        print(f"  [ws] set_llm error: {e}")
+                        broadcast({"type": "set_llm_result", "ok": False, "error": str(e)[:200]})
                 elif msg_type == "config":
                     pass
             except json.JSONDecodeError:

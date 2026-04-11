@@ -31,8 +31,6 @@ def load_state() -> dict:
                 data["self"]["name"] = _name
             if "energy" not in data:
                 data["energy"] = 50
-            if "plan" not in data:
-                data["plan"] = {"goal": "", "steps": [], "current": 0}
             if "summaries" not in data:
                 data["summaries"] = []
             if "cycle_id" not in data:
@@ -64,7 +62,7 @@ def load_state() -> dict:
             return data
         except json.JSONDecodeError:
             pass
-    return {"log": [], "self": {"name": _name}, "energy": 50, "plan": {"goal": "", "steps": [], "current": 0}, "summaries": [], "cycle_id": 0, "tool_level": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "tools_created": []}
+    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "tools_created": []}
 
 
 def save_state(state: dict):

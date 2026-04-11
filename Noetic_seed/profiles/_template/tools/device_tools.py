@@ -19,7 +19,7 @@ AUDIO_DIR = BASE_DIR / "sandbox" / "audio"
 
 def _build_approval_preview(tool: str, args_summary: str, args: dict) -> str:
     """承認通知のプレビュー文を組み立てる。
-    ツール固有の args 要約 + AI の intent + デバイス所有者へのメッセージ message を含める。
+    ツール固有の args 要約 + AI の intent + 外部への説明 message を含める。
     intent と message は承認側が判断する上で必須情報。
     （message= は self_modify の content= との衝突を避けるため message に統一）"""
     intent = args.get("intent", "").strip()
@@ -61,8 +61,10 @@ def _camera_stream(args) -> str:
     except (ValueError, TypeError):
         interval_sec = 1.0
 
-    if not (1 <= frames <= 30):
-        return "エラー: frames は 1-30 の範囲で指定してください"
+    # frames=0: 無制限モード（Pattern B、Android 側の絶対上限10分が発動するまで継続）
+    # frames=1-30: 指定枚数で自動終了（Pattern A）
+    if frames != 0 and not (1 <= frames <= 30):
+        return "エラー: frames は 0（無制限）または 1-30 の範囲で指定してください"
     if not (0.3 <= interval_sec <= 5.0):
         return "エラー: interval_sec は 0.3-5.0 の範囲で指定してください"
 
@@ -70,8 +72,11 @@ def _camera_stream(args) -> str:
     if state.get("stream_active"):
         return "エラー: 既に camera_stream がアクティブです。camera_stream_stop で停止してから再開してください"
 
-    estimated_sec = frames * interval_sec
-    summary = f"facing={facing} frames={frames} interval={interval_sec}s (約{estimated_sec:.1f}秒)"
+    if frames == 0:
+        summary = f"facing={facing} frames=無制限 interval={interval_sec}s (camera_stream_stopで明示終了、未指定なら最大10分)"
+    else:
+        estimated_sec = frames * interval_sec
+        summary = f"facing={facing} frames={frames} interval={interval_sec}s (約{estimated_sec:.1f}秒)"
     preview = _build_approval_preview("camera_stream", summary, args)
     if not request_approval("camera_stream", preview, timeout_sec=60):
         return "キャンセル: 撮影は承認されませんでした"
