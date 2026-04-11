@@ -18,6 +18,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.BarChart
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -327,6 +330,37 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var currentScreen by remember { mutableStateOf(Screen.Main) }
+    var showStopConfirm by remember { mutableStateOf(false) }
+
+    if (showStopConfirm) {
+        AlertDialog(
+            onDismissRequest = { showStopConfirm = false },
+            containerColor = Color(0xFF1A1A2E),
+            titleContentColor = Color(0xFFEF5350),
+            textContentColor = Color.White.copy(alpha = 0.85f),
+            title = { Text("Noetic_seed を終了しますか？") },
+            text = {
+                Text(
+                    "プロセスが完全に終了します。再開には PC で run.bat の実行が必要です。\n\n" +
+                    "「一時停止」ならスマホからいつでも再開できます。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showStopConfirm = false
+                        vm.sendServerCommand("stop")
+                        scope.launch { drawerState.close() }
+                    }
+                ) { Text("終了", color = Color(0xFFEF5350)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStopConfirm = false }) {
+                    Text("キャンセル", color = Color.White.copy(alpha = 0.7f))
+                }
+            }
+        )
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -412,6 +446,25 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
                     ),
                     modifier = Modifier.padding(horizontal = 12.dp),
                 )
+                Spacer(modifier = Modifier.weight(1f))
+                HorizontalDivider(color = Color(0xFF333355), modifier = Modifier.padding(vertical = 8.dp))
+                NavigationDrawerItem(
+                    icon = {
+                        Icon(
+                            Icons.Default.PowerSettingsNew,
+                            contentDescription = null,
+                            tint = Color(0xFFEF5350),
+                        )
+                    },
+                    label = { Text("Noetic_seed を終了", color = Color(0xFFEF5350)) },
+                    selected = false,
+                    onClick = { showStopConfirm = true },
+                    colors = NavigationDrawerItemDefaults.colors(
+                        unselectedContainerColor = Color.Transparent,
+                    ),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                )
+                Spacer(modifier = Modifier.height(16.dp))
             }
         }
     ) {
@@ -464,6 +517,9 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
                         onMenuClick = { scope.launch { drawerState.open() } },
                         onSendChat = { text -> vm.sendChat(text) },
                         onApproval = { id, approved -> vm.sendApproval(id, approved) },
+                        onPauseToggle = {
+                            vm.sendServerCommand(if (state.paused) "resume" else "pause")
+                        },
                     )
                     1 -> DashboardScreen(
                         state = state,
@@ -590,7 +646,13 @@ fun ProfileSelectScreen(profiles: List<ProfileInfo>, onSelect: (String) -> Unit)
 // ===== Main Screen =====
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(state: IkuState, onMenuClick: () -> Unit, onSendChat: (String) -> Unit = {}, onApproval: (String, Boolean) -> Unit = { _, _ -> }) {
+fun MainScreen(
+    state: IkuState,
+    onMenuClick: () -> Unit,
+    onSendChat: (String) -> Unit = {},
+    onApproval: (String, Boolean) -> Unit = { _, _ -> },
+    onPauseToggle: () -> Unit = {},
+) {
     val bgColor by animateColorAsState(
         targetValue = entropyToColor(state.entropy),
         animationSpec = tween(durationMillis = 2000), label = "bg",
@@ -626,6 +688,18 @@ fun MainScreen(state: IkuState, onMenuClick: () -> Unit, onSendChat: (String) ->
                     color = Color.White, fontWeight = FontWeight.Bold,
                 )
                 Spacer(modifier = Modifier.weight(1f))
+                // pause/resume トグル
+                IconButton(
+                    onClick = onPauseToggle,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        if (state.paused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                        contentDescription = if (state.paused) "再開" else "一時停止",
+                        tint = if (state.paused) Color(0xFFFFB74D) else Color.White.copy(alpha = 0.8f),
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
                 // 接続インジケータ
                 Box(
                     modifier = Modifier
@@ -633,6 +707,54 @@ fun MainScreen(state: IkuState, onMenuClick: () -> Unit, onSendChat: (String) ->
                         .clip(CircleShape)
                         .background(if (state.connected) Color(0xFF76FF03) else Color.Gray)
                 )
+            }
+
+            // 一時停止中バナー（paused のときのみ表示）
+            if (state.paused) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFFFFB74D).copy(alpha = 0.18f))
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Pause,
+                            contentDescription = null,
+                            tint = Color(0xFFFFB74D),
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "一時停止中",
+                                color = Color(0xFFFFB74D),
+                                fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                "サイクルは停止、外部メッセージは受信中",
+                                color = Color.White.copy(alpha = 0.65f),
+                                fontSize = 11.sp,
+                            )
+                        }
+                        Button(
+                            onClick = onPauseToggle,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFB74D)),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("再開", color = Color.Black, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
 
             // 中央キャラ表示領域（将来3Dモデル。今はentropy表示）

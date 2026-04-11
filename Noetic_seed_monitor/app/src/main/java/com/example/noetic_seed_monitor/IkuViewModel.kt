@@ -61,6 +61,7 @@ data class IkuState(
     val profileSelected: Boolean = false,
     val profileStarted: Boolean = false,
     val pendingCameraCapture: Boolean = false,
+    val paused: Boolean = false,
     val llmProviders: List<LlmProviderInfo> = emptyList(),
     val llmActive: LlmActiveConfig = LlmActiveConfig(),
     val llmSetResult: String? = null,
@@ -106,6 +107,10 @@ class IkuViewModel : ViewModel() {
 
     fun sendChat(text: String) {
         IkuMonitorService.instance?.sendChat(text)
+    }
+
+    fun sendServerCommand(action: String) {
+        IkuMonitorService.instance?.sendServerCommand(action)
     }
 
     fun sendWsMessage(msg: JsonObject) {

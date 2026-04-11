@@ -47,8 +47,8 @@ class IkuMonitorService : Service() {
 
     companion object {
         private const val TAG = "IkuMonitorService"
-        const val CHANNEL_ID_PERSISTENT = "iku_service_persistent"
-        const val CHANNEL_ID_EVENTS = "iku_channel"
+        const val CHANNEL_ID_PERSISTENT = "noetic_seed_service_persistent"
+        const val CHANNEL_ID_EVENTS = "noetic_seed_channel"
         const val NOTIF_ID_PERSISTENT = 1
         const val ACTION_WAKEUP = "com.example.noetic_seed_monitor.action.WAKEUP"
 
@@ -157,17 +157,17 @@ class IkuMonitorService : Service() {
             val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             // 常駐通知用（音なし、低優先度）
             val persistentCh = NotificationChannel(
-                CHANNEL_ID_PERSISTENT, "iku monitoring",
+                CHANNEL_ID_PERSISTENT, "Noetic_seed monitoring",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "iku の監視セッションを継続するための常駐通知"
+                description = "Noetic_seed の監視セッションを継続するための常駐通知"
                 setSound(null, null)
                 enableVibration(false)
             }
             mgr.createNotificationChannel(persistentCh)
             // イベント通知用（reply, approval）
             val eventsCh = NotificationChannel(
-                CHANNEL_ID_EVENTS, "iku 通知",
+                CHANNEL_ID_EVENTS, "Noetic_seed 通知",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "AIからのメッセージと承認要求"
@@ -186,7 +186,7 @@ class IkuMonitorService : Service() {
         )
         val builder = NotificationCompat.Builder(this, CHANNEL_ID_PERSISTENT)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("iku monitoring")
+            .setContentTitle("Noetic_seed monitoring")
             .setContentText(statusText)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
@@ -401,6 +401,7 @@ class IkuMonitorService : Service() {
                             "id" to (obj.get("id")?.asString ?: ""),
                         )
                     } ?: current.pendingItems,
+                    paused = json.get("paused")?.asBoolean ?: current.paused,
                 )
             }
             "self" -> {
@@ -455,7 +456,9 @@ class IkuMonitorService : Service() {
                 val newReplies = (current.replies + content).takeLast(50)
                 val newLines = (current.logLines + "[AI] $content").takeLast(maxLogLines)
                 _state.value = current.copy(replies = newReplies, logLines = newLines)
-                sendEventNotification("iku", content.take(200))
+                // 送信者名は個体名（state.self.name）を優先、なければ Noetic_seed
+                val senderName = current.selfModel["name"]?.takeIf { it.isNotBlank() } ?: "Noetic_seed"
+                sendEventNotification(senderName, content.take(200))
             }
             "approval_request" -> {
                 val req = ApprovalRequest(
@@ -573,6 +576,19 @@ class IkuMonitorService : Service() {
         wsClient?.send(msg)
     }
 
+    fun sendServerCommand(action: String) {
+        val msg = JsonObject().apply {
+            addProperty("type", "server_command")
+            addProperty("action", action)
+        }
+        wsClient?.send(msg)
+        // 楽観的更新（次の state broadcast で確定）
+        when (action) {
+            "pause" -> _state.value = _state.value.copy(paused = true)
+            "resume" -> _state.value = _state.value.copy(paused = false)
+        }
+    }
+
     fun runTestTool(name: String, args: Map<String, String>) {
         val argsObj = JsonObject()
         args.forEach { (k, v) -> argsObj.addProperty(k, v) }
@@ -666,7 +682,7 @@ class IkuMonitorService : Service() {
 
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "iku_screen",
+            "noetic_seed_screen",
             width, height, density,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface, null, null

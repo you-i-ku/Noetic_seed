@@ -86,7 +86,7 @@ from tools import TOOLS, LEVEL_TOOLS
 from tools.sandbox import AI_CREATED_TOOLS, _DANGEROUS_PATTERNS, _run_ai_tool
 from tools.x_tools import X_SESSION_PATH, _x_do_login, _x_get_notifications
 from tools.elyth_tools import _elyth_info as _elyth_get_info
-from core.ws_server import start_ws_server, broadcast_log, broadcast_state, broadcast_self, broadcast_e_values, get_pending_chats
+from core.ws_server import start_ws_server, broadcast_log, broadcast_state, broadcast_self, broadcast_e_values, get_pending_chats, is_paused
 
 
 # === メインループ ===
@@ -155,6 +155,19 @@ def main():
         while True:
             tick_start = time.time()
             tick_dt = datetime.now()
+
+            # paused 中: AI の主観時間を完全に止める
+            # - 内部状態（entropy/pressure/signals）は凍結
+            # - 外部メッセージは chat_queue に溜まる（drain しない、resume 後に一斉流入）
+            # - broadcast_state だけは維持（アプリが現在値を見続けられる）
+            if is_paused():
+                now_ts = time.time()
+                if now_ts - _last_env_inject >= ENV_INJECT_INTERVAL:
+                    _last_env_inject = now_ts
+                    broadcast_state(state)
+                elapsed = time.time() - tick_start
+                time.sleep(max(0.0, 1.0 - elapsed))
+                continue
 
             # measured_entropy（実測。10tickに1回計算、それ以外はキャッシュ）
             _tick_count = getattr(main, '_tick_count', 0) + 1

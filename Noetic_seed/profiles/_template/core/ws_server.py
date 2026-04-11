@@ -20,6 +20,12 @@ _pending_approval: dict = {}  # 現在承認待ちのリクエスト
 _device_queue: queue.Queue = queue.Queue()  # デバイス応答キュー
 _pending_device: dict = {}  # 現在デバイス応答待ちのリクエスト
 _test_tool_queue: queue.Queue = queue.Queue()  # テストタブからの実行要求
+_paused: bool = False  # サイクル一時停止フラグ（pause/resume で切替、メモリ内のみ）
+
+
+def is_paused() -> bool:
+    """main.py が毎 tick 呼ぶ。pause 中は cycle break を抑制する判定に使う。"""
+    return _paused
 
 # === camera_stream 非同期処理用 ===
 _stream_frames_lock = threading.Lock()
@@ -193,6 +199,27 @@ async def _ws_handler(websocket):
                     except Exception as e:
                         print(f"  [ws] set_llm error: {e}")
                         broadcast({"type": "set_llm_result", "ok": False, "error": str(e)[:200]})
+                elif msg_type == "server_command":
+                    # アプリからの pause/resume/stop コマンド
+                    global _paused
+                    action = data.get("action", "").strip()
+                    if action == "pause":
+                        _paused = True
+                        print(f"  [ws] server_command: pause")
+                        broadcast({"type": "server_command_result", "action": "pause", "ok": True})
+                    elif action == "resume":
+                        _paused = False
+                        print(f"  [ws] server_command: resume")
+                        broadcast({"type": "server_command_result", "action": "resume", "ok": True})
+                    elif action == "stop":
+                        print(f"  [ws] server_command: stop (graceful exit)")
+                        broadcast({"type": "server_command_result", "action": "stop", "ok": True})
+                        # 送信が flush されるよう少し待ってから exit
+                        await asyncio.sleep(0.3)
+                        import os as _os
+                        _os._exit(0)
+                    else:
+                        print(f"  [ws] unknown server_command action: {action}")
                 elif msg_type == "config":
                     pass
             except json.JSONDecodeError:
@@ -272,6 +299,7 @@ def broadcast_state(state: dict):
         "pressure": state.get("pressure", 0),
         "pending_count": len(state.get("pending", [])),
         "pending_items": [{"type": p.get("type",""), "content": p.get("content","")[:80], "id": p.get("id","")} for p in state.get("pending", [])[:5]],
+        "paused": _paused,
     })
 
 
