@@ -141,6 +141,28 @@ def main():
         print(f"[ERROR] main.py not found in {profile_dir}")
         sys.exit(1)
 
+    # set_llm は _template/settings.json に書き込むので、別プロファイル起動時は転送する
+    if selected != "_template":
+        _tmpl_settings = PROFILES_DIR / "_template" / "settings.json"
+        _prof_settings = profile_dir / "settings.json"
+        try:
+            with open(_tmpl_settings, encoding="utf-8") as f:
+                _tcfg = json.load(f)
+            with open(_prof_settings, encoding="utf-8") as f:
+                _pcfg = json.load(f)
+            _changed = False
+            for _k in ("provider", "model"):
+                if _k in _tcfg and _tcfg[_k] != _pcfg.get(_k):
+                    _pcfg[_k] = _tcfg[_k]
+                    _changed = True
+            if _changed:
+                with open(_prof_settings, "w", encoding="utf-8") as f:
+                    json.dump(_pcfg, f, ensure_ascii=False, indent=2)
+                print(f"  [sync] provider/model を {selected} に転送: "
+                      f"{_pcfg.get('provider')}/{_pcfg.get('model')}")
+        except Exception as e:
+            print(f"  [sync] settings転送スキップ: {e}")
+
     print(f"\n  Starting profile: {selected}")
     print(f"  (WSシャットダウン → subprocess で main.py 起動。アプリは自動再接続します)\n")
 

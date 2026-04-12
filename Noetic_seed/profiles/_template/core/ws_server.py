@@ -21,11 +21,18 @@ _device_queue: queue.Queue = queue.Queue()  # デバイス応答キュー
 _pending_device: dict = {}  # 現在デバイス応答待ちのリクエスト
 _test_tool_queue: queue.Queue = queue.Queue()  # テストタブからの実行要求
 _paused: bool = False  # サイクル一時停止フラグ（pause/resume で切替、メモリ内のみ）
+_profile_running: bool = False  # main.py 稼働中フラグ（server.py 時は False のまま）
 
 
 def is_paused() -> bool:
     """main.py が毎 tick 呼ぶ。pause 中は cycle break を抑制する判定に使う。"""
     return _paused
+
+
+def set_profile_running(running: bool = True):
+    """main.py 起動時に呼ぶ。接続時に state を常に送るようになる。"""
+    global _profile_running
+    _profile_running = running
 
 # === camera_stream 非同期処理用 ===
 _stream_frames_lock = threading.Lock()
@@ -75,7 +82,7 @@ async def _ws_handler(websocket):
             "recent_logs": _ws_log_buffer[-50:],
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }, ensure_ascii=False))
-        if _current_state:
+        if _current_state or _profile_running:
             await websocket.send(json.dumps({
                 "type": "state",
                 "entropy": _current_state.get("entropy", 0.65),
@@ -84,9 +91,10 @@ async def _ws_handler(websocket):
                 "tool_level": _current_state.get("tool_level", 0),
                 "pressure": _current_state.get("pressure", 0),
             }, ensure_ascii=False))
+        if _current_state.get("self"):
             await websocket.send(json.dumps({
                 "type": "self",
-                "data": _current_state.get("self", {}),
+                "data": _current_state["self"],
             }, ensure_ascii=False))
     except Exception:
         pass

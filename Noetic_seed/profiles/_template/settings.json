@@ -1,6 +1,6 @@
 {
-  "provider": "gemini",
-  "model": "gemini-3.1-flash-lite-preview",
+  "provider": "lmstudio",
+  "model": "gemma-4-26b-a4b-it",
   "vision_max_size": 896,
   "ws_token": "iku2026",
   "prompt_budget": {

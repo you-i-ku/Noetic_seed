@@ -87,7 +87,7 @@ from tools import TOOLS, LEVEL_TOOLS
 from tools.sandbox import AI_CREATED_TOOLS, _DANGEROUS_PATTERNS, _run_ai_tool
 from tools.x_tools import X_SESSION_PATH, _x_do_login, _x_get_notifications
 from tools.elyth_tools import _elyth_info as _elyth_get_info
-from core.ws_server import start_ws_server, broadcast_log, broadcast_state, broadcast_self, broadcast_e_values, get_pending_chats, is_paused
+from core.ws_server import start_ws_server, broadcast_log, broadcast_state, broadcast_self, broadcast_e_values, get_pending_chats, is_paused, set_profile_running
 
 
 # === メインループ ===
@@ -98,6 +98,7 @@ def main():
     print(f"state: {STATE_FILE}")
     _init_vector()
     ws_token = start_ws_server()
+    set_profile_running(True)
     print()
 
     state = load_state()

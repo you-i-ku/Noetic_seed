@@ -35,6 +35,9 @@ Noetic_seed_monitor/gradle/
 /.gradle/
 /local.properties
 
+# Backups
+Noetic_seed_backup_*/
+
 # Old project
 AI/
 minimumtest/
