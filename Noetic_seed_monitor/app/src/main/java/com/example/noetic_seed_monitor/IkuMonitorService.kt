@@ -119,6 +119,8 @@ class IkuMonitorService : Service() {
                 NOTIF_ID_PERSISTENT,
                 persistentNotif,
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                    or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             )
         } else {
             startForeground(NOTIF_ID_PERSISTENT, persistentNotif)
@@ -340,7 +342,7 @@ class IkuMonitorService : Service() {
     // === WebSocket 接続 ===
     fun connect(url: String, token: String) {
         wsClient?.disconnect()
-        _state.value = _state.value.copy(phase = AppPhase.Reconnecting, session = null)
+        _state.value = _state.value.copy(phase = AppPhase.Reconnecting, session = null, error = null)
 
         // URL/token を保存（ConnectScreen のプリフィル用）
         try {
@@ -362,10 +364,17 @@ class IkuMonitorService : Service() {
                 updatePersistentNotification("切断 — 再接続中...")
             },
             onDormant = {
-                // セッション TTL 超過 (2分) → セッション死亡、完全リセット
+                // セッション TTL 超過 or 初回接続失敗 → 完全リセット
+                val hadSession = _state.value.session != null
                 wsClient?.disconnect()
                 wsClient = null
-                _state.value = IkuState(phase = AppPhase.Disconnected)
+                _state.value = IkuState(
+                    phase = AppPhase.Disconnected,
+                    error = if (hadSession)
+                        "サーバーとの接続が切断されました。"
+                    else
+                        "サーバーに接続できませんでした。\nサーバーの状態を確認してください。",
+                )
                 updatePersistentNotification("切断")
             },
             onError = { _state.value = _state.value.copy(error = it) },
@@ -667,14 +676,17 @@ class IkuMonitorService : Service() {
     // ScreenCaptureActivity から呼ばれる。permission granted 後の処理。
     fun startScreenCapture(resultCode: Int, resultData: Intent, frames: Int, intervalSec: Float) {
         stopScreenCapture()
+        Log.d(TAG, "startScreenCapture: frames=$frames interval=$intervalSec")
 
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = try {
             mpm.getMediaProjection(resultCode, resultData)
         } catch (e: Exception) {
             Log.e(TAG, "getMediaProjection failed", e)
+            android.widget.Toast.makeText(applicationContext, "[screen_peek] getMediaProjection失敗: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
             return
         }
+        Log.d(TAG, "MediaProjection obtained successfully")
 
         // MediaProjection が予期せず停止した時のコールバック
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
@@ -701,6 +713,7 @@ class IkuMonitorService : Service() {
         )
 
         CameraStreamBridge.reset()
+        CameraStreamBridge.sendMessage = { json -> wsClient?.send(json) }
 
         screenCaptureJob = CoroutineScope(Dispatchers.IO).launch {
             runScreenCaptureLoop(frames, intervalSec, width, height)

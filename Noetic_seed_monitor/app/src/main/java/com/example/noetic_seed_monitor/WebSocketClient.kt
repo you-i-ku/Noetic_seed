@@ -21,6 +21,7 @@ class IkuWebSocketClient(
     private var token: String = ""
     private var shouldReconnect = true
     private var dormant = false
+    private var hasEverConnected = false  // 一度も接続成功してなければ初回失敗で即 dormant
 
     // 指数バックオフ: 200ms → 1s → 5s → 30s → 60s（以降 60s 維持）
     private val backoffSchedule = longArrayOf(200L, 1000L, 5000L, 30000L, 60000L)
@@ -34,6 +35,7 @@ class IkuWebSocketClient(
         token = authToken
         shouldReconnect = true
         dormant = false
+        hasEverConnected = false
         resetBackoff()
         doConnect()
     }
@@ -47,6 +49,7 @@ class IkuWebSocketClient(
                     addProperty("token", token)
                 }
                 webSocket.send(gson.toJson(auth))
+                hasEverConnected = true
                 resetBackoff()
                 onConnected()
             }
@@ -79,6 +82,13 @@ class IkuWebSocketClient(
 
     private fun scheduleReconnect() {
         if (!shouldReconnect || dormant) return
+
+        // 一度も接続成功してない（初回 Connect で即失敗）→ リトライせず即 dormant
+        if (!hasEverConnected) {
+            dormant = true
+            onDormant?.invoke()
+            return
+        }
 
         if (firstFailureTime == 0L) {
             firstFailureTime = System.currentTimeMillis()

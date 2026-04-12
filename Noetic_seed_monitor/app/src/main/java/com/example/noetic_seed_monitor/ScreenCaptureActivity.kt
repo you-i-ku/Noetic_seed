@@ -33,15 +33,18 @@ class ScreenCaptureActivity : ComponentActivity() {
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
             Log.d(TAG, "MediaProjection permission granted")
+            android.widget.Toast.makeText(this, "[screen_peek] 許可OK → キャプチャ開始", android.widget.Toast.LENGTH_SHORT).show()
             val svc = IkuMonitorService.instance
             if (svc != null) {
                 svc.startScreenCapture(result.resultCode, data, frames, interval)
             } else {
                 Log.w(TAG, "IkuMonitorService.instance is null, cannot start capture")
+                android.widget.Toast.makeText(this, "[screen_peek] Service=null!", android.widget.Toast.LENGTH_LONG).show()
                 notifyFailure("service not available")
             }
         } else {
             Log.d(TAG, "MediaProjection permission denied or cancelled")
+            android.widget.Toast.makeText(this, "[screen_peek] 許可拒否", android.widget.Toast.LENGTH_LONG).show()
             notifyFailure("permission denied")
         }
         finish()
@@ -60,11 +63,13 @@ class ScreenCaptureActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        android.widget.Toast.makeText(this, "[screen_peek] 許可ダイアログ表示中...", android.widget.Toast.LENGTH_SHORT).show()
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         try {
             launcher.launch(mpm.createScreenCaptureIntent())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch MediaProjection intent", e)
+            android.widget.Toast.makeText(this, "[screen_peek] 起動失敗: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
             notifyFailure(e.message ?: "launch failed")
             finish()
         }

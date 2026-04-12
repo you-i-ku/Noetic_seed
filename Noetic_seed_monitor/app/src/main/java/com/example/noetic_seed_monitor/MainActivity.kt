@@ -296,12 +296,9 @@ fun IkuApp(vm: IkuViewModel = viewModel()) {
     var pendingProfileName by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(phase) {
         if (phase !is AppPhase.ProfileSelect) pendingProfileName = null
-        // セッション TTL 超過で Disconnected に落ちた場合もリセット
-        if (phase is AppPhase.Disconnected) userConfirmed = false
     }
 
     if (!userConfirmed) {
-        // Connect ボタンを通るまで何も出さない
         ConnectScreen(
             context = context,
             onConnect = { url, token ->
@@ -312,8 +309,11 @@ fun IkuApp(vm: IkuViewModel = viewModel()) {
     } else {
         when (phase) {
             is AppPhase.Disconnected -> {
-                // セッション死亡 → ConnectScreen に戻す
-                userConfirmed = false
+                // 接続失敗 or セッション切断 → エラー画面
+                ConnectionErrorScreen(
+                    message = state.error ?: "接続が切断されました。",
+                    onBack = { userConfirmed = false },
+                )
             }
             is AppPhase.Reconnecting -> {
                 // ネット瞬断（Activity 生存中）→ メイン画面 + バナー or Loading
@@ -386,6 +386,33 @@ fun LoadingScreen(message: String) {
             CircularProgressIndicator(color = Color(0xFF4FC3F7))
             Spacer(modifier = Modifier.height(16.dp))
             Text(message, color = Color.Gray, fontSize = 13.sp)
+        }
+    }
+}
+
+@Composable
+fun ConnectionErrorScreen(message: String, onBack: () -> Unit) {
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A1A)) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(32.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("noetic-seed", style = MaterialTheme.typography.headlineMedium, color = Color(0xFF4FC3F7))
+            Spacer(modifier = Modifier.height(48.dp))
+            Text(
+                message,
+                color = Color(0xFFEF5350),
+                fontSize = 15.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(32.dp))
+            Button(
+                onClick = onBack,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4FC3F7)),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("接続画面に戻る", color = Color.Black) }
         }
     }
 }
@@ -1301,6 +1328,23 @@ fun TestScreen(state: IkuState, onMenuClick: () -> Unit, onRunTool: (String, Map
                             onRunTool("camera_stream", mapOf(
                                 "facing" to "front", "frames" to "5", "interval_sec" to "1.0",
                                 "intent" to "test stream", "expect" to "5 jpegs"
+                            ))
+                        }
+                    }
+                }
+
+                item {
+                    TestSection("📱 画面キャプチャ") {
+                        TestButton("1枚") {
+                            onRunTool("screen_peek", mapOf(
+                                "frames" to "1", "interval_sec" to "1.0",
+                                "intent" to "test screen 1", "message" to "テスト画面取得"
+                            ))
+                        }
+                        TestButton("3枚 2秒間隔") {
+                            onRunTool("screen_peek", mapOf(
+                                "frames" to "3", "interval_sec" to "2.0",
+                                "intent" to "test screen 3", "message" to "テスト画面取得"
                             ))
                         }
                     }
