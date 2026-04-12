@@ -133,12 +133,6 @@ class IkuMonitorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_WAKEUP) {
-            Log.d(TAG, "ACTION_WAKEUP 受信、再接続試行")
-            wsClient?.wakeUp()
-            updatePersistentNotification("再接続中...")
-        }
-        // START_STICKY: Android が Service を殺しても自動復活
         return START_STICKY
     }
 
@@ -176,7 +170,7 @@ class IkuMonitorService : Service() {
         }
     }
 
-    private fun buildPersistentNotification(statusText: String, withWakeup: Boolean = false): Notification {
+    private fun buildPersistentNotification(statusText: String): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -184,7 +178,7 @@ class IkuMonitorService : Service() {
             this, 0, openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID_PERSISTENT)
+        return NotificationCompat.Builder(this, CHANNEL_ID_PERSISTENT)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("Noetic_seed monitoring")
             .setContentText(statusText)
@@ -192,24 +186,13 @@ class IkuMonitorService : Service() {
             .setOngoing(true)
             .setSilent(true)
             .setContentIntent(pending)
-
-        if (withWakeup) {
-            val wakeupIntent = Intent(this, IkuMonitorService::class.java).apply {
-                action = ACTION_WAKEUP
-            }
-            val wakeupPending = PendingIntent.getService(
-                this, 1, wakeupIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            builder.addAction(android.R.drawable.ic_menu_rotate, "再接続", wakeupPending)
-        }
-        return builder.build()
+            .build()
     }
 
-    private fun updatePersistentNotification(statusText: String, withWakeup: Boolean = false) {
+    private fun updatePersistentNotification(statusText: String) {
         try {
             val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            mgr.notify(NOTIF_ID_PERSISTENT, buildPersistentNotification(statusText, withWakeup))
+            mgr.notify(NOTIF_ID_PERSISTENT, buildPersistentNotification(statusText))
         } catch (_: SecurityException) {
         }
     }
@@ -357,11 +340,17 @@ class IkuMonitorService : Service() {
     // === WebSocket 接続 ===
     fun connect(url: String, token: String) {
         wsClient?.disconnect()
-        _state.value = _state.value.copy(phase = AppPhase.Reconnecting)
+        _state.value = _state.value.copy(phase = AppPhase.Reconnecting, session = null)
+
+        // URL/token を保存（ConnectScreen のプリフィル用）
+        try {
+            val prefs = applicationContext.getSharedPreferences("noetic_seed", Context.MODE_PRIVATE)
+            prefs.edit().putString("ws_url", url).putString("ws_token", token).apply()
+        } catch (_: Exception) {}
+
         wsClient = IkuWebSocketClient(
             onMessage = { handleMessage(it) },
             onConnected = {
-                // WS 接続完了 → サーバ応答待ち（profile_list or sync が来るまで Loading）
                 _state.value = _state.value.copy(phase = AppPhase.WaitingForServer, error = null)
                 updatePersistentNotification("接続中")
             },
@@ -373,8 +362,11 @@ class IkuMonitorService : Service() {
                 updatePersistentNotification("切断 — 再接続中...")
             },
             onDormant = {
-                _state.value = _state.value.copy(phase = AppPhase.Reconnecting)
-                updatePersistentNotification("接続待機停止 — タップで再開", withWakeup = true)
+                // セッション TTL 超過 (2分) → セッション死亡、完全リセット
+                wsClient?.disconnect()
+                wsClient = null
+                _state.value = IkuState(phase = AppPhase.Disconnected)
+                updatePersistentNotification("切断")
             },
             onError = { _state.value = _state.value.copy(error = it) },
         )
@@ -498,7 +490,9 @@ class IkuMonitorService : Service() {
                 updateSession(setRunning = false) { it.copy(approvalRequests = it.approvalRequests.filter { r -> r.id != apId }) }
             }
             "profile_list" -> {
-                // サーバが「プロファイル未選択」状態 → セッション全リセット + ProfileSelect フェーズ
+                // 既にプロファイル選択済み or 稼働中なら無視
+                // （server.py の 0.5s 定期 broadcast が selectProfile 後も到着する対策）
+                if (current.phase is AppPhase.ProfileLoading || current.phase is AppPhase.Running) return
                 val arr = json.getAsJsonArray("profiles")
                 if (arr != null) {
                     val profiles = arr.map { item ->
@@ -510,7 +504,11 @@ class IkuMonitorService : Service() {
                             energy = obj.get("energy")?.asFloat ?: 50f,
                         )
                     }
-                    _state.value = IkuState(phase = AppPhase.ProfileSelect(profiles))
+                    _state.value = current.copy(
+                        phase = AppPhase.ProfileSelect(profiles),
+                        session = null,
+                        error = null,
+                    )
                 }
             }
             "device_request" -> {

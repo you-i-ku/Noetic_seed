@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -43,6 +44,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.content.Context
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.window.Dialog
@@ -286,41 +288,88 @@ fun IkuApp(vm: IkuViewModel = viewModel()) {
     val state by vm.state.collectAsState()
     val phase = state.phase
 
+    // Activity 生存中のみ保持。閉じたらリセット → 次回は ConnectScreen から。
+    // これにより「ネット瞬断 → メイン画面維持」と「アプリ再起動 → ConnectScreen」を自然に区別。
+    var userConfirmed by remember { mutableStateOf(false) }
+
     // プロファイル選択 → 起動前に LLM 設定を経由させるための中間状態
     var pendingProfileName by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(phase) {
         if (phase !is AppPhase.ProfileSelect) pendingProfileName = null
+        // セッション TTL 超過で Disconnected に落ちた場合もリセット
+        if (phase is AppPhase.Disconnected) userConfirmed = false
     }
 
-    when (phase) {
-        is AppPhase.Disconnected -> ConnectScreen(onConnect = { url, token -> vm.connect(url, token) })
-        is AppPhase.Reconnecting -> LoadingScreen("再接続中...")
-        is AppPhase.WaitingForServer -> LoadingScreen("サーバ応答待ち...")
-        is AppPhase.ProfileSelect -> {
-            val pending = pendingProfileName
-            if (pending != null) {
-                PreLaunchConfigScreen(
-                    profileName = pending,
-                    state = state,
-                    onRequestProviders = { vm.requestLlmProviders() },
-                    onCancel = { pendingProfileName = null },
-                    onConfirm = { provider, model, apiKey, baseUrl ->
-                        vm.setLlm(provider, model, apiKey, baseUrl)
-                        vm.selectProfile(pending)
-                    },
-                )
-            } else {
-                ProfileSelectScreen(
-                    profiles = phase.profiles,
-                    onSelect = { name ->
-                        pendingProfileName = name
-                        vm.requestLlmProviders()
-                    },
-                )
+    if (!userConfirmed) {
+        // Connect ボタンを通るまで何も出さない
+        ConnectScreen(
+            context = context,
+            onConnect = { url, token ->
+                vm.connect(url, token)
+                userConfirmed = true
+            },
+        )
+    } else {
+        when (phase) {
+            is AppPhase.Disconnected -> {
+                // セッション死亡 → ConnectScreen に戻す
+                userConfirmed = false
             }
+            is AppPhase.Reconnecting -> {
+                // ネット瞬断（Activity 生存中）→ メイン画面 + バナー or Loading
+                if (state.session != null) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        AppWithDrawer(state = state, vm = vm)
+                        // 再接続中バナー
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.TopCenter)
+                                .padding(top = 36.dp, start = 16.dp, end = 16.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFFEF5350).copy(alpha = 0.9f))
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        ) {
+                            Text(
+                                "再接続中...",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                } else {
+                    LoadingScreen("再接続中...")
+                }
+            }
+            is AppPhase.WaitingForServer -> LoadingScreen("サーバ応答待ち...")
+            is AppPhase.ProfileSelect -> {
+                val pending = pendingProfileName
+                if (pending != null) {
+                    PreLaunchConfigScreen(
+                        profileName = pending,
+                        state = state,
+                        onRequestProviders = { vm.requestLlmProviders() },
+                        onCancel = { pendingProfileName = null },
+                        onConfirm = { provider, model, apiKey, baseUrl ->
+                            vm.setLlm(provider, model, apiKey, baseUrl)
+                            vm.selectProfile(pending)
+                        },
+                    )
+                } else {
+                    ProfileSelectScreen(
+                        profiles = phase.profiles,
+                        onSelect = { name ->
+                            pendingProfileName = name
+                            vm.requestLlmProviders()
+                        },
+                    )
+                }
+            }
+            is AppPhase.ProfileLoading -> LoadingScreen("${phase.name} 起動中...")
+            is AppPhase.Running -> AppWithDrawer(state = state, vm = vm)
         }
-        is AppPhase.ProfileLoading -> LoadingScreen("${phase.name} 起動中...")
-        is AppPhase.Running -> AppWithDrawer(state = state, vm = vm)
     }
 }
 
@@ -561,9 +610,11 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
 
 // ===== Connect Screen =====
 @Composable
-fun ConnectScreen(onConnect: (String, String) -> Unit) {
-    var url by remember { mutableStateOf("ws://192.168.1.") }
-    var token by remember { mutableStateOf("") }
+fun ConnectScreen(context: Context = LocalContext.current, onConnect: (String, String) -> Unit) {
+    // 前回の接続情報をプリフィル（セッション TTL 超過後でも 1 タップで再接続できるように）
+    val prefs = remember { context.getSharedPreferences("noetic_seed", Context.MODE_PRIVATE) }
+    var url by remember { mutableStateOf(prefs.getString("ws_url", "ws://192.168.1.") ?: "ws://192.168.1.") }
+    var token by remember { mutableStateOf(prefs.getString("ws_token", "") ?: "") }
 
     Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A1A)) {
         Column(

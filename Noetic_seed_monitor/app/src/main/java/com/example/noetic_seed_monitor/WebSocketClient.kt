@@ -26,8 +26,8 @@ class IkuWebSocketClient(
     private val backoffSchedule = longArrayOf(200L, 1000L, 5000L, 30000L, 60000L)
     private var consecutiveFailures = 0
     private var firstFailureTime = 0L
-    // 10分連続失敗で dormant 状態（能動再接続を停止）
-    private val dormantThresholdMs = 10 * 60 * 1000L
+    // 2分連続失敗でセッション死亡（Disconnected へ遷移）
+    private val dormantThresholdMs = 2 * 60 * 1000L
 
     fun connect(url: String, authToken: String) {
         serverUrl = url

@@ -93,15 +93,16 @@ def main():
     while selected is None:
         # アプリからの接続チェック
         if _ws_clients:
-            # プロファイルリストを送信
-            broadcast({
-                "type": "profile_list",
-                "profiles": profiles,
-            })
             print("  [ws] Profile list sent to app")
 
             # アプリからの選択を待つ
+            # 0.5秒毎に profile_list を再送（途中で新 client が来ても対応）
             while selected is None:
+                if _ws_clients:
+                    broadcast({
+                        "type": "profile_list",
+                        "profiles": profiles,
+                    })
                 prof = get_pending_profile()
                 if prof:
                     if any(p["name"] == prof for p in profiles):
