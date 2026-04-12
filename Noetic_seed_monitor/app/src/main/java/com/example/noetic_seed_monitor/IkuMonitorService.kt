@@ -295,13 +295,13 @@ class IkuMonitorService : Service() {
     fun finishCameraCapture(base64Image: String?, meta: Map<String, Any>?) {
         _cameraCallback?.invoke(base64Image, meta)
         _cameraCallback = null
-        _state.value = _state.value.copy(pendingCameraCapture = false)
+        updateSession(setRunning = false) { it.copy(pendingCameraCapture = false) }
     }
 
     fun finishCameraStream(base64Frames: List<String>?, meta: Map<String, Any>?) {
         _cameraStreamCallback?.invoke(base64Frames, meta)
         _cameraStreamCallback = null
-        _state.value = _state.value.copy(pendingCameraCapture = false)
+        updateSession(setRunning = false) { it.copy(pendingCameraCapture = false) }
     }
 
     private fun triggerCameraCapture() {
@@ -357,18 +357,23 @@ class IkuMonitorService : Service() {
     // === WebSocket 接続 ===
     fun connect(url: String, token: String) {
         wsClient?.disconnect()
+        _state.value = _state.value.copy(phase = AppPhase.Reconnecting)
         wsClient = IkuWebSocketClient(
             onMessage = { handleMessage(it) },
             onConnected = {
-                _state.value = _state.value.copy(connected = true, error = null)
+                // WS 接続完了 → サーバ応答待ち（profile_list or sync が来るまで Loading）
+                _state.value = _state.value.copy(phase = AppPhase.WaitingForServer, error = null)
                 updatePersistentNotification("接続中")
             },
             onDisconnected = {
-                _state.value = _state.value.copy(connected = false)
+                val wasRunning = _state.value.phase is AppPhase.Running
+                _state.value = _state.value.copy(
+                    phase = if (wasRunning) AppPhase.Reconnecting else _state.value.phase,
+                )
                 updatePersistentNotification("切断 — 再接続中...")
             },
             onDormant = {
-                _state.value = _state.value.copy(connected = false)
+                _state.value = _state.value.copy(phase = AppPhase.Reconnecting)
                 updatePersistentNotification("接続待機停止 — タップで再開", withWakeup = true)
             },
             onError = { _state.value = _state.value.copy(error = it) },
@@ -379,103 +384,103 @@ class IkuMonitorService : Service() {
     fun disconnect() {
         wsClient?.disconnect()
         wsClient = null
-        _state.value = _state.value.copy(connected = false)
+        _state.value = _state.value.copy(phase = AppPhase.Disconnected, session = null)
         updatePersistentNotification("切断")
+    }
+
+    // === セッションデータ更新ヘルパ ===
+    private fun updateSession(setRunning: Boolean = true, transform: (SessionData) -> SessionData) {
+        val current = _state.value
+        val s = current.session ?: SessionData()
+        _state.value = current.copy(
+            phase = if (setRunning) AppPhase.Running else current.phase,
+            session = transform(s),
+        )
     }
 
     // === WebSocket メッセージ処理 ===
     private fun handleMessage(json: JsonObject) {
         val type = json.get("type")?.asString ?: return
-        var current = _state.value
-
-        // サーバからの state/self/sync/e_values/log 受信 = プロファイル稼働中
-        // → profileSelected / profileStarted を自動推定（再接続時に ProfileScreen を飛ばす）
-        if (!current.profileStarted
-            && type in setOf("state", "self", "log", "sync", "e_values")
-        ) {
-            current = current.copy(profileSelected = true, profileStarted = true)
-            _state.value = current
-        }
+        val current = _state.value
 
         when (type) {
             "log" -> {
                 val text = json.get("text")?.asString ?: return
-                val newLines = (current.logLines + text).takeLast(maxLogLines)
-                _state.value = current.copy(logLines = newLines)
+                updateSession { it.copy(logLines = (it.logLines + text).takeLast(maxLogLines)) }
             }
             "state" -> {
-                _state.value = current.copy(
-                    entropy = json.get("entropy")?.asFloat ?: current.entropy,
-                    energy = json.get("energy")?.asFloat ?: current.energy,
-                    cycleId = json.get("cycle_id")?.asInt ?: current.cycleId,
-                    toolLevel = json.get("tool_level")?.asInt ?: current.toolLevel,
-                    pressure = json.get("pressure")?.asFloat ?: current.pressure,
-                    pendingCount = json.get("pending_count")?.asInt ?: current.pendingCount,
-                    pendingItems = json.getAsJsonArray("pending_items")?.map { item ->
-                        val obj = item.asJsonObject
-                        mapOf(
-                            "type" to (obj.get("type")?.asString ?: ""),
-                            "content" to (obj.get("content")?.asString ?: ""),
-                            "id" to (obj.get("id")?.asString ?: ""),
-                        )
-                    } ?: current.pendingItems,
-                    paused = json.get("paused")?.asBoolean ?: current.paused,
-                )
-            }
-            "self" -> {
-                val data = json.getAsJsonObject("data")
-                if (data != null) {
-                    val map = mutableMapOf<String, String>()
-                    val disp = mutableMapOf<String, Float>()
-                    val skipKeys = setOf("disposition", "last_e_values", "drives_state")
-                    for (key in data.keySet()) {
-                        if (key in skipKeys) continue
-                        val elem = data.get(key)
-                        map[key] = when {
-                            elem == null || elem.isJsonNull -> ""
-                            elem.isJsonPrimitive -> elem.asString
-                            elem.isJsonObject -> {
-                                val obj = elem.asJsonObject
-                                obj.keySet().joinToString(", ") { k ->
-                                    val v = obj.get(k)
-                                    "$k=${v?.asString ?: v.toString()}"
-                                }
-                            }
-                            else -> elem.toString()
-                        }
-                    }
-                    val dispObj = data.getAsJsonObject("disposition")
-                    if (dispObj != null) {
-                        for (k in dispObj.keySet()) {
-                            try {
-                                disp[k] = dispObj.get(k).asFloat
-                            } catch (_: Exception) {
-                            }
-                        }
-                    }
-                    _state.value = current.copy(selfModel = map, disposition = disp)
+                updateSession { s ->
+                    s.copy(
+                        entropy = json.get("entropy")?.asFloat ?: s.entropy,
+                        energy = json.get("energy")?.asFloat ?: s.energy,
+                        cycleId = json.get("cycle_id")?.asInt ?: s.cycleId,
+                        toolLevel = json.get("tool_level")?.asInt ?: s.toolLevel,
+                        pressure = json.get("pressure")?.asFloat ?: s.pressure,
+                        pendingCount = json.get("pending_count")?.asInt ?: s.pendingCount,
+                        pendingItems = json.getAsJsonArray("pending_items")?.map { item ->
+                            val obj = item.asJsonObject
+                            mapOf(
+                                "type" to (obj.get("type")?.asString ?: ""),
+                                "content" to (obj.get("content")?.asString ?: ""),
+                                "id" to (obj.get("id")?.asString ?: ""),
+                            )
+                        } ?: s.pendingItems,
+                        paused = json.get("paused")?.asBoolean ?: s.paused,
+                    )
                 }
             }
+            "self" -> {
+                val data = json.getAsJsonObject("data") ?: return
+                val map = mutableMapOf<String, String>()
+                val disp = mutableMapOf<String, Float>()
+                val skipKeys = setOf("disposition", "last_e_values", "drives_state")
+                for (key in data.keySet()) {
+                    if (key in skipKeys) continue
+                    val elem = data.get(key)
+                    map[key] = when {
+                        elem == null || elem.isJsonNull -> ""
+                        elem.isJsonPrimitive -> elem.asString
+                        elem.isJsonObject -> {
+                            val obj = elem.asJsonObject
+                            obj.keySet().joinToString(", ") { k ->
+                                val v = obj.get(k)
+                                "$k=${v?.asString ?: v.toString()}"
+                            }
+                        }
+                        else -> elem.toString()
+                    }
+                }
+                val dispObj = data.getAsJsonObject("disposition")
+                if (dispObj != null) {
+                    for (k in dispObj.keySet()) {
+                        try { disp[k] = dispObj.get(k).asFloat } catch (_: Exception) {}
+                    }
+                }
+                updateSession { it.copy(selfModel = map, disposition = disp) }
+            }
             "e_values" -> {
-                val newE1 = json.get("e1")?.asFloat ?: current.e1
-                val newE2 = json.get("e2")?.asFloat ?: current.e2
-                val newE3 = json.get("e3")?.asFloat ?: current.e3
-                val newE4 = json.get("e4")?.asFloat ?: current.e4
-                val newHistory =
-                    (current.eHistory + listOf(listOf(newE1, newE2, newE3, newE4))).takeLast(20)
-                _state.value = current.copy(
-                    e1 = newE1, e2 = newE2, e3 = newE3, e4 = newE4,
-                    negentropy = json.get("negentropy")?.asFloat ?: current.negentropy,
-                    eHistory = newHistory,
-                )
+                updateSession { s ->
+                    val newE1 = json.get("e1")?.asFloat ?: s.e1
+                    val newE2 = json.get("e2")?.asFloat ?: s.e2
+                    val newE3 = json.get("e3")?.asFloat ?: s.e3
+                    val newE4 = json.get("e4")?.asFloat ?: s.e4
+                    s.copy(
+                        e1 = newE1, e2 = newE2, e3 = newE3, e4 = newE4,
+                        negentropy = json.get("negentropy")?.asFloat ?: s.negentropy,
+                        eHistory = (s.eHistory + listOf(listOf(newE1, newE2, newE3, newE4))).takeLast(20),
+                    )
+                }
             }
             "reply" -> {
                 val content = json.get("content")?.asString ?: return
-                val newReplies = (current.replies + content).takeLast(50)
-                val newLines = (current.logLines + "[AI] $content").takeLast(maxLogLines)
-                _state.value = current.copy(replies = newReplies, logLines = newLines)
-                // 送信者名は個体名（state.self.name）を優先、なければ Noetic_seed
-                val senderName = current.selfModel["name"]?.takeIf { it.isNotBlank() } ?: "Noetic_seed"
+                updateSession { s ->
+                    s.copy(
+                        replies = (s.replies + content).takeLast(50),
+                        logLines = (s.logLines + "[AI] $content").takeLast(maxLogLines),
+                    )
+                }
+                val senderName = _state.value.session?.selfModel?.get("name")
+                    ?.takeIf { it.isNotBlank() } ?: "Noetic_seed"
                 sendEventNotification(senderName, content.take(200))
             }
             "approval_request" -> {
@@ -485,20 +490,15 @@ class IkuMonitorService : Service() {
                     preview = json.get("preview")?.asString ?: "",
                     timestamp = json.get("timestamp")?.asString ?: "",
                 )
-                _state.value = current.copy(
-                    approvalRequests = current.approvalRequests + req
-                )
+                updateSession(setRunning = false) { it.copy(approvalRequests = it.approvalRequests + req) }
                 sendApprovalNotification(req.id, req.tool, req.preview)
             }
             "approval_result" -> {
                 val apId = json.get("id")?.asString ?: return
-                _state.value = current.copy(
-                    approvalRequests = current.approvalRequests.filter { it.id != apId }
-                )
+                updateSession(setRunning = false) { it.copy(approvalRequests = it.approvalRequests.filter { r -> r.id != apId }) }
             }
             "profile_list" -> {
-                // profile_list 受信 = サーバが「プロファイル未選択」状態
-                // → セッション全リセット（前セッションの残骸を一掃）
+                // サーバが「プロファイル未選択」状態 → セッション全リセット + ProfileSelect フェーズ
                 val arr = json.getAsJsonArray("profiles")
                 if (arr != null) {
                     val profiles = arr.map { item ->
@@ -510,8 +510,7 @@ class IkuMonitorService : Service() {
                             energy = obj.get("energy")?.asFloat ?: 50f,
                         )
                     }
-                    // connected だけ維持、他はデフォルトにリセット
-                    _state.value = IkuState(connected = true, profiles = profiles)
+                    _state.value = IkuState(phase = AppPhase.ProfileSelect(profiles))
                 }
             }
             "device_request" -> {
@@ -522,18 +521,20 @@ class IkuMonitorService : Service() {
                     requestCamera = { facing, callback ->
                         _cameraCallback = callback
                         _cameraFacing = facing
-                        _state.value = _state.value.copy(pendingCameraCapture = true)
+                        updateSession(setRunning = false) { it.copy(pendingCameraCapture = true) }
                         triggerCameraCapture()
                     },
                     requestCameraStream = { facing, frames, intervalSec, callback ->
                         _cameraStreamCallback = callback
                         _cameraFacing = facing
-                        _state.value = _state.value.copy(pendingCameraCapture = true)
                         triggerCameraStream(facing, frames, intervalSec)
                     },
                 )
             }
             "sync" -> {
+                // sync はログ復元のみ。Running への遷移はしない
+                // （server.py のプロファイル選択モードでも空 sync が飛ぶため）
+                // Running への遷移は state/self/e_values/log に任せる
                 val logs = json.getAsJsonArray("recent_logs")
                 if (logs != null) {
                     val lines = mutableListOf<String>()
@@ -541,7 +542,9 @@ class IkuMonitorService : Service() {
                         val text = item.asJsonObject?.get("text")?.asString
                         if (text != null) lines.add(text)
                     }
-                    _state.value = current.copy(logLines = lines.takeLast(maxLogLines))
+                    if (lines.isNotEmpty()) {
+                        updateSession(setRunning = false) { it.copy(logLines = lines.takeLast(maxLogLines)) }
+                    }
                 }
             }
             "llm_providers_list" -> {
@@ -588,9 +591,7 @@ class IkuMonitorService : Service() {
             addProperty("text", text)
         }
         wsClient?.send(msg)
-        val current = _state.value
-        val newLines = (current.logLines + "[external] $text").takeLast(maxLogLines)
-        _state.value = current.copy(logLines = newLines)
+        updateSession(setRunning = false) { it.copy(logLines = (it.logLines + "[external] $text").takeLast(maxLogLines)) }
     }
 
     fun sendWsMessage(msg: JsonObject) {
@@ -603,10 +604,9 @@ class IkuMonitorService : Service() {
             addProperty("action", action)
         }
         wsClient?.send(msg)
-        // 楽観的更新（次の state broadcast で確定）
         when (action) {
-            "pause" -> _state.value = _state.value.copy(paused = true)
-            "resume" -> _state.value = _state.value.copy(paused = false)
+            "pause" -> updateSession(setRunning = false) { it.copy(paused = true) }
+            "resume" -> updateSession(setRunning = false) { it.copy(paused = false) }
         }
     }
 
@@ -619,9 +619,7 @@ class IkuMonitorService : Service() {
             add("args", argsObj)
         }
         wsClient?.send(msg)
-        val current = _state.value
-        val newLines = (current.logLines + "[test] → $name $args").takeLast(maxLogLines)
-        _state.value = current.copy(logLines = newLines)
+        updateSession(setRunning = false) { it.copy(logLines = (it.logLines + "[test] → $name $args").takeLast(maxLogLines)) }
     }
 
     fun selectProfile(name: String) {
@@ -630,10 +628,7 @@ class IkuMonitorService : Service() {
             addProperty("name", name)
         }
         wsClient?.send(msg)
-        _state.value = _state.value.copy(
-            profileSelected = true,
-            profileStarted = false,
-        )
+        _state.value = _state.value.copy(phase = AppPhase.ProfileLoading(name), session = null)
         updatePersistentNotification("profile起動中: $name")
     }
 
@@ -644,10 +639,8 @@ class IkuMonitorService : Service() {
             addProperty("decision", if (approved) "yes" else "no")
         }
         wsClient?.send(msg)
-        val current = _state.value
-        _state.value = current.copy(
-            approvalRequests = current.approvalRequests.filter { it.id != id }
-        )
+        val s = _state.value.session ?: return
+        _state.value = _state.value.copy(session = s.copy(approvalRequests = s.approvalRequests.filter { it.id != id }))
     }
 
     fun requestLlmProviders() {

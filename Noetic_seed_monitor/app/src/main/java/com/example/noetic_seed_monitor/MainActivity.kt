@@ -284,48 +284,43 @@ fun IkuApp(vm: IkuViewModel = viewModel()) {
     }
 
     val state by vm.state.collectAsState()
-    var hasConnected by remember { mutableStateOf(false) }
-    if (state.connected) hasConnected = true
+    val phase = state.phase
 
     // プロファイル選択 → 起動前に LLM 設定を経由させるための中間状態
     var pendingProfileName by remember { mutableStateOf<String?>(null) }
-    // プロファイル選択確定後はクリア（再接続時に古い値を引きずらないため）
-    LaunchedEffect(state.profileSelected) {
-        if (state.profileSelected) pendingProfileName = null
+    LaunchedEffect(phase) {
+        if (phase !is AppPhase.ProfileSelect) pendingProfileName = null
     }
 
-    when {
-        !hasConnected -> ConnectScreen(onConnect = { url, token -> vm.connect(url, token) })
-        !state.profileSelected -> {
+    when (phase) {
+        is AppPhase.Disconnected -> ConnectScreen(onConnect = { url, token -> vm.connect(url, token) })
+        is AppPhase.Reconnecting -> LoadingScreen("再接続中...")
+        is AppPhase.WaitingForServer -> LoadingScreen("サーバ応答待ち...")
+        is AppPhase.ProfileSelect -> {
             val pending = pendingProfileName
             if (pending != null) {
-                // プロファイル選択後の LLM 設定画面
                 PreLaunchConfigScreen(
                     profileName = pending,
                     state = state,
                     onRequestProviders = { vm.requestLlmProviders() },
                     onCancel = { pendingProfileName = null },
                     onConfirm = { provider, model, apiKey, baseUrl ->
-                        // まず LLM 設定を保存、続けてプロファイル起動
                         vm.setLlm(provider, model, apiKey, baseUrl)
                         vm.selectProfile(pending)
                     },
                 )
-            } else if (state.profiles.isNotEmpty()) {
+            } else {
                 ProfileSelectScreen(
-                    profiles = state.profiles,
+                    profiles = phase.profiles,
                     onSelect = { name ->
-                        // 即起動せず、LLM 設定画面経由にする
                         pendingProfileName = name
                         vm.requestLlmProviders()
                     },
                 )
-            } else {
-                LoadingScreen("プロファイル一覧を取得中...")
             }
         }
-        !state.profileStarted -> LoadingScreen("プロファイル起動中...")
-        else -> AppWithDrawer(state = state, vm = vm)
+        is AppPhase.ProfileLoading -> LoadingScreen("${phase.name} 起動中...")
+        is AppPhase.Running -> AppWithDrawer(state = state, vm = vm)
     }
 }
 
