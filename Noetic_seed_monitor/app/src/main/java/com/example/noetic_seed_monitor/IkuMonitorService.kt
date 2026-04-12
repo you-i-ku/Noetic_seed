@@ -322,18 +322,34 @@ class IkuMonitorService : Service() {
     }
 
     private fun triggerCameraStream(facing: String, frames: Int, intervalSec: Float) {
-        val trigger = _cameraStreamTrigger
-        if (trigger != null) {
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                try {
-                    trigger(facing, frames, intervalSec)
-                } catch (e: Exception) {
-                    Log.e(TAG, "stream trigger失敗", e)
-                    finishCameraStream(null, null)
-                }
-            }
-        } else {
-            Log.w(TAG, "_cameraStreamTrigger 未設定")
+        // Activity trigger 経由ではなく、Service context から直接 CameraStreamActivity を起動
+        // （Activity が destroy されていても動作する。mic_record と同じパターン）
+
+        // カメラ権限チェック（未許可なら Python 側にフレームが届かず黙って死ぬのを防ぐ）
+        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                applicationContext, android.Manifest.permission.CAMERA
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.e(TAG, "CAMERA permission not granted, cannot start camera_stream")
+            finishCameraStream(null, null)
+            return
+        }
+
+        CameraStreamBridge.reset()
+        CameraStreamBridge.sendMessage = { json -> wsClient?.send(json) }
+        CameraStreamBridge.onComplete = { _ -> finishCameraStream(null, null) }
+        val intent = android.content.Intent(applicationContext, CameraStreamActivity::class.java).apply {
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra(CameraStreamActivity.EXTRA_FACING, facing)
+            putExtra(CameraStreamActivity.EXTRA_FRAMES, frames)
+            putExtra(CameraStreamActivity.EXTRA_INTERVAL_SEC, intervalSec)
+        }
+        try {
+            applicationContext.startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "CameraStreamActivity 起動失敗", e)
+            CameraStreamBridge.sendMessage = null
+            CameraStreamBridge.onComplete = null
             finishCameraStream(null, null)
         }
     }
@@ -372,10 +388,12 @@ class IkuMonitorService : Service() {
         val type = json.get("type")?.asString ?: return
         var current = _state.value
 
-        if (current.profileSelected && !current.profileStarted
+        // サーバからの state/self/sync/e_values/log 受信 = プロファイル稼働中
+        // → profileSelected / profileStarted を自動推定（再接続時に ProfileScreen を飛ばす）
+        if (!current.profileStarted
             && type in setOf("state", "self", "log", "sync", "e_values")
         ) {
-            current = current.copy(profileStarted = true)
+            current = current.copy(profileSelected = true, profileStarted = true)
             _state.value = current
         }
 
@@ -479,6 +497,8 @@ class IkuMonitorService : Service() {
                 )
             }
             "profile_list" -> {
+                // profile_list 受信 = サーバが「プロファイル未選択」状態
+                // → セッション全リセット（前セッションの残骸を一掃）
                 val arr = json.getAsJsonArray("profiles")
                 if (arr != null) {
                     val profiles = arr.map { item ->
@@ -490,7 +510,8 @@ class IkuMonitorService : Service() {
                             energy = obj.get("energy")?.asFloat ?: 50f,
                         )
                     }
-                    _state.value = current.copy(profiles = profiles)
+                    // connected だけ維持、他はデフォルトにリセット
+                    _state.value = IkuState(connected = true, profiles = profiles)
                 }
             }
             "device_request" -> {

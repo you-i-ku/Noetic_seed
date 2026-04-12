@@ -259,16 +259,26 @@ fun IkuApp(vm: IkuViewModel = viewModel()) {
         }
     }
 
-    // マイク権限を起動時にプリリクエスト（mic_record は IkuMonitorService の IO スレッドで
-    // 動くので Activity 経由でのリクエストができない。先に取っておく）
+    // カメラ・マイク権限を起動時にプリリクエスト
+    // （camera_stream / mic_record は Service context から Activity を起動するので、
+    //  Activity 経由の requestPermission ができない。先に取っておく）
+    val camPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> }
     val micPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ -> }
     LaunchedEffect(Unit) {
-        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+        val camGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, Manifest.permission.CAMERA
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!camGranted) {
+            camPermLauncher.launch(Manifest.permission.CAMERA)
+        }
+        val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (!granted) {
+        if (!micGranted) {
             micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
