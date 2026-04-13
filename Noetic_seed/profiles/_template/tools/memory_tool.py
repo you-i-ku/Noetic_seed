@@ -115,7 +115,8 @@ def _tool_memory_store(args):
         if relationship:
             metadata["relationship"] = relationship
 
-    entry = memory_store(network, content, metadata)
+    entry = memory_store(network, content, metadata,
+                         origin="tool:memory_store", source_context="deliberate")
     return f"記憶保存完了: [{network}] {content[:60]} (id={entry['id']})"
 
 

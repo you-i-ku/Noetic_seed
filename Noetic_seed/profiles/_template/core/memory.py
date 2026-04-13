@@ -17,14 +17,17 @@ def _network_file(network: str):
     return MEMORY_DIR / f"{network}.jsonl"
 
 
-def memory_store(network: str, content: str, metadata: dict = None) -> dict:
-    """記憶を保存。"""
+def memory_store(network: str, content: str, metadata: dict = None,
+                 origin: str = "unknown", source_context: str = "") -> dict:
+    """記憶を保存。origin=生成きっかけ、source_context=根拠の出処。"""
     if network not in _VALID_NETWORKS:
         raise ValueError(f"Invalid network: {network}")
     entry = {
         "id": f"mem_{uuid.uuid4().hex[:12]}",
         "network": network,
         "content": content,
+        "origin": origin,
+        "source_context": source_context,
         "metadata": metadata or {},
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

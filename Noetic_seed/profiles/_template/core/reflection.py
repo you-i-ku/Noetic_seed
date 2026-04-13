@@ -117,7 +117,8 @@ def _parse_reflection(text: str, state: dict) -> dict:
                 confidence = float(m.group(1))
                 content = re.sub(r'\(?\s*confidence:\s*[\d.]+\s*\)?', '', content).strip()
             if content:
-                entry = memory_store("opinion", content, {"confidence": confidence, "source": "reflection"})
+                entry = memory_store("opinion", content, {"confidence": confidence},
+                                    origin="reflection", source_context="self_inference")
                 opinions.append(entry)
                 print(f"  [reflection] opinion: {content[:60]} (conf={confidence})")
 
@@ -137,7 +138,8 @@ def _parse_reflection(text: str, state: dict) -> dict:
                         entities.append(matched[0])
                         print(f"  [reflection] entity update: {name} = {desc[:60]}")
                     else:
-                        entry = memory_store("entity", desc, {"entity_name": name})
+                        entry = memory_store("entity", desc, {"entity_name": name},
+                                            origin="reflection", source_context="self_inference")
                         entities.append(entry)
                         print(f"  [reflection] entity new: {name} = {desc[:60]}")
 
