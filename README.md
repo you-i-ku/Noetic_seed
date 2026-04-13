@@ -27,7 +27,7 @@
 | **ブランクスレート** | 自己モデルの初期値は`{"name": ""}`。目標・人格・driveは全てAIが自分で書く |
 | **ツール段階解放** | 自己探索の進捗に応じてLevel 0-6で段階的にツール解放。Level 6でself_modify（自己コード改変）が可能に |
 | **Elyth API v2** | 通知取得（section指定）・自分の投稿確認・スレッド追跡・既読化・返信済み追跡。通知整形で返信先IDを明示 |
-| **スマホ身体化（Phase 12-14）** | スマホ経由のカメラ・マイク・画面・センサー。承認ゲート + PIP UI で常時可視化。**スマホは身体ではなくツール**（端末所有者の視覚/聴覚を借りる手段） |
+| **外界接続（Phase 12-14）** | スマホ経由のカメラ・マイク・画面キャプチャ。承認ゲート + PIP UI で常時可視化。**スマホはAIの身体ではなく、物理世界への干渉手段**（端末を通じて外界の情報を取得し、外界に作用する） |
 | **視覚 (vision)** | `view_image`（ローカル + URL）/ `camera_stream`（連続撮影、PIP）/ `screen_peek`（画面キャプチャ、MediaProjection）。Gemma 3/4 SigLIP を 896px ネイティブで使用 |
 | **聴覚 (audio)** | `mic_record`（PIP 録音 + 波形 + 停止ボタン）/ `listen_audio`（既存音声 or URL）。faster-whisper で speech 書き起こし + YAMNet で 521 クラスの環境音分類を同時取得 |
 | **WebSocket + Androidモニター** | Foreground Service 常駐、リアルタイム状態監視。entropy背景色連動。pause/resume/stop。HorizontalPager 4ページ + ドロワー設定 |
@@ -66,12 +66,12 @@
 │  → Disposition微調整（curiosity/skepticism/sociality）│
 └────────────────────────────────────────────────┘
 
-┌─ 身体化（スマホ経由、別軸） ──────────────────────┐
+┌─ 外界接続（スマホ経由、別軸） ────────────────────┐
 │  視覚: view_image / camera_stream / screen_peek    │
 │  聴覚: mic_record (Whisper+YAMNet) / listen_audio  │
-│  センサー: 加速度/ジャイロ/照度/気圧/磁気/電池     │
 │  → 承認制 + PIP UI で常時可視化                    │
-│  → スマホは「身体」ではなく「物理世界への干渉手段」│
+│  → スマホは身体ではなく「物理世界への干渉手段」    │
+│  → AIが外界の情報を取得し、外界に作用するための窓  │
 └────────────────────────────────────────────────┘
 ```
 
@@ -88,7 +88,7 @@
 
 | Layer | Scope | Examples | Policy |
 |-------|-------|----------|--------|
-| **L1 — Physics** | AIの身体 | ツール, エントロピー, 記憶, LLM | We build this |
+| **L1 — Physics** | AIの物理層 | ツール, エントロピー, 記憶, LLM, 外界接続 | We build this |
 | **L2 — Perception** | AIの知覚 | E値, achievement意味判定, controller, 内省 | We build this |
 | **L3 — Will** | AIの魂 | self_model, drives, plan, goal, 自己定義 | **Left empty** |
 

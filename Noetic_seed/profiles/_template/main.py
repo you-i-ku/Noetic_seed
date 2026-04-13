@@ -72,7 +72,7 @@ from core.embedding import _init_vector, _compare_expect_result
 from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_change_bonus,
                        calc_spiral_vector, calc_measured_entropy,
                        calc_effective_change, apply_effective_change_to_e2, EXTERNAL_ACTION_TOOLS,
-                       update_unresolved_intents,
+                       update_unresolved_intents, update_gaps_by_relevance,
                        _extract_action_key, append_action_ledger)
 from core.parser import parse_tool_calls, parse_candidates
 from core.entropy import (
@@ -97,9 +97,9 @@ def main():
     _p, _base, _k, _model = _get_active_provider_config()
     print(f"LLM: {_model or llm_cfg.get('model','?')} @ {_base} [{_p}]")
     print(f"state: {STATE_FILE}")
-    _init_vector()
     ws_token = start_ws_server()
     set_profile_running(True)
+    _init_vector()
     print()
 
     state = load_state()
@@ -221,6 +221,21 @@ def main():
                     "timestamp": _ext_entry["time"],
                     "priority": 3.0,
                 })
+                # 5-d: 遅延フィードバック — external_message 到着 = output_display への反応
+                _pf_list = state.get("pending_feedback", [])
+                _pf_awaiting = [p for p in _pf_list if p.get("entity") == "default_user" and p.get("status") == "awaiting"]
+                if _pf_awaiting:
+                    _resolved = _pf_awaiting[-1]
+                    _resolved["status"] = "resolved"
+                    # 遡及的に E2 を上方修正（ログエントリを探して更新）
+                    for _le in state.get("log", []):
+                        if _le.get("id") == _resolved.get("log_entry_id"):
+                            _old_e2 = _le.get("e2", "")
+                            _m = re.search(r'(\d+)', str(_old_e2))
+                            if _m:
+                                _new_val = min(100, int(_m.group(1)) + 40)
+                                _le["e2"] = f"{_new_val}%"
+                            break
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
                 _chat_line = f"  [external] {chat_text[:80]}"
@@ -502,6 +517,7 @@ def main():
             "self": copy.deepcopy(state.get("self", {})),
             "files_written": list(state.get("files_written", [])),
             "files_read": list(state.get("files_read", [])),
+            "pending_count": len(state.get("pending", [])),
         }
         chain_tools = selected.get("tools", [selected["tool"]])
         all_results = []
@@ -552,12 +568,13 @@ def main():
             if chain_idx == 0:
                 intent = targs.pop("intent", "")
                 expect = targs.pop("expect", "")
-                targs.pop("message", "")
+                _msg_backup = targs.pop("message", "")
                 _chain_action_key = _extract_action_key(tname, targs)
+                if _msg_backup:
+                    targs["message"] = _msg_backup  # ツール関数に message を戻す
             else:
                 targs.pop("intent", "")
                 targs.pop("expect", "")
-                targs.pop("message", "")
 
             # 同一サイクル内の (tool, target_id) 重複防止
             _target_id = targs.get("reply_to_id", "") or targs.get("post_id", "") or targs.get("tweet_url", "") or targs.get("path", "")
@@ -608,7 +625,8 @@ def main():
         # state変化量（スナップショット vs 現在のstate差分）
         state_after = load_state()
         sc_bonus = calc_state_change_bonus(_state_before_snapshot, state_after)
-        eff_change = calc_effective_change(all_tool_names, result_str, _state_before_snapshot, state_after, current_intent=intent)
+        _target_for_ec = _chain_action_key.split(":", 1)[1] if ":" in _chain_action_key else ""
+        eff_change = calc_effective_change(all_tool_names, result_str, _state_before_snapshot, state_after, current_intent=intent, target_id=_target_for_ec)
         state = state_after
 
         # ツール種別に応じたpending消化（ツァイガルニク解放）
@@ -714,11 +732,31 @@ def main():
         _archive_entries([entry])
         state["log"].append(entry)
 
+        # 5-d: 対エンティティ行動の遅延フィードバック追跡
+        _primary_tool = all_tool_names[0] if all_tool_names else ""
+        _ASYNC_ENTITY_TOOLS = {"output_display", "elyth_post", "elyth_reply", "x_post", "x_reply", "x_quote"}
+        if _primary_tool in _ASYNC_ENTITY_TOOLS:
+            _pf = state.setdefault("pending_feedback", [])
+            _entity = "default_user" if _primary_tool == "output_display" else f"{_primary_tool}:{_target_for_ec or 'public'}"
+            _pf.append({
+                "cycle_id": cid, "tool": _primary_tool, "entity": _entity,
+                "log_entry_id": entry["id"], "status": "awaiting",
+            })
+            if len(_pf) > 20:
+                state["pending_feedback"] = _pf[-20:]
+
+        # 5-d: タイムアウト（20サイクル以上 awaiting → expired）
+        for _pfe in state.get("pending_feedback", []):
+            if _pfe.get("status") == "awaiting" and cid - _pfe.get("cycle_id", cid) > 20:
+                _pfe["status"] = "expired"
+
         # 未達成ペンディング: E3 から gap を計算して unresolved_intent を更新
         update_unresolved_intents(state, intent, e3, cid)
 
+        # 変更6: 行動結果が既存 unresolved_intent に関連していれば gap を下げる
+        update_gaps_by_relevance(state, result_str, eff_change)
+
         # 行動台帳に追記（事前シミュレーションの材料。既存の仕組みとは独立）
-        _primary_tool = all_tool_names[0] if all_tool_names else ""
         if _primary_tool:
             append_action_ledger(state, _primary_tool, _chain_action_key,
                                  intent, result_str, eff_change, cid)
