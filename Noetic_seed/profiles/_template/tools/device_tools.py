@@ -147,6 +147,7 @@ def _camera_stream(args) -> str:
 
     return (
         f"ストリーム開始成功: facing={facing} frames={frames} interval={interval_sec}s\n"
+        f"最初のフレーム: {first_rel}\n"
         f"最初のフレーム観察: {description}\n"
         f"観察は継続中（後続フレームは次サイクル以降で視覚入力に入る）。camera_stream_stop で能動停止できます。"
     )
@@ -286,6 +287,7 @@ def _screen_peek(args) -> str:
 
     return (
         f"画面キャプチャ開始成功: frames={frames} interval={interval_sec}s\n"
+        f"最初のフレーム: {first_rel}\n"
         f"最初のフレーム観察: {description}\n"
         f"観察は継続中（後続フレームは次サイクル以降で視覚入力に入る）。camera_stream_stop で能動停止できます。"
     )

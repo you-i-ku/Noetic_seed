@@ -762,9 +762,22 @@ def main():
         if _primary_tool in _ASYNC_ENTITY_TOOLS:
             _pf = state.setdefault("pending_feedback", [])
             _entity = "default_user" if _primary_tool == "output_display" else f"{_primary_tool}:{_target_for_ec or 'public'}"
+            # ツール結果から tweet_url / text_snippet を抽出
+            _pf_url = ""
+            _pf_snippet = ""
+            if isinstance(result_str, str):
+                for _rl in result_str.split("\n"):
+                    if _rl.startswith("tweet_url: "):
+                        _pf_url = _rl[11:].strip()
+                    elif not _pf_snippet:
+                        for _pfx in ("投稿完了: ", "返信完了: ", "引用投稿完了: "):
+                            if _rl.startswith(_pfx):
+                                _pf_snippet = _rl[len(_pfx):].strip()[:80]
+                                break
             _pf.append({
                 "cycle_id": cid, "tool": _primary_tool, "entity": _entity,
                 "log_entry_id": entry["id"], "status": "awaiting",
+                "tweet_url": _pf_url, "text_snippet": _pf_snippet,
             })
             if len(_pf) > 20:
                 state["pending_feedback"] = _pf[-20:]

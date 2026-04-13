@@ -254,13 +254,26 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
             f"能動停止は camera_stream_stop。"
         )
 
+    # 反応待ち中の行動（催促防止: ルールではなく状況として提示）
+    feedback_status_line = ""
+    _pf_awaiting = [p for p in state.get("pending_feedback", [])
+                    if p.get("status") == "awaiting" and p.get("tool", "") != "output_display"]
+    if _pf_awaiting:
+        _pf_lines = []
+        for p in _pf_awaiting[-5:]:
+            _tool = p.get("tool", "?")
+            _cyc = p.get("cycle_id", "?")
+            _snippet = p.get("text_snippet", "")[:40]
+            _pf_lines.append(f"  {_tool} (cycle {_cyc}){': ' + _snippet if _snippet else ''}")
+        feedback_status_line = "\n[反応待ち — 通知を確認するまで結果不明]\n" + "\n".join(_pf_lines)
+
     return f"""[{now}]{fire_cause_line}
 
 [LTM — 自己モデル]
 {self_text}
 
 [未対応事項]
-{pending_text}{stream_status_line}
+{pending_text}{stream_status_line}{feedback_status_line}
 {f'{chr(10)}[関連記憶]{chr(10)}{memory_text}{chr(10)}' if memory_text else ''}
 [STM — 現在の状況 / given circumstances]
 {f'summaries:{chr(10)}{summary_text}{chr(10)}' if summary_text else ''}log:
@@ -332,13 +345,13 @@ def build_prompt_execute(state: dict, ctrl: dict, candidate: dict, tools_dict: d
     elif t == "self_modify":
         example = '[TOOL:self_modify path=pref.json old="変更前" new="変更後" intent=目的 message="外部への説明" expect=予測]\n承認必須。message= は外部が承認を判断するための説明文。'
     elif t == "camera_stream":
-        example = '[TOOL:camera_stream facing=back frames=15 interval_sec=2.0 intent=目的 message="外部への撮影依頼理由" expect=予測]\n非同期ストリーム開始（例は約30秒の連続観察）。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着（ローリング最新5枚）。観察中は他ツールを並行実行可能。単発は frames=1、無制限は frames=0（camera_stream_stop で明示終了）。承認必須。'
+        example = '[TOOL:camera_stream facing=back frames=15 interval_sec=2.0 intent=目的 message="外部への撮影依頼理由" expect=予測]\n非同期ストリーム開始（例は約30秒の連続観察）。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着（ローリング最新5枚）。観察中は他ツールを並行実行可能。単発は frames=1。\nframes=0 で無制限モード: 自分で camera_stream_stop を呼ぶまで継続（最大10分）。長時間の環境観察や変化の監視に使う。承認必須。'
     elif t == "screen_peek":
         example = '[TOOL:screen_peek frames=5 interval_sec=2.0 intent=目的 message="外部への画面キャプチャ依頼理由" expect=予測]\n端末スクリーンの非同期キャプチャ開始。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着。観察中は他ツール並行実行可。frames=0 で無制限（camera_stream_stop で終了）。毎セッション MediaProjection 許可ダイアログが出る。承認必須。'
     elif t == "camera_stream_stop":
         example = '[TOOL:camera_stream_stop intent=観察完了 expect=予測]\nアクティブな camera_stream / screen_peek を停止する。観察対象を十分に把握した後に呼ぶ。'
     elif t == "view_image":
-        example = '[TOOL:view_image path=sandbox/captures/stream_xxxx.jpg intent=何を確認したいか expect=予測]\n画像を同期で認識し、intent に沿った描写を結果として返します。'
+        example = '[TOOL:view_image path=（camera_streamの結果やlist_filesで得た実際のパス） intent=何を確認したいか expect=予測]\n画像を同期で認識し、intent に沿った描写を結果として返します。パスはファイル名を推測せず、camera_stream結果の「最初のフレーム:」行やlist_filesの出力から取得すること。'
     elif t == "secret_read":
         example = '[TOOL:secret_read name=secret名 intent=目的 expect=予測]\n引数は name=（path= ではない。read_file とは別物）。sandbox/secrets/{name} から読む。'
     elif t == "secret_write":

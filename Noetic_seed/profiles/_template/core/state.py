@@ -1,7 +1,24 @@
 """State管理・好み関数・デバッグログ"""
 import json
+import os
+import tempfile
 from datetime import datetime
 from core.config import STATE_FILE, PREF_FILE, DEBUG_LOG, SEED_FILE
+
+
+def _atomic_write(path, text: str):
+    """tmp ファイルに書いてから os.replace でアトミックに差し替える。"""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _get_name_from_seed() -> str:
@@ -62,11 +79,11 @@ def load_state() -> dict:
             return data
         except json.JSONDecodeError:
             pass
-    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "tools_created": []}
+    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}}
 
 
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2))
 
 
 def load_pref() -> dict:
@@ -79,7 +96,7 @@ def load_pref() -> dict:
 
 
 def save_pref(pref: dict):
-    PREF_FILE.write_text(json.dumps(pref, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(PREF_FILE, json.dumps(pref, ensure_ascii=False, indent=2))
 
 
 def append_debug_log(phase: str, text: str):

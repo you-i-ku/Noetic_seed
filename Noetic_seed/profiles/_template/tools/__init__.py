@@ -19,7 +19,7 @@ TOOLS = {
     "wait":         {"desc": "待機。dismiss=pending_idで未対応事項を明示的に却下できる", "func": _wait_or_dismiss},
     "web_search":   {"desc": "Brave APIでWeb検索。引数: query=検索キーワード [max_results=件数]", "func": _web_search},
     "fetch_url":    {"desc": "URLの本文を取得（Jina経由）。引数: url=URL", "func": _fetch_url},
-    "x_timeline":   {"desc": "Xのタイムライン取得。引数: [count=件数]", "func": _x_timeline},
+    "x_timeline":   {"desc": "Xのタイムライン取得。引数: [count=件数] [tab=following/recommend デフォルトfollowing]", "func": _x_timeline},
     "x_search":     {"desc": "Xでキーワード検索。引数: query=キーワード [count=件数]", "func": _x_search},
     "x_get_notifications": {"desc": "Xの通知一覧取得", "func": _x_get_notifications},
     "x_post":       {"desc": "Xに投稿（Human-in-the-loop）。引数: text=投稿内容（140字以内）", "func": _x_post},

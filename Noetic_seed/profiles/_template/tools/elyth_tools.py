@@ -133,6 +133,47 @@ _VALID_SECTIONS = {
     "notifications", "elyth_news",
 }
 
+def _resolve_elyth_feedback(notifs: list, state: dict) -> bool:
+    """elyth 通知と pending_feedback を照合。マッチしたら resolve + E2 遡及修正。
+    state を変更するが save はしない（呼び出し元で save する）。"""
+    import re as _re
+    pf_list = state.get("pending_feedback", [])
+    awaiting = [p for p in pf_list if p.get("status") == "awaiting" and p.get("tool", "").startswith("elyth_")]
+    if not awaiting:
+        return False
+
+    resolved_any = False
+    for notif in notifs:
+        ntype = notif.get("notification_type", "")
+        nauthor = notif.get("post_author_handle", "").lower()
+
+        for pf in awaiting:
+            if pf["status"] != "awaiting":
+                continue
+            tool = pf.get("tool", "")
+            entity = pf.get("entity", "")
+            matched = False
+
+            if tool == "elyth_post" and ntype in ("reply", "like", "repost", "mention"):
+                matched = True
+            elif tool == "elyth_reply" and ntype in ("reply", "mention"):
+                target = entity.split(":", 1)[1] if ":" in entity else ""
+                if target and target.lower() in nauthor:
+                    matched = True
+
+            if matched:
+                pf["status"] = "resolved"
+                for le in state.get("log", []):
+                    if le.get("id") == pf.get("log_entry_id"):
+                        m = _re.search(r'(\d+)', str(le.get("e2", "")))
+                        if m:
+                            le["e2"] = f"{min(100, int(m.group(1)) + 40)}%"
+                        break
+                resolved_any = True
+                break
+    return resolved_any
+
+
 def _format_notifications(data: dict) -> str:
     """通知データを整形。対応済みを除外し、reply_to_idの混同を防ぐ。"""
     notifs = data.get("notifications", [])
@@ -142,6 +183,13 @@ def _format_notifications(data: dict) -> str:
     # 対応済みpost_idを取得
     state = load_state()
     responded = set(state.get("responded_posts", []))
+
+    # 遅延フィードバック照合
+    try:
+        if _resolve_elyth_feedback(notifs, state):
+            save_state(state)
+    except Exception:
+        pass
 
     new_notifs = []
     old_notifs = []

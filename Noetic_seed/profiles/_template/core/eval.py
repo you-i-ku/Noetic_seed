@@ -571,19 +571,25 @@ def predict_result_novelty(state: dict, tool_name: str, intent: str,
             pass
 
     # layer 3: トピック飽和（全ツール横断、エントリ一件ずつ MIN）
-    # 各 ledger エントリの intent と比較。novelty = 1.0 - sim × (1.0 - ec)
-    # 最も抑制的な1件が novelty を決める。sim と ec はAI自身の過去実績。
+    # 各 ledger エントリの intent と比較。sim と ec はAI自身の過去実績。
+    # 高 sim（同じことを考えてる）時は ec に関係なく novelty を下げる。
     layer3_novelty = 1.0
     recent_all = ledger[-15:]
     if recent_all:
         try:
-            texts = [f"{tool_name}: {intent[:180]}"] + [e["intent"][:200] for e in recent_all]
+            # intent 同士を純粋に比較（tool_name プレフィックスなし）
+            texts = [intent[:200]] + [e["intent"][:200] for e in recent_all]
             vecs = _embed_sync(texts)
             if vecs and len(vecs) >= 2:
                 for i in range(len(vecs) - 1):
                     sim = cosine_similarity(vecs[0], vecs[i + 1])
                     past_ec = recent_all[i].get("ec", 0.5)
-                    entry_novelty = 1.0 - sim * (1.0 - past_ec)
+                    if sim > 0.8:
+                        # 高類似: ほぼ同じ intent → ec に関係なく抑制
+                        entry_novelty = max(0.05, 1.0 - sim)
+                    else:
+                        # 中〜低類似: ec が高かった行動は繰り返す価値がありうる
+                        entry_novelty = 1.0 - sim * (1.0 - past_ec)
                     layer3_novelty = min(layer3_novelty, entry_novelty)
         except Exception:
             pass
