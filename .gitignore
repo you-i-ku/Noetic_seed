@@ -50,6 +50,11 @@ article_draft_v2.md
 oss_application_draft.md
 UI_PROGRESS.md
 REFACTORING_PLAN.md
+PROGRESS.md
+CODE_REVIEW_*.md
+IMPLEMENTATION_PLAN_*.md
+REPETITION_PROBLEM.md
+simulate_novelty*.py
 /install.bat
 /run.bat
 最小要件定義（実装に向けて粒度細かめ）.txt
@@ -60,6 +65,12 @@ UIイメージ/
 
 # Secrets
 .env
+# iku profiles のランタイム生成物（追跡対象の _template 配下も含めて除外）
+Noetic_seed/profiles/*/pref.json
+Noetic_seed/profiles/_template/pref.json
+Noetic_seed/profiles/*/sandbox/audio/
+Noetic_seed/profiles/_template/sandbox/audio/
+
 # iku profiles の認証情報（追跡対象の _template 配下も含めて除外）
 Noetic_seed/profiles/*/secrets.json
 Noetic_seed/profiles/*/sandbox/secrets/
