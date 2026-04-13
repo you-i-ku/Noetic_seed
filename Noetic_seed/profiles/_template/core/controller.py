@@ -4,6 +4,7 @@ import random
 from core.config import SANDBOX_TOOLS_DIR
 from core.state import load_pref
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+from core.eval import predict_result_novelty
 
 
 def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tools: dict, dangerous_patterns: list, run_ai_tool_fn) -> dict:
@@ -187,6 +188,17 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         ics = intent_scores[i] / 100.0
         score = (base + ics) / 2.0
         w = score * sharpness + (1.0 / n) * (1 - sharpness)
+        # 事前シミュレーション（報酬予測誤差）: 予測結果新規性が低い → 動機が生まれない
+        novelty = predict_result_novelty(state, c["tool"], c.get("reason", ""))
+        w *= max(0.05, novelty)
+        if novelty < 0.5:
+            try:
+                from core.config import RESOLUTION_LOG
+                with open(RESOLUTION_LOG, "a", encoding="utf-8") as _f:
+                    _f.write(f"  [predict] {c['tool']} novelty={novelty:.2f} "
+                             f"reason={c.get('reason','')[:40]}\n")
+            except Exception:
+                pass
         weights.append(w)
 
     total = sum(weights)

@@ -418,3 +418,95 @@ def calc_measured_entropy(state: dict, log: list) -> float:
     # 均等平均（state/sandboxは反転: 充実→低エントロピー）
     measured = (behavioral + intent_div + (1 - state_rich) + (1 - sandbox_rich)) / 4.0
     return max(0.0, min(1.0, measured))
+
+
+# === Action Ledger: 行動 + result の永続記録 ===
+
+_LEDGER_MAX = 50
+
+
+def _extract_action_key(tool_name: str, targs: dict) -> str:
+    """確定的キー。対象IDがあるツールのみ。"""
+    for key in ("reply_to_id", "tweet_url", "post_id", "query", "path", "file", "name", "url"):
+        val = targs.get(key, "")
+        if val:
+            return f"{tool_name}:{str(val)[:80]}"
+    return ""
+
+
+def append_action_ledger(state: dict, tool_name: str, action_key: str,
+                         intent: str, result: str, ec: float, cycle_id: int):
+    """行動台帳に追記。result の先頭300字も保存（事前予測の材料）。"""
+    from datetime import datetime
+    ledger = state.setdefault("action_ledger", [])
+    ledger.append({
+        "tool": tool_name,
+        "action_key": action_key,
+        "intent": intent[:200],
+        "result_snippet": result[:300],
+        "ec": round(ec, 4),
+        "cycle": cycle_id,
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    if len(ledger) > _LEDGER_MAX:
+        state["action_ledger"] = ledger[-_LEDGER_MAX:]
+    # デバッグログ
+    try:
+        from core.config import RESOLUTION_LOG
+        with open(RESOLUTION_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{ledger[-1]['ts']}] cycle={cycle_id} "
+                    f"tool={tool_name} key={action_key or '(none)'} "
+                    f"ec={ec:.3f} intent={intent[:60]}\n")
+    except Exception:
+        pass
+
+
+def predict_result_novelty(state: dict, tool_name: str, intent: str,
+                           action_key: str = "") -> float:
+    """候補行動の結果新規性を事前予測する（報酬予測誤差）。
+    action_ledger の過去 result_snippet と現在の intent を比較。
+    過去に似た行動で似た結果が出ていたら novelty は低い。
+    戻り値: 0.0（同じ結果になる）〜 1.0（未知の結果が期待できる）"""
+    ledger = state.get("action_ledger", [])
+    if not ledger:
+        return 1.0  # 履歴なし = 初めて = 高い新規性
+
+    # layer 1: action_key 完全一致（同じ reply_to_id 等）
+    if action_key:
+        matches = [e for e in ledger if e.get("action_key") == action_key]
+        if matches:
+            past_results = [e["result_snippet"] for e in matches[-3:]]
+            if past_results and _vector_ready:
+                try:
+                    vecs = _embed_sync([intent[:200]] + [r[:200] for r in past_results])
+                    if vecs and len(vecs) >= 2:
+                        sims = [cosine_similarity(vecs[0], vecs[i+1])
+                                for i in range(len(vecs)-1)]
+                        return max(0.0, 1.0 - max(sims))
+                except Exception:
+                    pass
+            return 0.2  # embedding 失敗でも action_key 一致 = 低 novelty
+
+    # layer 2: 同ツールの past results とベクトル類似度
+    if not _vector_ready or not intent:
+        return 1.0
+
+    same_tool = [e for e in ledger if e.get("tool") == tool_name]
+    if not same_tool:
+        return 1.0  # このツール初使用
+
+    try:
+        recent = same_tool[-8:]
+        texts = [f"{tool_name}: {intent[:180]}"] + [e["result_snippet"][:200] for e in recent]
+        vecs = _embed_sync(texts)
+        if not vecs or len(vecs) < 2:
+            return 1.0
+        sims = [cosine_similarity(vecs[0], vecs[i+1]) for i in range(len(vecs)-1)]
+        max_sim = max(sims)
+        if max_sim > 0.8:
+            return 0.05
+        elif max_sim > 0.6:
+            return max(0.1, 1.0 - max_sim)
+        return 1.0
+    except Exception:
+        return 1.0

@@ -13,6 +13,7 @@ SANDBOX_DIR = BASE_DIR / "sandbox"
 SANDBOX_TOOLS_DIR = BASE_DIR / "sandbox" / "tools"
 LLM_SETTINGS = BASE_DIR / "settings.json"
 DEBUG_LOG = BASE_DIR / "llm_debug.log"
+RESOLUTION_LOG = BASE_DIR / "resolution_debug.log"
 MEMORY_DIR = BASE_DIR / "memory"
 PREF_FILE = BASE_DIR / "pref.json"
 

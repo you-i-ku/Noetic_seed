@@ -72,7 +72,8 @@ from core.embedding import _init_vector, _compare_expect_result
 from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_change_bonus,
                        calc_spiral_vector, calc_measured_entropy,
                        calc_effective_change, apply_effective_change_to_e2, EXTERNAL_ACTION_TOOLS,
-                       update_unresolved_intents)
+                       update_unresolved_intents,
+                       _extract_action_key, append_action_ledger)
 from core.parser import parse_tool_calls, parse_candidates
 from core.entropy import (
     ENTROPY_PARAMS, tick_entropy, calc_dynamic_threshold,
@@ -284,49 +285,6 @@ def main():
             if random.random() < tp:
                 _tunnel_fire = True
                 break
-
-            # 固定時刻通知チェック
-            _fetch_key = tick_dt.strftime("%Y-%m-%d %H")
-            if tick_dt.hour in _NOTIFICATION_HOURS and state.get("last_notification_fetch") != _fetch_key and state.get("tool_level", 0) >= 3 and X_SESSION_PATH.exists():
-                notif_parts = []
-                try:
-                    x_raw = _x_get_notifications({})
-                    if not x_raw.startswith("エラー") and x_raw != "通知なし":
-                        x_count = len([l for l in x_raw.split("---") if l.strip()])
-                        notif_parts.append(f"X: {x_count}件")
-                    else:
-                        notif_parts.append(f"X: 0件")
-                except Exception:
-                    pass
-                try:
-                    el_raw = _elyth_get_info({"section": "notifications", "limit": "10"})
-                    if not el_raw.startswith("エラー"):
-                        import json as _json
-                        try:
-                            _el_data = _json.loads(el_raw)
-                            _notifs = _el_data.get("notifications", [])
-                            notif_parts.append(f"Elyth: {len(_notifs)}件")
-                        except Exception:
-                            notif_parts.append(f"Elyth: ?件")
-                    else:
-                        notif_parts.append(f"Elyth: 0件")
-                except Exception:
-                    pass
-                if notif_parts:
-                    notif_summary = f"[通知サマリー {tick_dt.strftime('%H:%M')}] " + " / ".join(notif_parts)
-                    print(f"  {notif_summary}")
-                    state = load_state()
-                    _sys_entry = {
-                        "id": f"{state.get('session_id','?')}_sys{int(time.time()*1000)%100000}",
-                        "time": tick_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                        "tool": "[system]",
-                        "type": "system",
-                        "result": notif_summary,
-                    }
-                    _archive_entries([_sys_entry])
-                    state["log"].append(_sys_entry)
-                    state["last_notification_fetch"] = _fetch_key
-                    save_state(state)
 
             # ログ表示
             now_ts = time.time()
@@ -550,6 +508,7 @@ def main():
         all_tool_names = []
         intent = ""
         expect = ""
+        _chain_action_key = ""
         parse_failed = False
         prev_result = ""
         _executed_targets = set()  # (tool, target_id) 同一サイクル内重複防止
@@ -593,9 +552,12 @@ def main():
             if chain_idx == 0:
                 intent = targs.pop("intent", "")
                 expect = targs.pop("expect", "")
+                targs.pop("message", "")
+                _chain_action_key = _extract_action_key(tname, targs)
             else:
                 targs.pop("intent", "")
                 targs.pop("expect", "")
+                targs.pop("message", "")
 
             # 同一サイクル内の (tool, target_id) 重複防止
             _target_id = targs.get("reply_to_id", "") or targs.get("post_id", "") or targs.get("tweet_url", "") or targs.get("path", "")
@@ -649,13 +611,26 @@ def main():
         eff_change = calc_effective_change(all_tool_names, result_str, _state_before_snapshot, state_after, current_intent=intent)
         state = state_after
 
-        # ツール種別に応じたpending消化（elyth系→elyth_notification）
-        # output_display は未応答ジレンマを構造化するため pending 消化しない
-        # （外部からの新しい声が来るまで external_message pending は残り続ける）
+        # ツール種別に応じたpending消化（ツァイガルニク解放）
         _executed_tools = set(all_tool_names)
+
+        # output_display は external_message pending を1件消化 + 未応答カウンタ減算
+        if "output_display" in _executed_tools:
+            _pending = state.get("pending", [])
+            _ext_msgs = [p for p in _pending if p.get("type") == "external_message"]
+            if _ext_msgs:
+                state["pending"] = [p for p in _pending if p != _ext_msgs[0]]
+            _uec = state.get("unresponded_external_count", 0)
+            if _uec > 0:
+                state["unresponded_external_count"] = _uec - 1
+            if state.get("unresponded_external_count", 0) <= 0:
+                state["unresolved_external"] = 0.0
+                state["unresponded_external_count"] = 0
+            save_state(state)
+
+        # elyth系ツールはelyth_notification pendingを1件消化
         _elyth_action_tools = {"elyth_post", "elyth_reply", "elyth_like", "elyth_follow"}
         if _executed_tools & _elyth_action_tools:
-            # elyth系ツールはelyth_notification pendingを1件消化
             _pending = state.get("pending", [])
             _elyth_notifs = [p for p in _pending if p.get("type") == "elyth_notification"]
             if _elyth_notifs:
@@ -741,6 +716,12 @@ def main():
 
         # 未達成ペンディング: E3 から gap を計算して unresolved_intent を更新
         update_unresolved_intents(state, intent, e3, cid)
+
+        # 行動台帳に追記（事前シミュレーションの材料。既存の仕組みとは独立）
+        _primary_tool = all_tool_names[0] if all_tool_names else ""
+        if _primary_tool:
+            append_action_ledger(state, _primary_tool, _chain_action_key,
+                                 intent, result_str, eff_change, cid)
 
         maybe_compress_log(state, set(TOOLS.keys()))
         save_state(state)
