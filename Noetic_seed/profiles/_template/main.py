@@ -91,6 +91,28 @@ from tools.elyth_tools import _elyth_info as _elyth_get_info
 from core.ws_server import start_ws_server, broadcast_log, broadcast_state, broadcast_self, broadcast_e_values, get_pending_chats, is_paused, set_profile_running
 
 
+# === チャネルマッピング（ログエントリに channel タグを付与）===
+_CHANNEL_MAP = {
+    "elyth_post": "elyth", "elyth_reply": "elyth", "elyth_like": "elyth",
+    "elyth_follow": "elyth", "elyth_info": "elyth", "elyth_get": "elyth",
+    "elyth_mark_read": "elyth",
+    "x_post": "x", "x_reply": "x", "x_quote": "x", "x_like": "x",
+    "x_timeline": "x", "x_search": "x", "x_get_notifications": "x",
+    "output_display": "display",
+    "camera_stream": "device", "camera_stream_stop": "device",
+    "screen_peek": "device", "mic_record": "device",
+    "view_image": "device", "listen_audio": "device",
+}
+
+def _get_channel(tool_name: str) -> str:
+    """ツール名からチャネルを判定。マップにない場合は 'internal'。"""
+    if "+" in tool_name:
+        # チェーン: 先頭ツールで判定
+        first = tool_name.split("+")[0]
+        return _CHANNEL_MAP.get(first, "internal")
+    return _CHANNEL_MAP.get(tool_name, "internal")
+
+
 # === メインループ ===
 def main():
     print("=== Noetic_seed ===")
@@ -208,6 +230,7 @@ def main():
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "tool": "[external]",
                     "type": "external",
+                    "channel": "external",
                     "result": f"external: {chat_text}",
                 }
                 _archive_entries([_ext_entry])
@@ -713,6 +736,7 @@ def main():
             "id": f"{state.get('session_id','x')}_{cid:04d}",
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "tool": tool_name,
+            "channel": _get_channel(tool_name),
             "result": result_str,
         }
         if parse_failed:

@@ -22,7 +22,9 @@ def _render_log_entry(entry: dict, result_cap: int, intent_cap: int, with_evals:
     """1件の log エントリを鮮度勾配 cap 付きで 1 行レンダリングする。
     result が cap を超えた場合は明示的な truncation marker を付けて AI に
     「表示上の省略であって、ツール実行時は完全に取得済み」と伝える。"""
-    line = f"  {entry.get('id','')} {entry['time']} {entry['tool']}"
+    _ch = entry.get("channel", "")
+    _ch_tag = f"[{_ch}] " if _ch else ""
+    line = f"  {entry.get('id','')} {entry['time']} {_ch_tag}{entry['tool']}"
     if entry.get("intent"):
         line += f" (intent={entry['intent'][:intent_cap]})"
     result = entry.get("result", "") or ""
