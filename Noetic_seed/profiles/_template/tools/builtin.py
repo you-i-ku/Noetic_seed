@@ -19,7 +19,7 @@ def _is_hidden(name: str, state: dict | None = None) -> bool:
 def _list_files(path: str) -> str:
     target = (BASE_DIR / path).resolve()
     if not str(target).startswith(str(BASE_DIR.resolve())):
-        return "エラー: このツールは特定のファイルにしか干渉できません"
+        return "該当なし: アクセス範囲外のパスです"
     if not target.exists():
         # read_file と同じ tiered framing を使う（タイポ救済）
         similar = _find_similar_files(path)
@@ -91,7 +91,7 @@ def _format_not_found(path: str, similar: list[tuple[float, str]]) -> str:
 def _read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
     target = (BASE_DIR / path).resolve()
     if not str(target).startswith(str(BASE_DIR.resolve())):
-        return "エラー: このツールは特定のファイルにしか干渉できません"
+        return "該当なし: アクセス範囲外のパスです"
     # sandbox/secrets/ は secret_read 経由のみアクセス可（誤爆防止）
     _secrets_dir = (SANDBOX_DIR / "secrets").resolve()
     if str(target).startswith(str(_secrets_dir)):
@@ -122,7 +122,7 @@ def _read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
             similar = _find_similar_files(path)
             return _format_not_found(path, similar)
     if _is_hidden(target.name):
-        return f"エラー: {path} は存在しません"
+        return f"該当なし: {path} はアクセスできません"
     try:
         lines = target.read_text(encoding="utf-8").splitlines()
         total = len(lines)
@@ -142,7 +142,7 @@ def _view_image(args: dict) -> str:
 
     path = args.get("path", "").strip()
     if not path:
-        return "エラー: path= が必要です（ローカル相対パスまたは http(s) URL）"
+        return "該当なし: path= が指定されていません。対象のパスまたは URL を指定してください"
 
     fetched_meta = None
     if is_url(path):
@@ -208,7 +208,7 @@ def _listen_audio(args: dict) -> str:
 
     path = args.get("path", "").strip()
     if not path:
-        return "エラー: path= が必要です（ローカル相対パスまたは http(s) URL）"
+        return "該当なし: path= が指定されていません。対象のパスまたは URL を指定してください"
     language = (args.get("language", "") or "").strip() or None
 
     fetched_meta = None

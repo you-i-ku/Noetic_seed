@@ -332,7 +332,7 @@ def build_prompt_execute(state: dict, ctrl: dict, candidate: dict, tools_dict: d
     elif t == "camera_stream":
         example = '[TOOL:camera_stream facing=back frames=15 interval_sec=2.0 intent=目的 message="外部への撮影依頼理由" expect=予測]\n非同期ストリーム開始（例は約30秒の連続観察）。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着（ローリング最新5枚）。観察中は他ツールを並行実行可能。単発は frames=1、無制限は frames=0（camera_stream_stop で明示終了）。承認必須。'
     elif t == "screen_peek":
-        example = '[TOOL:screen_peek frames=5 interval_sec=2.0 intent=目的 message="外部への画面キャプチャ依頼理由" expect=予測]\n端末スクリーンの非同期キャプチャ開始。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着。観察中は他ツール並行実行可。frames=0 で無制限（camera_stream_stop で終了）。毎セッション所有者の MediaProjection 許可ダイアログが出る。承認必須。'
+        example = '[TOOL:screen_peek frames=5 interval_sec=2.0 intent=目的 message="外部への画面キャプチャ依頼理由" expect=予測]\n端末スクリーンの非同期キャプチャ開始。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着。観察中は他ツール並行実行可。frames=0 で無制限（camera_stream_stop で終了）。毎セッション MediaProjection 許可ダイアログが出る。承認必須。'
     elif t == "camera_stream_stop":
         example = '[TOOL:camera_stream_stop intent=観察完了 expect=予測]\nアクティブな camera_stream / screen_peek を停止する。観察対象を十分に把握した後に呼ぶ。'
     elif t == "view_image":
@@ -384,7 +384,8 @@ def build_prompt_execute(state: dict, ctrl: dict, candidate: dict, tools_dict: d
   受け取って処理済みなので、再取得は不要です。
 
 1. (Anchor) 上記のLTM（自己モデル）に自分自身を固定する。名前・ラベルではなく、意味的同一性として。
-2. (Select) STMを given circumstances として読み、選択行動「{tools_str} - {candidate['reason']}」の最適な引数を決定する。
+2. (Select) STMを given circumstances として読み、選択行動「{tools_str}」の最適な引数を決定する。
+   **使用するツールは {tools_str} のみです。ここに含まれないツール名は出力しないでください。**
 3. (Bound)  必ず `[TOOL:ツール名 ...]` の形式で出力する。`[TOOL:` と `]` のブラケットは省略不可。JSONもコードブロックも使わない。ツール名は省略しない（例:`read` ではなく `read_file`）。自己紹介・説明・感想は一切不要。連鎖実行は複数行で可。
 4. (Enact)  正確なツール呼び出しを出力する。intent=とexpect=は必ず最初の[TOOL:]にのみ付け、このサイクル全体の目的を表すこと。2つ目以降のツールにはintent/expectは不要。
             ツールの引数リストに [message=...] がある場合は必ず含めること。これは外部が承認を判断するための説明文で、省略すると外部は意図を読み取れず却下する可能性がある。

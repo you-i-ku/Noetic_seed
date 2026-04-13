@@ -14,7 +14,7 @@ _ws_log_buffer: list = []
 _LOG_BUFFER_MAX = 100
 _send_queue: queue.Queue = queue.Queue()
 _current_state: dict = {}
-_chat_queue: queue.Queue = queue.Queue()  # ユーザー入力キュー（main.pyが読む）
+_chat_queue: queue.Queue = queue.Queue()  # 外部入力キュー（main.pyが読む）
 _approval_queue: queue.Queue = queue.Queue()  # 承認応答キュー
 _pending_approval: dict = {}  # 現在承認待ちのリクエスト
 _device_queue: queue.Queue = queue.Queue()  # デバイス応答キュー
@@ -322,7 +322,7 @@ def broadcast_self(state: dict):
 
 
 def get_pending_chats() -> list[str]:
-    """未処理のユーザー入力を全て取得（main.pyが毎tick呼ぶ）"""
+    """未処理の外部入力を全て取得（main.pyが毎tick呼ぶ）"""
     messages = []
     try:
         while True:

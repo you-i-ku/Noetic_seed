@@ -124,7 +124,7 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5) -> 
 def get_relevant_memories(state: dict, limit: int = 8) -> list:
     """プロンプト用: 直近intentに関連する記憶を取得。
     4ネットワーク検索 + archive の直近外部入力を合わせて返す。
-    外部入力は優先的に先頭へ入れる（ユーザー会話は忘却耐性を与える）。"""
+    外部入力は優先的に先頭へ入れる（外部からの会話は忘却耐性を与える）。"""
     recent_intents = [e.get("intent", "") for e in state.get("log", [])[-5:] if e.get("intent")]
 
     # archive からの最近の [external] 入力を優先的に取得
@@ -269,7 +269,7 @@ def _summarize_entries(entries: list, label: str = "要約") -> dict:
     prompt = f"""以下は自律AIの行動ログ（{len(entries)}件）です。800字以内で要約してください。
 
 以下を優先して含めてください：
-1. **外部入力（ユーザー・他者からのメッセージ）があれば必ず原文に近い形で記録**
+1. **外部入力（外部からのメッセージ）があれば必ず原文に近い形で記録**
    - 名前・役割・役割の変化・要望・伝えられた事実・環境の前提 等
 2. 受動的に明らかになった事実（APIの有無、設定状態、既知の制約、開発モード等）
 3. 何を試みて何が起きたか（行動パターン）
@@ -321,7 +321,7 @@ def maybe_compress_log(state: dict, tool_names: set = None):
     """
     Trigger1: log >= LOG_HARD_LIMIT(150) → 古い (LOG_HARD_LIMIT - LOG_KEEP) 件を要約
               → 直近 LOG_KEEP(120) 件を保持
-              ※ [external] エントリは要約対象外で保持（ユーザー会話は高価値情報として永続）
+              ※ [external] エントリは要約対象外で保持（外部からの会話は高価値情報として永続）
     Trigger2: summaries >= 10 → メタ要約（全 summary + 直近 raw 数件） → summaries = [1件]
     """
     state.setdefault("summaries", [])
@@ -329,7 +329,7 @@ def maybe_compress_log(state: dict, tool_names: set = None):
     if len(state["log"]) >= LOG_HARD_LIMIT:
         compress_count = max(1, LOG_HARD_LIMIT - LOG_KEEP)
         old_section = state["log"][:compress_count]
-        # [external] 入力は要約せず保持（ユーザー会話の永続化）
+        # [external] 入力は要約せず保持（外部からの会話の永続化）
         to_preserve = [e for e in old_section if e.get("type") == "external"]
         to_summarize = [e for e in old_section if e.get("type") != "external"]
 

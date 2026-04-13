@@ -139,7 +139,7 @@ def _self_modify(args: dict) -> str:
     new = args.get("new", "")
     intent = args.get("intent", "（意図なし）")
     if not path:
-        return "エラー: path= が必要です"
+        return "該当なし: path= が指定されていません"
     if path not in _MODIFY_ALLOWED:
         return f"エラー: 変更可能なファイルは {sorted(_MODIFY_ALLOWED)} のみです"
     if old and content:

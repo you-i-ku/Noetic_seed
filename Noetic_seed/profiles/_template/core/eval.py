@@ -265,6 +265,18 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
             existing = memory_network_search(tool_result[:200],
                                              networks=["opinion", "experience", "entity"],
                                              limit=3)
+            # 5-a デバッグログ
+            try:
+                from core.config import RESOLUTION_LOG
+                with open(RESOLUTION_LOG, "a", encoding="utf-8") as _f:
+                    if existing:
+                        _sims = [f"{e.get('score',0):.2f}" for e in existing[:3]]
+                        _f.write(f"  [5-a] {'+'.join(tool_names)} existing_sims=[{','.join(_sims)}] "
+                                 f"result_snippet={tool_result[:60]}\n")
+                    else:
+                        _f.write(f"  [5-a] {'+'.join(tool_names)} no_existing_memories\n")
+            except Exception:
+                pass
             if existing:
                 max_existing_sim = max(e.get("score", 0) for e in existing)
                 if max_existing_sim > 0.7:
@@ -537,26 +549,43 @@ def predict_result_novelty(state: dict, tool_name: str, intent: str,
                     pass
             return 0.2  # embedding 失敗でも action_key 一致 = 低 novelty
 
-    # layer 2: 同ツールの past results とベクトル類似度
     if not _vector_ready or not intent:
         return 1.0
 
+    # layer 2: 同ツールの past results とベクトル類似度
+    layer2_novelty = 1.0
     same_tool = [e for e in ledger if e.get("tool") == tool_name]
-    if not same_tool:
-        return 1.0  # このツール初使用
+    if same_tool:
+        try:
+            recent = same_tool[-8:]
+            texts = [f"{tool_name}: {intent[:180]}"] + [e["result_snippet"][:200] for e in recent]
+            vecs = _embed_sync(texts)
+            if vecs and len(vecs) >= 2:
+                sims = [cosine_similarity(vecs[0], vecs[i+1]) for i in range(len(vecs)-1)]
+                max_sim = max(sims)
+                if max_sim > 0.8:
+                    layer2_novelty = 0.05
+                elif max_sim > 0.6:
+                    layer2_novelty = max(0.1, 1.0 - max_sim)
+        except Exception:
+            pass
 
-    try:
-        recent = same_tool[-8:]
-        texts = [f"{tool_name}: {intent[:180]}"] + [e["result_snippet"][:200] for e in recent]
-        vecs = _embed_sync(texts)
-        if not vecs or len(vecs) < 2:
-            return 1.0
-        sims = [cosine_similarity(vecs[0], vecs[i+1]) for i in range(len(vecs)-1)]
-        max_sim = max(sims)
-        if max_sim > 0.8:
-            return 0.05
-        elif max_sim > 0.6:
-            return max(0.1, 1.0 - max_sim)
-        return 1.0
-    except Exception:
-        return 1.0
+    # layer 3: トピック飽和（全ツール横断、エントリ一件ずつ MIN）
+    # 各 ledger エントリの intent と比較。novelty = 1.0 - sim × (1.0 - ec)
+    # 最も抑制的な1件が novelty を決める。sim と ec はAI自身の過去実績。
+    layer3_novelty = 1.0
+    recent_all = ledger[-15:]
+    if recent_all:
+        try:
+            texts = [f"{tool_name}: {intent[:180]}"] + [e["intent"][:200] for e in recent_all]
+            vecs = _embed_sync(texts)
+            if vecs and len(vecs) >= 2:
+                for i in range(len(vecs) - 1):
+                    sim = cosine_similarity(vecs[0], vecs[i + 1])
+                    past_ec = recent_all[i].get("ec", 0.5)
+                    entry_novelty = 1.0 - sim * (1.0 - past_ec)
+                    layer3_novelty = min(layer3_novelty, entry_novelty)
+        except Exception:
+            pass
+
+    return min(layer2_novelty, layer3_novelty)
