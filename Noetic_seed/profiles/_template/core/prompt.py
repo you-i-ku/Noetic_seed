@@ -231,7 +231,9 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
             else:
                 # 他の pending も id を出す（dismiss 用）
                 p_id = p.get("id", "?")
-                pending_lines.append(f"  [{p_type} id={p_id}] {content} ({p.get('timestamp','')})")
+                p_ch = p.get("channel", "")
+                ch_tag = f" ch={p_ch}" if p_ch else ""
+                pending_lines.append(f"  [{p_type} id={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
         pending_text = "\n".join(pending_lines)
     else:
         pending_text = "  なし"

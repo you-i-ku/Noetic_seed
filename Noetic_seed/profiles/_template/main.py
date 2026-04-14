@@ -113,6 +113,27 @@ def _get_channel(tool_name: str) -> str:
     return _CHANNEL_MAP.get(tool_name, "internal")
 
 
+# === 世界モデル評価用デバッグログ (段階1以降のテストハーネス) ===
+# 起動時に WM_DEBUG=1 環境変数を設定すると sandbox/wm_debug.jsonl に構造化ログを出す
+import json as _json
+_WM_DEBUG = os.environ.get("WM_DEBUG") == "1"
+_WM_LOG_PATH = (BASE_DIR / "sandbox" / "wm_debug.jsonl") if _WM_DEBUG else None
+if _WM_DEBUG and _WM_LOG_PATH:
+    _WM_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _wm_log(event_type: str, payload: dict):
+    """世界モデル評価用の構造化イベントを sandbox/wm_debug.jsonl に追記。
+    WM_DEBUG=1 でないときは no-op。"""
+    if not _WM_DEBUG or not _WM_LOG_PATH:
+        return
+    try:
+        entry = {"ts": datetime.now().isoformat(), "event": event_type, **payload}
+        with open(_WM_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 # === メインループ ===
 def main():
     print("=== Noetic_seed ===")
@@ -228,10 +249,10 @@ def main():
                 _ext_entry = {
                     "id": _ext_id,
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "tool": "[external]",
+                    "tool": "[device_input]",
                     "type": "external",
-                    "channel": "external",
-                    "result": f"external: {chat_text}",
+                    "channel": "device",
+                    "result": chat_text,
                 }
                 _archive_entries([_ext_entry])
                 state["log"].append(_ext_entry)
@@ -239,6 +260,7 @@ def main():
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
                 state.setdefault("pending", []).append({
                     "type": "external_message",
+                    "channel": "device",
                     "id": _ext_id,
                     "content": chat_text,
                     "timestamp": _ext_entry["time"],
@@ -261,7 +283,7 @@ def main():
                             break
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
-                _chat_line = f"  [external] {chat_text[:80]}"
+                _chat_line = f"  [device_input] {chat_text[:80]}"
                 print(_chat_line)
                 broadcast_log(_chat_line)
 
@@ -356,6 +378,18 @@ def main():
         _fire_type = "TUNNEL" if _tunnel_fire else "threshold"
         _cycle_line = f"--- cycle {state.get('cycle_id', 0) + 1} [{now}] p={pressure:.2f}/th={threshold:.1f} fire={fire_cause} ({_fire_type}) ---"
         print(_cycle_line)
+
+        # WM_DEBUG: fire event
+        _wm_log("fire", {
+            "cycle": state.get("cycle_id", 0) + 1,
+            "fire_cause": fire_cause,
+            "fire_type": _fire_type,
+            "pressure": round(pressure, 2),
+            "threshold": round(threshold, 2),
+            "pending_channels": [p.get("channel", "") for p in state.get("pending", []) if p.get("channel")],
+            "pending_types": [p.get("type", "") for p in state.get("pending", [])],
+            "pending_count": len(state.get("pending", [])),
+        })
         broadcast_log(_cycle_line)
         broadcast_state(state)
         broadcast_self(state)
@@ -523,6 +557,15 @@ def main():
         print(f"  LLM①raw: {propose_resp.strip()[:300]}")
         print(f"  候補({len(candidates)}件): {[(c['tool'], c['reason'][:40]) for c in candidates]}")
 
+        # WM_DEBUG: candidates event
+        _wm_log("candidates", {
+            "cycle": state.get("cycle_id", 0) + 1,
+            "candidates": [
+                {"tool": c["tool"], "channel": _get_channel(c["tool"]), "reason": c.get("reason", "")[:100]}
+                for c in candidates
+            ],
+        })
+
         # ② Controller: 候補から選択
         ics_debug = _intent_conditioned_scores(candidates, state)
         for ci, c in enumerate(candidates):
@@ -533,6 +576,25 @@ def main():
         _sel_line = f"  選択: {selected['tool']} - {selected['reason'][:60]}"
         print(_sel_line)
         broadcast_log(_sel_line)
+
+        # WM_DEBUG: selected event（チャネル一致判定付き）
+        _sel_ch = _get_channel(selected["tool"])
+        _pending_chs = [p.get("channel", "") for p in state.get("pending", []) if p.get("channel")]
+        # match: selected ch が pending ch に含まれる / neutral: selected が internal（応答系でない）
+        if _sel_ch == "internal":
+            _ch_match = None  # neutral（チャネル非依存ツール）
+        elif _pending_chs:
+            _ch_match = _sel_ch in _pending_chs
+        else:
+            _ch_match = None  # pending に channel がない（評価対象外）
+        _wm_log("selected", {
+            "cycle": state.get("cycle_id", 0) + 1,
+            "tool": selected["tool"],
+            "channel": _sel_ch,
+            "pending_channels": _pending_chs,
+            "channel_match": _ch_match,
+            "reason": selected.get("reason", "")[:100],
+        })
 
         # ③ LLM: チェーン実行
         # state_before: effective_change計算用スナップショット
