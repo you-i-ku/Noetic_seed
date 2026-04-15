@@ -58,10 +58,26 @@ simulate_novelty*.py
 /install.bat
 /run.bat
 最小要件定義（実装に向けて粒度細かめ）.txt
+別llmのレビュー.txt
 llm_debug_prev.log
 documents/
 expalanationsumple/
 UIイメージ/
+WORLD_MODEL_DESIGN/
+DESIGN_ORCHESTRATION.md
+DESIGN_CLAUDE_CODE_MIGRATION.md
+V0_ARCHITECTURE.md
+V0_5_ARCHITECTURE.md
+CLAWCODE_CAPABILITY_INVENTORY.md
+
+# External reference projects (not part of Noetic Seed)
+claw-code/
+
+# Test / debug scripts at root
+test_vision_*.py
+test_x_tab.py
+coordinate_check.png
+スクリーンショット*.png
 
 # Secrets
 .env
