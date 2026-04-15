@@ -4,9 +4,12 @@ claw-code 参照:
   - rust/crates/runtime/src/mcp_tool_bridge.rs:1-921
   - rust/crates/runtime/src/mcp.rs:26-37
 
-Phase 2 では MCP server protocol (JSON-RPC 2.0) 本体は実装せず、
-registry + dispatch bridge の interface のみ提供。
-set_mcp_bridge() で実 MCP client を差し込む設計。
+Phase 3 で MCP protocol 本体 (core/runtime/mcp/) が完成したので、
+このモジュールはそちらの McpToolBridge をオプションで使う。
+
+- attach_real_bridge(bridge): 実 McpToolBridge を使う
+- set_mcp_bridge(...): callable ベースの bridge を注入 (古い API、互換維持)
+- どちらも未設定なら "pending" 応答を返す
 """
 from typing import Callable, Optional
 
@@ -22,6 +25,21 @@ _bridge: dict = {
     "read_resource": None,   # callable(server_name, uri) -> str
     "auth": None,            # callable(server_name) -> str
 }
+
+# 実 McpToolBridge インスタンス (Phase 3 で実装済み) をここに挿しこめる。
+_real_bridge = {"ref": None}
+
+
+def attach_real_bridge(bridge) -> None:
+    """core.runtime.mcp.bridge.McpToolBridge を直接接続する。
+
+    callable ベースの set_mcp_bridge より優先される。
+    """
+    _real_bridge["ref"] = bridge
+
+
+def detach_real_bridge() -> None:
+    _real_bridge["ref"] = None
 
 
 def set_mcp_bridge(
@@ -40,6 +58,31 @@ def set_mcp_bridge(
         _bridge["auth"] = auth
 
 
+def _format_call_result(result: dict) -> str:
+    """McpToolBridge.call() の {result|error} を文字列化。"""
+    import json as _json
+    if "error" in result:
+        err = result["error"]
+        return (f"[MCP error {err.get('code','?')}] "
+                f"{err.get('message','unknown')}")
+    body = result.get("result") or {}
+    content = body.get("content")
+    if isinstance(content, list):
+        parts = []
+        for c in content:
+            if isinstance(c, dict):
+                t = c.get("type")
+                if t == "text":
+                    parts.append(c.get("text", ""))
+                elif t == "resource":
+                    parts.append(f"[resource: "
+                                 f"{c.get('resource', {}).get('uri', '')}]")
+                else:
+                    parts.append(_json.dumps(c, ensure_ascii=False))
+        return "\n".join(parts) if parts else "(empty response)"
+    return _json.dumps(body, ensure_ascii=False)
+
+
 # ============================================================
 # MCP (generic tool dispatch)
 # ============================================================
@@ -52,6 +95,14 @@ def mcp_call(inp: dict) -> str:
         return "Error: server is required"
     if not tool:
         return "Error: tool is required"
+
+    # 優先順: real bridge > callable bridge > pending stub
+    real = _real_bridge.get("ref")
+    if real is not None:
+        try:
+            return _format_call_result(real.call(server, tool, arguments))
+        except Exception as e:
+            return f"Error: MCP call failed: {e}"
 
     fn = _bridge.get("call_tool")
     if fn is None:
@@ -74,9 +125,26 @@ def list_mcp_resources(inp: dict) -> str:
     if not server:
         return "Error: server is required"
 
+    real = _real_bridge.get("ref")
+    if real is not None:
+        try:
+            resources = real.list_resources(server)
+        except Exception as e:
+            return f"Error: list_resources failed: {e}"
+        if not resources:
+            return f"No resources on server '{server}'"
+        lines = [f"Resources on '{server}' ({len(resources)}):"]
+        for r in resources:
+            # real bridge は McpResourceInfo dataclass
+            uri = getattr(r, "uri", r.get("uri") if isinstance(r, dict) else str(r))
+            name = getattr(r, "name", r.get("name", "") if isinstance(r, dict) else "")
+            lines.append(f"  - {uri}{'  ' + name if name else ''}")
+        return "\n".join(lines)
+
     fn = _bridge.get("list_resources")
     if fn is None:
-        return f"[ListMcpResources pending — bridge not configured]\nserver: {server}"
+        return (f"[ListMcpResources pending — bridge not configured]\n"
+                f"server: {server}")
     try:
         resources = fn(server)
     except Exception as e:
@@ -102,6 +170,13 @@ def read_mcp_resource(inp: dict) -> str:
         return "Error: server is required"
     if not uri:
         return "Error: uri is required"
+
+    real = _real_bridge.get("ref")
+    if real is not None:
+        try:
+            return _format_call_result(real.read_resource(server, uri))
+        except Exception as e:
+            return f"Error: read_resource failed: {e}"
 
     fn = _bridge.get("read_resource")
     if fn is None:
