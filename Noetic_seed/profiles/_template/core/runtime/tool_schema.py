@@ -2,15 +2,10 @@
 
 claw-code の rust/crates/tools/src/lib.rs:385-1172 (mvp_tool_specs) の Python port。
 
-責務:
-  - tool の name / description / input_schema / required_permission を保持
-  - LLM provider への tool list 変換
-  - function calling native 形式で LLM に渡す
-
-TODO: 別セッションで実装。現状は型定義のみ。
+厳密 claw-code 準拠。
 """
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable
 
 from core.runtime.permissions import PermissionMode
 
@@ -20,10 +15,9 @@ class ToolSpec:
     """tool 定義の標準形。"""
     name: str
     description: str
-    input_schema: dict  # JSON Schema
+    input_schema: dict
     required_permission: PermissionMode
     handler: Callable  # (input: dict) -> str
-    channel: Optional[str] = None  # Noetic 固有: device/x/elyth/display/internal
 
     def to_anthropic_format(self) -> dict:
         """Anthropic Messages API 形式に変換。"""
