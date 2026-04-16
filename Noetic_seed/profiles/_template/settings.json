@@ -29,5 +29,16 @@
       "tools": 1500,
       "instructions": 600
     }
+  },
+  "approval": {
+    "pause_on_await": true,
+    "missing_field_policy": "deny",
+    "auto_fill_on_missing": false
+  },
+  "prompt": {
+    "observation_label_format": "structured_compact"
+  },
+  "fire": {
+    "max_micro_iter": 3
   }
 }
