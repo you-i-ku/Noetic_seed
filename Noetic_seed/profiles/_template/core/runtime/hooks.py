@@ -2,8 +2,13 @@
 
 claw-code の rust/crates/runtime/src/hooks.rs:22-36 の Python port。
 
-厳密 claw-code 準拠。Noetic 固有の E値評価 / 承認3層は
-handler として外部登録する形で接続する想定。
+ファイル構成:
+  - 上半分 (HookEvent / HookRunResult / HookRunner):
+      claw-code 準拠の純粋インフラ。settings 非依存。
+  - 下半分 (Noetic 固有 factory 群):
+      承認 3 層チェッカー等、Phase 4 で追加される Noetic 固有 handler。
+      settings 依存は factory 引数で受け取り、main.py 側で HookRunner に
+      register する。
 """
 from dataclasses import dataclass, field
 from enum import Enum
@@ -116,3 +121,92 @@ class HookRunner:
                 )
             acc = acc.merge(r)
         return acc
+
+
+# ============================================================
+# Noetic 固有 handler (Phase 4 追加)
+# ------------------------------------------------------------
+# 承認 3 層 (tool_intent / tool_expected_outcome / message) の欠損
+# チェックを PreToolUse hook として登録するための factory。
+# APPROVAL_PROMPT_SPEC.md §5 の仕様を実装する。
+# ============================================================
+
+_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome", "message")
+_VALID_MISSING_POLICIES = ("deny", "warn", "auto_fill")
+
+
+def _auto_fill_field(tool_name: str, field_name: str) -> str:
+    """tool_name と欠損フィールド名からプレースホルダ文字列を生成。
+
+    Phase 4 Step A 時点の最小実装。将来 tool メタデータベースの推定に
+    差し替え可能 (APPROVAL_PROMPT_SPEC.md §9 未決定事項)。
+    """
+    if field_name == "tool_intent":
+        return f"[auto_fill] {tool_name} 実行"
+    if field_name == "tool_expected_outcome":
+        return f"[auto_fill] {tool_name} の結果取得"
+    if field_name == "message":
+        return f"[auto_fill] {tool_name} を実行します"
+    return "[auto_fill]"
+
+
+def make_pre_tool_use_approval_check(
+    missing_field_policy: str = "deny",
+) -> PreHandler:
+    """承認 3 層欠損チェッカーを生成。
+
+    tool_input が `tool_intent` / `tool_expected_outcome` / `message`
+    を揃えているか検証する PreToolUse hook を返す。
+
+    factory にしている理由: hooks.py を claw-code 準拠の純粋インフラに
+    保つため、settings 依存は factory 引数で注入する。main.py 側が
+    `settings.approval.missing_field_policy` を読んで register する。
+
+    Args:
+        missing_field_policy: 欠損時の動作。"deny" / "warn" / "auto_fill"
+
+    Raises:
+        ValueError: 未知の policy が渡された場合 (設定ミスは起動時に検出)
+    """
+    if missing_field_policy not in _VALID_MISSING_POLICIES:
+        raise ValueError(
+            f"unknown missing_field_policy={missing_field_policy!r}; "
+            f"expected one of {_VALID_MISSING_POLICIES}"
+        )
+
+    def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        missing = []
+        for field_name in _APPROVAL_FIELDS:
+            value = tool_input.get(field_name, "")
+            if value is None or not str(value).strip():
+                missing.append(field_name)
+
+        if not missing:
+            return HookRunResult.allow()
+
+        if missing_field_policy == "deny":
+            return HookRunResult.deny([
+                f"[approval] tool_input 欠損: {', '.join(missing)}。"
+                "tool_intent / tool_expected_outcome / message の 3 層を"
+                "揃えて再生成してください。"
+            ])
+
+        if missing_field_policy == "warn":
+            return HookRunResult(
+                denied=False,
+                messages=[
+                    f"[approval] warning: 欠損フィールド {missing} "
+                    "(missing_field_policy=warn のため実行継続)"
+                ],
+            )
+
+        updated = dict(tool_input)
+        for field_name in missing:
+            updated[field_name] = _auto_fill_field(tool_name, field_name)
+        return HookRunResult(
+            denied=False,
+            updated_input=updated,
+            messages=[f"[approval] 自動補完: {missing}"],
+        )
+
+    return _check
