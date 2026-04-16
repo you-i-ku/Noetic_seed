@@ -2,17 +2,47 @@
 
 claw-code の rust/crates/runtime/src/session.rs の Python port (簡略版)。
 
-厳密 claw-code 準拠。Anthropic content-block 形式をベースに保持し、
-OpenAI 形式には serialize 時に変換。
+上半分 (messages / push_user_text / push_assistant_message / push_tool_result
+/ serialize_*) は claw-code 準拠の純粋インフラ。
+Noetic 固有の push_observation は Phase 4 Step D で追加 (UPS v2 の
+observation 概念を Session に流し込む拡張)。
 """
+from datetime import datetime
+from typing import Optional
+
 from core.providers.base import AssistantMessage
 
 
-class Session:
-    """会話履歴バッファ。"""
+_VALID_OBS_FORMATS = (
+    "structured_compact",  # [obs channel=X action=Y time=Z]           default
+    "structured_full",     # [observation channel=X ... source_action=W]
+    "natural_ja",          # [Xからの声 Z]
+    "compact",             # [obs X Z]
+)
 
-    def __init__(self):
+
+class Session:
+    """会話履歴バッファ。
+
+    Attributes:
+        messages: Anthropic content-block 形式の message list (push_* で追記)。
+        observation_label_format: push_observation 時の label 書式
+            ("structured_compact" / "structured_full" / "natural_ja" / "compact")。
+            default は "structured_compact" (INTEGRATION_POINTS §2.4)。
+        observations: 積まれた observation の metadata 履歴
+            (format 変更時の再レンダリングや分析用。messages とは独立)。
+    """
+
+    def __init__(self, observation_label_format: str = "structured_compact"):
+        if observation_label_format not in _VALID_OBS_FORMATS:
+            raise ValueError(
+                f"unknown observation_label_format="
+                f"{observation_label_format!r}; expected one of "
+                f"{_VALID_OBS_FORMATS}"
+            )
         self.messages: list = []
+        self.observation_label_format: str = observation_label_format
+        self.observations: list[dict] = []
 
     def push_user_text(self, text: str) -> None:
         if not text:
@@ -48,8 +78,87 @@ class Session:
             block["is_error"] = True
         self.messages.append({"role": "user", "content": [block]})
 
+    def push_observation(
+        self,
+        observed_channel: str,
+        content: str,
+        actor: Optional[str] = None,
+        source_action_hint: str = "living_presence",
+        observation_time: Optional[str] = None,
+    ) -> None:
+        """observation (外部到着 or 内部観測) を Session に積む。
+
+        INTEGRATION_POINTS.md §2.4 の仕様。UPS v2 の observation 概念を
+        LLM コンテキストに流し込む専用メソッド。user message として
+        messages に積むが、prefix に label が付く点で push_user_text と
+        区別される。metadata は self.observations にも保持する
+        (format 再レンダリングや分析用)。
+
+        Args:
+            observed_channel: "device" / "elyth" / "x" / "self" など。
+            content: 観測本文 (ゆうの発話、SNS 通知等)。
+            actor: 話者識別子 (例: "ent_yuu")。natural_ja format で使う。
+            source_action_hint: 対応する AI 側 action のヒント。
+                未特定時は "living_presence" (UPS v2 の spontaneous 到着)。
+            observation_time: "HH:MM" 形式。None で現在時刻を採用。
+        """
+        if not content:
+            return
+        if observation_time is None:
+            observation_time = datetime.now().strftime("%H:%M")
+
+        meta = {
+            "observed_channel": observed_channel,
+            "content": content,
+            "actor": actor,
+            "source_action_hint": source_action_hint,
+            "observation_time": observation_time,
+        }
+        self.observations.append(meta)
+
+        label = self._render_observation_label(
+            meta, self.observation_label_format,
+        )
+        text = f"{label} {content}" if label else content
+        self.messages.append({
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        })
+
+    @staticmethod
+    def _render_observation_label(meta: dict, fmt: str) -> str:
+        """observation metadata を指定 format の label 文字列に変換。
+
+        4 format 対応 (INTEGRATION_POINTS §2.4):
+          - structured_compact: [obs channel=X action=Y time=Z]       default
+          - structured_full:    [observation channel=X action=Y
+                                 time=Z source_action=W]
+          - natural_ja:         [Xからの声 Z] (既存 Noetic 流儀継承)
+          - compact:            [obs X Z]
+
+        未知 format は structured_compact にフォールバック (defensive)。
+        """
+        channel = str(meta.get("observed_channel") or "?")
+        action = str(meta.get("source_action_hint") or "?")
+        time_str = str(meta.get("observation_time") or "")
+        actor = meta.get("actor")
+
+        if fmt == "structured_full":
+            return (
+                f"[observation channel={channel} action={action} "
+                f"time={time_str} source_action={action}]"
+            )
+        if fmt == "natural_ja":
+            speaker = actor or channel
+            return f"[{speaker}からの声 {time_str}]"
+        if fmt == "compact":
+            return f"[obs {channel} {time_str}]"
+        # structured_compact (default) + unknown fallback
+        return f"[obs channel={channel} action={action} time={time_str}]"
+
     def clear(self) -> None:
         self.messages = []
+        self.observations = []
 
     # ---- シリアライズ ----
 
