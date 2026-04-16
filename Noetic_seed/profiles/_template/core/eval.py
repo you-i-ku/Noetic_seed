@@ -221,9 +221,19 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
 
         if tn in EXTERNAL_ACTION_TOOLS:
             pending = state_after.get("pending", [])
+            # UPS v2 対応: 旧 type="external_message" と
+            # 新 source_action="living_presence" + channel="device" の両方を検出
+            has_ups_external = any(
+                p.get("type") == "pending"
+                and p.get("source_action") == "living_presence"
+                and (p.get("observed_channel") == "device"
+                     or p.get("expected_channel") == "device")
+                for p in pending
+            )
             has_addressee = (
-                any(p.get("type") == "external_message" for p in pending) or
-                state_after.get("unresponded_external_count", 0) > 0
+                any(p.get("type") == "external_message" for p in pending)
+                or has_ups_external
+                or state_after.get("unresponded_external_count", 0) > 0
             )
             addressee_factor = 1.0 if has_addressee else 0.15
         else:
@@ -297,13 +307,23 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
 
 
 def update_gaps_by_relevance(state: dict, result_str: str, ec: float):
-    """変更6: 行動結果が既存 unresolved_intent に関連していれば gap を下げる。
-    別の方法で課題に取り組んでも gap が下がる（同じ方法の再試行に限らない）。"""
+    """変更6: 行動結果が既存 unresolved 系 pending に関連していれば gap を下げる。
+    別の方法で課題に取り組んでも gap が下がる（同じ方法の再試行に限らない）。
+
+    UPS v2 対応: 旧 type='unresolved_intent' と、新 UPS v2 の
+    semantic_merge=True な pending (reflection/tool 由来で gap を追う系)
+    の両方を対象にする。
+    """
     pending = state.get("pending", [])
-    unresolved = [p for p in pending if p.get("type") == "unresolved_intent"]
+    unresolved = [
+        p for p in pending
+        if p.get("type") == "unresolved_intent"
+        or (p.get("type") == "pending" and p.get("semantic_merge") is True)
+    ]
     if not unresolved or not _vector_ready or not result_str:
         return
     try:
+        from core.pending_unified import calc_priority as _ups_priority
         texts = [result_str[:200]] + [u.get("content", "")[:200] for u in unresolved]
         vecs = _embed_sync(texts)
         if not vecs or len(vecs) != len(texts):
@@ -313,18 +333,39 @@ def update_gaps_by_relevance(state: dict, result_str: str, ec: float):
             if sim > 0.5:
                 decay = 1.0 - ec * 0.5 * sim
                 u["gap"] = u["gap"] * max(0.1, decay)
-                u["priority"] = u["gap"] * 3.0
+                # priority 再計算: UPS v2 は計算式、旧形式は gap*3.0
+                if u.get("type") == "pending":
+                    u["priority"] = _ups_priority(u)
+                else:
+                    u["priority"] = u["gap"] * 3.0
     except Exception:
         pass
 
 
-def update_unresolved_intents(state: dict, intent: str, e3_str: str, cycle_id: int) -> None:
-    """E3から予測誤差 gap=1-E3 を計算し、unresolved_intent として pending に追加。
-    rate-distortion 的: 閾値なし、動的容量 N で上位gap順に自動選別。
-    semantic merge: 既存 unresolved と類似度 > 0.72 なら attempts を加算してマージ。
-    N = max(3, min(20, len(log)//5)) で log 成長に応じて枠が広がる。"""
-    import time
+def update_unresolved_intents(
+    state: dict, intent: str, e3_str: str, cycle_id: int,
+    source_action: str = "reflection", lag_kind: str = "cycles",
+) -> None:
+    """E3 から予測誤差 gap=1-E3 を計算し、UPS v2 pending に追加。
+
+    UPS v2 対応 (Phase 4 Step C-2): 出力を type="pending" /
+    semantic_merge=True / expected_channel="self" に統一。
+    内部ロジック (rate-distortion 容量管理、semantic merge) は不変。
+
+    Args:
+        source_action: どの tool/action 由来の unresolved か。
+            PostToolUse hook では直前の tool_name を渡す。
+            reflection サイクル内では "reflection" (default)。
+        lag_kind: observation_lag_kind。unresolved 系は通常 "cycles"
+            (時間スケールが cycle 単位で広がる)。
+
+    rate-distortion: 閾値なし、動的容量 N で上位 gap 順に自動選別。
+    semantic merge: 既存 UPS v2 pending (semantic_merge=True) と類似度
+    > 0.72 で attempts 加算マージ。N = max(3, min(20, len(log)//5))。
+    """
     from datetime import datetime
+    from core.pending_unified import calc_priority as _ups_priority
+    from core.pending_unified import pending_add as _ups_pending_add
 
     if not intent or not e3_str:
         return
@@ -338,49 +379,57 @@ def update_unresolved_intents(state: dict, intent: str, e3_str: str, cycle_id: i
     pending = state.setdefault("pending", [])
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 既存 unresolved_intent との意味的マージ
+    # semantic merge 対象: UPS v2 で semantic_merge=True な pending
     merged = False
-    unresolved = [p for p in pending if p.get("type") == "unresolved_intent"]
-    if unresolved and _vector_ready:
+    candidates = [
+        p for p in pending
+        if p.get("type") == "pending" and p.get("semantic_merge") is True
+    ]
+    if candidates and _vector_ready:
         try:
-            texts = [intent[:200]] + [u.get("content", "")[:200] for u in unresolved]
+            texts = [intent[:200]] + [c.get("content", "")[:200] for c in candidates]
             vecs = _embed_sync(texts)
             if vecs and len(vecs) == len(texts):
-                for i, u in enumerate(unresolved):
+                for i, c in enumerate(candidates):
                     sim = cosine_similarity(vecs[0], vecs[i + 1])
                     if sim > 0.72:
-                        u["attempts"] = u.get("attempts", 1) + 1
-                        u["last_cycle"] = cycle_id
-                        u["gap"] = gap  # 最新の gap で上書き（回復したら低くなる→自然に選別外）
-                        u["timestamp"] = now_ts
-                        u["priority"] = gap * 3.0
+                        c["attempts"] = c.get("attempts", 1) + 1
+                        c["last_cycle"] = cycle_id
+                        c["gap"] = gap  # 最新 gap で上書き (回復→低→自然に選別外)
+                        c["timestamp"] = now_ts
+                        c["priority"] = _ups_priority(c)
                         merged = True
                         break
         except Exception:
             pass
 
     if not merged:
-        pending.append({
-            "type": "unresolved_intent",
-            "id": f"uri_{cycle_id:04d}_{int(time.time() * 1000) % 10000}",
-            "content": intent[:200],
-            "gap": gap,
-            "attempts": 1,
-            "origin_cycle": cycle_id,
-            "last_cycle": cycle_id,
-            "timestamp": now_ts,
-            "priority": gap * 3.0,
-        })
+        _ups_pending_add(
+            state=state,
+            source_action=source_action,
+            expected_observation=intent[:200],
+            lag_kind=lag_kind,
+            content=intent[:200],
+            cycle_id=cycle_id,
+            channel="self",  # unresolved 系は内省由来
+            expiry_policy="dynamic_n",
+            initial_gap=gap,
+            semantic_merge=True,
+        )
 
-    # 動的容量: log 成長で枠が広がる。gap 上位 N のみ保持
+    # 動的容量管理: UPS v2 semantic_merge=True 系のみ対象、gap 上位 N 保持
     log_count = len(state.get("log", []))
     n_cap = max(3, min(20, log_count // 5))
-    unresolved_now = [p for p in pending if p.get("type") == "unresolved_intent"]
-    unresolved_now.sort(key=lambda p: -p.get("gap", 0.0))
-    keep_ids = {u["id"] for u in unresolved_now[:n_cap]}
+    merge_entries = [
+        p for p in state["pending"]
+        if p.get("type") == "pending" and p.get("semantic_merge") is True
+    ]
+    merge_entries.sort(key=lambda p: -p.get("gap", 0.0))
+    keep_ids = {c["id"] for c in merge_entries[:n_cap]}
     state["pending"] = [
-        p for p in pending
-        if p.get("type") != "unresolved_intent" or p.get("id") in keep_ids
+        p for p in state["pending"]
+        if not (p.get("type") == "pending" and p.get("semantic_merge") is True)
+        or p.get("id") in keep_ids
     ]
 
 

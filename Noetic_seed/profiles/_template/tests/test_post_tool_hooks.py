@@ -123,21 +123,30 @@ def test_eval_updates_ledger():
 
 
 def test_eval_updates_unresolved_intent():
-    print("== eval hook: unresolved_intent pending に追加 ==")
+    print("== eval hook: UPS v2 pending に追加 (source_action=tool_name) ==")
     state = _fresh_state()
     before = deepcopy(state)
     hook = _make_hook(state, before)
     hook("write_file", _full_input(), "完了")
-    unresolved = [
+    # Step C-2 以降: type='pending', semantic_merge=True, source_action=tool_name
+    ups_entries = [
         p for p in state.get("pending", [])
-        if p.get("type") == "unresolved_intent"
+        if p.get("type") == "pending"
+        and p.get("semantic_merge") is True
     ]
+    entry = ups_entries[0] if ups_entries else {}
     # E3=80 → gap = 1 - 0.8 = 0.2
     return all([
-        _assert(len(unresolved) == 1, "1 件追加"),
-        _assert(abs(unresolved[0].get("gap", 0) - 0.2) < 0.01,
+        _assert(len(ups_entries) == 1, "UPS v2 pending 1 件追加"),
+        _assert(abs(entry.get("gap", 0) - 0.2) < 0.01,
                 "gap=0.2 (E3=80 由来)"),
-        _assert(unresolved[0].get("origin_cycle") == 10, "origin_cycle"),
+        _assert(entry.get("origin_cycle") == 10, "origin_cycle"),
+        _assert(entry.get("source_action") == "write_file",
+                "source_action=tool_name"),
+        _assert(entry.get("observation_lag_kind") == "cycles",
+                "lag_kind=cycles (unresolved 系の default)"),
+        _assert(entry.get("expected_channel") == "self",
+                "expected_channel=self (内省由来)"),
     ])
 
 

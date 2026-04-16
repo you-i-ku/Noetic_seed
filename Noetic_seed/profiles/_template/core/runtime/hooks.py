@@ -307,11 +307,12 @@ def make_post_tool_use_evaluation(
         )
 
         # 5. unresolved_intent 更新 (rate-distortion 容量管理)
-        # NOTE: Step C で UPS v2 スキーマに書き換え予定。
-        # Step B では既存 (type="unresolved_intent") 形式で動作。
+        # Step C-2 以降: UPS v2 形式で pending に追加 (source_action=tool_name,
+        # lag_kind="cycles", semantic_merge=True)。内部ロジックは不変。
         e3_str = _pct_str(e3)
         _eval.update_unresolved_intents(
             state=state, intent=intent, e3_str=e3_str, cycle_id=cycle_id,
+            source_action=tool_name, lag_kind="cycles",
         )
 
         # 6. 既存 unresolved_intent の gap を relevance で減衰
