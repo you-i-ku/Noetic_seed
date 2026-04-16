@@ -221,18 +221,15 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
 
         if tn in EXTERNAL_ACTION_TOOLS:
             pending = state_after.get("pending", [])
-            # UPS v2 対応: 旧 type="external_message" と
-            # 新 source_action="living_presence" + channel="device" の両方を検出
-            has_ups_external = any(
-                p.get("type") == "pending"
-                and p.get("source_action") == "living_presence"
-                and (p.get("observed_channel") == "device"
-                     or p.get("expected_channel") == "device")
-                for p in pending
-            )
+            # UPS v2: source_action="living_presence" + channel="device" で検出
             has_addressee = (
-                any(p.get("type") == "external_message" for p in pending)
-                or has_ups_external
+                any(
+                    p.get("type") == "pending"
+                    and p.get("source_action") == "living_presence"
+                    and (p.get("observed_channel") == "device"
+                         or p.get("expected_channel") == "device")
+                    for p in pending
+                )
                 or state_after.get("unresponded_external_count", 0) > 0
             )
             addressee_factor = 1.0 if has_addressee else 0.15
@@ -307,18 +304,14 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
 
 
 def update_gaps_by_relevance(state: dict, result_str: str, ec: float):
-    """変更6: 行動結果が既存 unresolved 系 pending に関連していれば gap を下げる。
-    別の方法で課題に取り組んでも gap が下がる（同じ方法の再試行に限らない）。
-
-    UPS v2 対応: 旧 type='unresolved_intent' と、新 UPS v2 の
-    semantic_merge=True な pending (reflection/tool 由来で gap を追う系)
-    の両方を対象にする。
+    """変更6: 行動結果が既存 UPS v2 semantic_merge 系 pending に関連していれば
+    gap を下げる。別の方法で課題に取り組んでも gap が下がる（同じ方法の再試行に
+    限らない）。
     """
     pending = state.get("pending", [])
     unresolved = [
         p for p in pending
-        if p.get("type") == "unresolved_intent"
-        or (p.get("type") == "pending" and p.get("semantic_merge") is True)
+        if p.get("type") == "pending" and p.get("semantic_merge") is True
     ]
     if not unresolved or not _vector_ready or not result_str:
         return
@@ -333,11 +326,7 @@ def update_gaps_by_relevance(state: dict, result_str: str, ec: float):
             if sim > 0.5:
                 decay = 1.0 - ec * 0.5 * sim
                 u["gap"] = u["gap"] * max(0.1, decay)
-                # priority 再計算: UPS v2 は計算式、旧形式は gap*3.0
-                if u.get("type") == "pending":
-                    u["priority"] = _ups_priority(u)
-                else:
-                    u["priority"] = u["gap"] * 3.0
+                u["priority"] = _ups_priority(u)
     except Exception:
         pass
 

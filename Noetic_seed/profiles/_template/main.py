@@ -74,6 +74,7 @@ from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_chang
                        calc_effective_change, apply_effective_change_to_e2, EXTERNAL_ACTION_TOOLS,
                        update_unresolved_intents, update_gaps_by_relevance,
                        _extract_action_key, append_action_ledger)
+from core.pending_unified import pending_add, pending_observe
 from core.parser import parse_tool_calls, parse_candidates
 from core.entropy import (
     ENTROPY_PARAMS, tick_entropy, calc_dynamic_threshold,
@@ -258,14 +259,20 @@ def main():
                 state["log"].append(_ext_entry)
                 # 未応答カウンター + pending統一管理
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
-                state.setdefault("pending", []).append({
-                    "type": "external_message",
-                    "channel": "device",
-                    "id": _ext_id,
-                    "content": chat_text,
-                    "timestamp": _ext_entry["time"],
-                    "priority": 3.0,
-                })
+                # UPS v2: living_presence action の observation として pending に追加
+                # observed_content は埋めず (Step E-3 で Session.push_observation が LLM
+                # コンテキストに届ける)、expected_channel="device" で保持することで
+                # controller の priority_boost が output_display を促す設計。
+                pending_add(
+                    state,
+                    source_action="living_presence",
+                    expected_observation=chat_text[:200],
+                    lag_kind="unknown",
+                    content=chat_text[:200],
+                    cycle_id=state.get("cycle_id", 0),
+                    channel="device",
+                    expiry_policy="protected",  # 外部由来は prune 対象外
+                )
                 # 5-d: 遅延フィードバック — external_message 到着 = output_display への反応
                 _pf_list = state.get("pending_feedback", [])
                 _pf_awaiting = [p for p in _pf_list if p.get("entity") == "default_user" and p.get("status") == "awaiting"]
@@ -714,15 +721,17 @@ def main():
         eff_change = calc_effective_change(all_tool_names, result_str, _state_before_snapshot, state_after, current_intent=intent, target_id=_target_for_ec)
         state = state_after
 
-        # ツール種別に応じたpending消化（ツァイガルニク解放）
+        # UPS v2 pending 消化 (AI が外部への応答 action を実行 → 該当 pending を observe)
         _executed_tools = set(all_tool_names)
 
-        # output_display は external_message pending を1件消化 + 未応答カウンタ減算
         if "output_display" in _executed_tools:
-            _pending = state.get("pending", [])
-            _ext_msgs = [p for p in _pending if p.get("type") == "external_message"]
-            if _ext_msgs:
-                state["pending"] = [p for p in _pending if p != _ext_msgs[0]]
+            # device channel の living_presence pending を 1 件 observe で消化
+            pending_observe(
+                state, observed_content=result_str[:500],
+                channel="device", cycle_id=state.get("cycle_id", 0),
+                match_source_actions=["living_presence"], limit=1,
+            )
+            # 旧 state 変数 unresponded_external_count (eval.py addressee_factor 連動)
             _uec = state.get("unresponded_external_count", 0)
             if _uec > 0:
                 state["unresponded_external_count"] = _uec - 1
@@ -730,15 +739,6 @@ def main():
                 state["unresolved_external"] = 0.0
                 state["unresponded_external_count"] = 0
             save_state(state)
-
-        # elyth系ツールはelyth_notification pendingを1件消化
-        _elyth_action_tools = {"elyth_post", "elyth_reply", "elyth_like", "elyth_follow"}
-        if _executed_tools & _elyth_action_tools:
-            _pending = state.get("pending", [])
-            _elyth_notifs = [p for p in _pending if p.get("type") == "elyth_notification"]
-            if _elyth_notifs:
-                state["pending"] = [p for p in _pending if p != _elyth_notifs[0]]
-                save_state(state)
 
         # E1-E4評価（ベクトル類似度）
         e1_vec = _compare_expect_result(intent, expect) if intent and expect else ""

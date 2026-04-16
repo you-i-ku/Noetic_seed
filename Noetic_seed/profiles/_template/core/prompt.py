@@ -212,25 +212,28 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 
     fire_cause_line = f"\n[発火原因: {fire_cause}]" if fire_cause and ctrl.get("tool_level", 0) >= 2 else ""
 
-    # pending（未対応事項）
+    # pending（未対応事項） — UPS v2 (type='pending') / 旧形式両対応
     pending = state.get("pending", [])
     if pending:
         pending_lines = []
         for p in sorted(pending, key=lambda x: -x.get("priority", 0))[:10]:
             p_type = p.get("type", "?")
             content = p.get("content", "")[:80]
-            if p_type == "unresolved_intent":
-                # 未達成ペンディング: id / gap / attempts を明示（wait dismiss=ID で諦められる）
+            p_id = p.get("id", "?")
+            if p_type == "pending":
+                # UPS v2: source_action + lag_kind + gap + attempts + channel
+                source = p.get("source_action", "?")
+                lag = p.get("observation_lag_kind", "?")
                 gap_pct = round(p.get("gap", 0.0) * 100)
                 attempts = p.get("attempts", 1)
+                ch = p.get("observed_channel") or p.get("expected_channel") or ""
+                ch_tag = f" ch={ch}" if ch else ""
                 origin = p.get("origin_cycle", "?")
-                uri_id = p.get("id", "?")
                 pending_lines.append(
-                    f"  [unresolved_intent id={uri_id} g={gap_pct}% x{attempts}] {content} (cycle {origin}〜)"
+                    f"  [pending id={p_id} src={source} lag={lag} g={gap_pct}% x{attempts}{ch_tag}] {content} (cycle {origin}〜)"
                 )
             else:
-                # 他の pending も id を出す（dismiss 用）
-                p_id = p.get("id", "?")
+                # 旧形式 fallback (migration 期間 safety; Phase 5 iku 再生成後は消える)
                 p_ch = p.get("channel", "")
                 ch_tag = f" ch={p_ch}" if p_ch else ""
                 pending_lines.append(f"  [{p_type} id={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")

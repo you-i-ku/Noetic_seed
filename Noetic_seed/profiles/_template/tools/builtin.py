@@ -296,11 +296,19 @@ def _wait_or_dismiss(args: dict) -> str:
     if not target:
         return f"[dismiss] id={dismiss_id} は未対応リストにありません"
     state["pending"] = [p for p in pending if p.get("id") != dismiss_id]
-    # external_messageの場合: カウンター減算するが、圧力は即ゼロにしない（余韻として残る）
-    if target[0].get("type") == "external_message":
+    # 外部由来 pending の場合: カウンター減算 (圧力は余韻として残す)
+    # UPS v2: type='pending' + source_action='living_presence' + channel='device'
+    _t = target[0]
+    _is_external = (
+        _t.get("type") == "pending"
+        and _t.get("source_action") == "living_presence"
+        and (_t.get("observed_channel") == "device"
+             or _t.get("expected_channel") == "device")
+    ) or _t.get("type") == "external_message"  # 旧形式 fallback
+    if _is_external:
         uec = state.get("unresponded_external_count", 0)
         if uec > 0:
             state["unresponded_external_count"] = uec - 1
         # unresolved_externalはゼロにしない → tick loopで徐々に減衰する
     save_state(state)
-    return f"[dismiss] {target[0].get('type','?')}: {target[0].get('content','')[:50]} を却下しました"
+    return f"[dismiss] {_t.get('type','?')}: {_t.get('content','')[:50]} を却下しました"

@@ -171,8 +171,48 @@ def _intent_conditioned_scores(candidates: list, state: dict) -> list:
     return scores
 
 
+def _pending_priority_boost(state: dict, candidate: dict) -> float:
+    """candidate が未消化 UPS v2 pending を解消しそうなら boost 倍率を返す。
+
+    UPS v2 (Phase 4 Step E-1): 未 observed な pending のうち、
+      - source_action == candidate_tool (直接対応)
+      - または output_display × device channel (対等協力者への応答)
+    にマッチするものの priority 最大値から倍率を算出。
+
+    Returns:
+        1.0 〜 3.0 の倍率。該当 pending なしなら 1.0。
+    """
+    pending = state.get("pending", [])
+    candidate_tool = candidate.get("tool", "")
+    if not candidate_tool:
+        return 1.0
+
+    max_pri = 0.0
+    for p in pending:
+        if p.get("type") != "pending":
+            continue
+        if p.get("observed_content") is not None:
+            continue
+        source = p.get("source_action", "")
+        direct_match = source == candidate_tool
+        device_response_match = (
+            candidate_tool == "output_display"
+            and (p.get("observed_channel") == "device"
+                 or p.get("expected_channel") == "device")
+        )
+        if direct_match or device_response_match:
+            pri = float(p.get("priority", 0.0))
+            if pri > max_pri:
+                max_pri = pri
+
+    if max_pri <= 0.0:
+        return 1.0
+    # priority 想定最大 ≈ 12.0 → [1.0, 3.0] に正規化
+    return 1.0 + min(2.0, max_pri / 6.0)
+
+
 def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
-    """D-4設計 + intent-conditioned scoring + entropy認知品質"""
+    """D-4設計 + intent-conditioned scoring + entropy認知品質 + UPS v2 priority"""
     energy = state.get("energy", 50) / 100.0
     entropy = state.get("entropy", 0.65)
     tool_rank = ctrl.get("tool_rank", {})
@@ -191,6 +231,8 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         # 事前シミュレーション（報酬予測誤差）: 予測結果新規性が低い → 動機が生まれない
         novelty = predict_result_novelty(state, c["tool"], c.get("reason", ""))
         w *= max(0.05, novelty)
+        # UPS v2 priority boost: 未消化 pending を解消する候補を優先
+        w *= _pending_priority_boost(state, c)
         if novelty < 0.5:
             try:
                 from core.config import RESOLUTION_LOG
