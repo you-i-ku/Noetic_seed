@@ -210,3 +210,159 @@ def make_pre_tool_use_approval_check(
         )
 
     return _check
+
+
+# ============================================================
+# Noetic 固有 handler — PostToolUse 評価 (Phase 4 Step B)
+# ------------------------------------------------------------
+# 既存 Noetic の E1-E4 評価 / effective_change / E2 cap /
+# Action Ledger / unresolved_intent 更新を PostToolUse hook に
+# 配置する。内部ロジック (eval.py の関数群) は一切触らず、
+# 呼出場所だけ hook 層に移植する (INTEGRATION_POINTS.md §1.2)。
+# ============================================================
+
+
+def _pct_str(value: float) -> str:
+    """0.0-1.0 の float を '70%' 形式に変換。update_unresolved_intents の
+    e3_str 引数や state["e_values"] 表示に使う既存 Noetic の流儀。"""
+    return f"{int(round(max(0.0, min(1.0, value)) * 100))}%"
+
+
+def make_post_tool_use_evaluation(
+    state: dict,
+    get_state_before: Callable[[], dict],
+    call_llm_fn: Callable[..., str],
+    get_cycle_id: Callable[[], int],
+    get_recent_intents: Callable[[], list],
+) -> PostHandler:
+    """E1-E4 評価 + effective_change + E2 cap + Action Ledger +
+    unresolved_intent 更新を一括で行う PostToolUse hook を生成。
+
+    内部は eval.py の既存関数を順次呼ぶ薄い wrapper。戻り値 state は
+    factory に渡された参照を破壊的に更新する (Noetic 既存流儀)。
+
+    Args:
+        state: メイン state への参照。hook 内で破壊的に更新される。
+        get_state_before: tool 実行**前**の state snapshot を返す関数。
+            main.py が tool 呼出前に deepcopy した snapshot を保持し、
+            この closure で取り出す想定。
+        call_llm_fn: LLM 呼出関数。eval_with_llm の 3 引数目に渡される。
+            signature: (prompt: str, max_tokens: int, temperature: float) -> str
+        get_cycle_id: 現在の cycle_id を返す関数。
+        get_recent_intents: 直近 intent list を返す関数。eval_with_llm
+            の「recent_intents」引数に使う (最近の行動文脈)。
+
+    Returns:
+        PostHandler ((tool_name, tool_input, output) -> HookRunResult)
+
+    Note:
+        tool_intent / tool_expected_outcome は tool_input から取る
+        (Step A の PreToolUse hook で存在が保証されている前提)。
+        欠損 (policy=warn で抜けた等) 時も crash せず空文字で進む。
+    """
+    from core import eval as _eval
+
+    def _handler(tool_name: str, tool_input: dict,
+                 output: str) -> HookRunResult:
+        intent = str(tool_input.get("tool_intent", "") or "")
+        expect = str(tool_input.get("tool_expected_outcome", "") or "")
+        cycle_id = get_cycle_id()
+        state_before = get_state_before()
+        recent_intents = get_recent_intents() or []
+        output_str = str(output)
+
+        # 1. E1-E4 評価 (LLM 0.7 + vec 0.3 ブレンド、失敗時 None)
+        scores = _eval.eval_with_llm(
+            intent, expect, output_str, recent_intents, call_llm_fn
+        ) or {}
+        e1 = float(scores.get("e1", 0.5))
+        e2_raw = float(scores.get("e2", 0.5))
+        e3 = float(scores.get("e3", 0.5))
+        e4 = float(scores.get("e4", 0.5))
+
+        # 2. effective_change (5 層)
+        target_id = ""
+        for key in ("reply_to_id", "tweet_url", "post_id"):
+            val = tool_input.get(key, "")
+            if val:
+                target_id = str(val)
+                break
+        eff = _eval.calc_effective_change(
+            tool_names=[tool_name],
+            tool_result=output_str,
+            state_before=state_before,
+            state_after=state,
+            current_intent=intent,
+            target_id=target_id,
+        )
+
+        # 3. E2 cap: (0.3 + eff*0.7)
+        e2 = _eval.apply_effective_change_to_e2(e2_raw, eff)
+
+        # 4. Action Ledger
+        action_key = _eval._extract_action_key(tool_name, tool_input)
+        _eval.append_action_ledger(
+            state=state, tool_name=tool_name, action_key=action_key,
+            intent=intent, result=output_str, ec=eff, cycle_id=cycle_id,
+        )
+
+        # 5. unresolved_intent 更新 (rate-distortion 容量管理)
+        # NOTE: Step C で UPS v2 スキーマに書き換え予定。
+        # Step B では既存 (type="unresolved_intent") 形式で動作。
+        e3_str = _pct_str(e3)
+        _eval.update_unresolved_intents(
+            state=state, intent=intent, e3_str=e3_str, cycle_id=cycle_id,
+        )
+
+        # 6. 既存 unresolved_intent の gap を relevance で減衰
+        _eval.update_gaps_by_relevance(
+            state=state, result_str=output_str, ec=eff,
+        )
+
+        # 7. state["e_values"] に最新スコアを保存 (Noetic 既存慣習)
+        state["e_values"] = {
+            "e1": _pct_str(e1),
+            "e2": _pct_str(e2),
+            "e2_raw": _pct_str(e2_raw),
+            "e3": e3_str,
+            "e4": _pct_str(e4),
+            "eff": round(eff, 4),
+        }
+
+        return HookRunResult.allow(messages=[
+            f"[post_eval] tool={tool_name} "
+            f"e2={_pct_str(e2)} e3={e3_str} e4={_pct_str(e4)} "
+            f"eff={eff:.3f}"
+        ])
+
+    return _handler
+
+
+def make_post_tool_use_failure_logger(
+    state: dict,
+    get_cycle_id: Callable[[], int],
+    max_entries: int = 20,
+) -> FailureHandler:
+    """tool 実行失敗時のエラー記録 hook (簡易版)。
+
+    state['tool_errors'] に追記。上限 max_entries 件で古いものから捨てる。
+    E 値評価には走らない (失敗した tool は effective_change が測れない)。
+    """
+    def _handler(tool_name: str, tool_input: dict,
+                 error: str) -> HookRunResult:
+        from datetime import datetime
+        log = state.setdefault("tool_errors", [])
+        log.append({
+            "tool": tool_name,
+            "error": str(error)[:500],
+            "intent": str(tool_input.get("tool_intent", "") or "")[:200],
+            "cycle": get_cycle_id(),
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        if len(log) > max_entries:
+            state["tool_errors"] = log[-max_entries:]
+        return HookRunResult.allow(messages=[
+            f"[post_fail] tool={tool_name} error={str(error)[:80]}"
+        ])
+
+    return _handler
