@@ -74,7 +74,7 @@ from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_chang
                        calc_effective_change, apply_effective_change_to_e2, EXTERNAL_ACTION_TOOLS,
                        update_unresolved_intents, update_gaps_by_relevance,
                        _extract_action_key, append_action_ledger)
-from core.pending_unified import pending_add, pending_observe, pending_prune
+from core.pending_unified import pending_prune
 
 # Phase 4 Step E-2d: ConversationRuntime 統合用 import
 from core.providers.openai_compat import OpenAIProvider
@@ -646,11 +646,6 @@ def main():
 
         _executed_tools = set(all_tool_names)
         if "output_display" in _executed_tools:
-            pending_observe(
-                state, observed_content=result_str[:500],
-                channel="device", cycle_id=state.get("cycle_id", 0),
-                match_source_actions=["living_presence"], limit=1,
-            )
             _uec = state.get("unresponded_external_count", 0)
             if _uec > 0:
                 state["unresponded_external_count"] = _uec - 1
@@ -709,30 +704,6 @@ def main():
             entry["e4"] = e4
         _archive_entries([entry])
         state["log"].append(entry)
-
-        # 対エンティティ action の UPS v2 pending_add (retro 付き)
-        _primary_tool = all_tool_names[0] if all_tool_names else ""
-        _ASYNC_ENTITY_TOOLS = {"output_display", "elyth_post", "elyth_reply",
-                               "x_post", "x_reply", "x_quote"}
-        if _primary_tool in _ASYNC_ENTITY_TOOLS:
-            if _primary_tool == "output_display":
-                _async_channel, _async_lag = "device", "minutes"
-            elif _primary_tool.startswith("elyth_"):
-                _async_channel, _async_lag = "elyth", "hours"
-            else:
-                _async_channel, _async_lag = "x", "hours"
-            pending_add(
-                state,
-                source_action=_primary_tool,
-                expected_observation=str(result_str)[:200],
-                lag_kind=_async_lag,
-                content=str(result_str)[:200],
-                cycle_id=cid,
-                channel=_async_channel,
-                expiry_policy="time",
-                ttl_cycles=20,
-                retro_log_entry_id=entry["id"],
-            )
 
         maybe_compress_log(state, set(TOOLS.keys()))
 
@@ -814,32 +785,8 @@ def main():
                 }
                 _archive_entries([_ext_entry])
                 state["log"].append(_ext_entry)
-                # 未応答カウンター + pending統一管理
+                # 未応答カウンター (pressure 経路で AI に応答を促す)
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
-                # UPS v2: living_presence action の observation として pending に追加
-                # observed_content は埋めず (Step E-3 で Session.push_observation が LLM
-                # コンテキストに届ける)、expected_channel="device" で保持することで
-                # controller の priority_boost が output_display を促す設計。
-                pending_add(
-                    state,
-                    source_action="living_presence",
-                    expected_observation=chat_text[:200],
-                    lag_kind="unknown",
-                    content=chat_text[:200],
-                    cycle_id=state.get("cycle_id", 0),
-                    channel="device",
-                    expiry_policy="protected",  # 外部由来は prune 対象外
-                )
-                # Step E-3b: 過去の output_display action 起点 pending を observe
-                # → retro_log_entry_id があれば自動で log.e2 を +40% 遡及修正
-                # (旧 pending_feedback の resolve + E2 更新ロジックを UPS に吸収)
-                pending_observe(
-                    state, observed_content=chat_text[:500],
-                    channel="device",
-                    cycle_id=state.get("cycle_id", 0),
-                    match_source_actions=["output_display"],
-                    limit=1,
-                )
                 # Step E-3c: Session buffer に積む (fire 開始時に流される)
                 _pending_observations.append({
                     "observed_channel": "device",
