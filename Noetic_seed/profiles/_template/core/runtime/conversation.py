@@ -114,6 +114,12 @@ class ConversationRuntime:
         生成に専念する。Noetic 哲学「構造で選ぶ、LLM に選ばせない」と整合
         (memory/feedback_llm_as_brain.md)。
 
+        実装方式 (2026-04-18 backend 非依存化):
+          - OpenAI 互換: tools payload を forced_tool 1 個に絞り、
+            tool_choice="required" (string) で強制。LM Studio 等の object
+            tool_choice 未対応 backend に依存しない。
+          - Anthropic: object tool_choice が正式対応のため従来通り。
+
         Args:
             forced_tool_name: controller が選定した tool 名。
             user_input: 任意の user テキスト (候補の reason など)。
@@ -126,11 +132,17 @@ class ConversationRuntime:
 
         summary = TurnSummary()
         tool_choice = self._build_tool_choice(forced_tool_name)
+        provider_name = getattr(self.provider, "name", "")
+        filter_names: Optional[set] = (
+            None if provider_name == "anthropic" else {forced_tool_name}
+        )
 
         for i in range(self.max_iterations):
             summary.iterations = i + 1
 
-            msg = self._call_llm(tool_choice=tool_choice)
+            msg = self._call_llm(
+                tool_choice=tool_choice, filter_tool_names=filter_names,
+            )
             summary.assistant_messages.append(msg)
             summary.usage = msg.usage
             self.session.push_assistant_message(msg)
@@ -148,18 +160,25 @@ class ConversationRuntime:
         summary.messages = [dict(m) for m in self.session.messages]
         return summary
 
-    def _build_tool_choice(self, tool_name: str) -> dict:
-        """provider 固有の tool_choice 辞書を生成。"""
+    def _build_tool_choice(self, tool_name: str):
+        """provider 固有の tool_choice 値を生成。
+
+        Returns:
+            - Anthropic: {"type": "tool", "name": tool_name} (object, 正式対応)
+            - OpenAI 互換: "required" (string)。tools 側で単一 tool に絞って強制。
+              object 形式は LM Studio 等で未対応のため回避。
+        """
         provider_name = getattr(self.provider, "name", "")
         if provider_name == "anthropic":
             return {"type": "tool", "name": tool_name}
-        # OpenAI 互換 (openai_compat / LM Studio / Gemini OpenAI 互換等)
-        return {"type": "function", "function": {"name": tool_name}}
+        return "required"
 
     def _call_llm(
-        self, tool_choice: Optional[dict] = None,
+        self,
+        tool_choice=None,
+        filter_tool_names: Optional[set] = None,
     ) -> AssistantMessage:
-        tool_specs = self._build_tool_specs_for_provider()
+        tool_specs = self._build_tool_specs_for_provider(filter_tool_names)
         messages = self._serialize_messages()
         req = ApiRequest(
             system_prompt=self.system_prompt,
@@ -177,8 +196,12 @@ class ConversationRuntime:
             return self.session.serialize_for_anthropic()
         return self.session.serialize_for_openai()
 
-    def _build_tool_specs_for_provider(self) -> list:
+    def _build_tool_specs_for_provider(
+        self, filter_names: Optional[set] = None,
+    ) -> list:
         specs = self.tool_registry.list()
+        if filter_names is not None:
+            specs = [s for s in specs if s.name in filter_names]
         name = getattr(self.provider, "name", "")
         if name == "anthropic":
             return [s.to_anthropic_format() for s in specs]

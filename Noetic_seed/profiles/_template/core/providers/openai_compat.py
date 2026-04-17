@@ -42,7 +42,10 @@ class OpenAIProvider(BaseProvider):
 
         url = f"{self.base_url}/chat/completions"
         resp = httpx.post(url, headers=headers, json=payload, timeout=300)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"{self.name} {resp.status_code}: {resp.text[:800]}"
+            )
         return self._parse_response(resp.json())
 
     def _build_payload(self, req: ApiRequest) -> dict:

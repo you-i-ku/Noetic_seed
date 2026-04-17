@@ -28,13 +28,20 @@ class ToolSpec:
         }
 
     def to_openai_format(self) -> dict:
-        """OpenAI Chat Completions 形式に変換。"""
+        """OpenAI Chat Completions 形式に変換。
+
+        OpenAI/LM Studio 厳格モードは parameters.properties が必須 (空 {} でも可)。
+        input_schema が type=object だけで properties 欠落している場合、ここで補う。
+        """
+        params = dict(self.input_schema)
+        if params.get("type") == "object" and "properties" not in params:
+            params["properties"] = {}
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.input_schema,
+                "parameters": params,
             },
         }
 

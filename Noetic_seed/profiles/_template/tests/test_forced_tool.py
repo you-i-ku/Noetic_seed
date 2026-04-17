@@ -184,7 +184,7 @@ def _spec(name, handler=None):
 
 
 def test_forced_tool_basic():
-    print("== run_turn_with_forced_tool: tool 強制実行 ==")
+    print("== run_turn_with_forced_tool: tool 強制実行 (単一 tool + required) ==")
     # LLM 応答: read_file tool_use を返す
     fake_msg = AssistantMessage(
         text="",
@@ -196,6 +196,7 @@ def test_forced_tool_basic():
     provider = _FakeProvider(fake_msg, capture)
     reg = ToolRegistry()
     reg.register(_spec("read_file"))
+    reg.register(_spec("other_tool"))  # filter 効果検証用の余分 tool
     rt = ConversationRuntime(
         provider=provider, tool_registry=reg, max_iterations=1,
         permission_enforcer=PermissionEnforcer(
@@ -205,16 +206,23 @@ def test_forced_tool_basic():
         forced_tool_name="read_file",
         user_input="please read a.txt",
     )
-    tc = capture.get("tool_choice", {})
+    tc = capture.get("tool_choice")
+    tools = capture.get("tools", [])
+    tool_names = [
+        t.get("function", {}).get("name") for t in tools
+    ]
     return all([
         _assert(len(summary.tool_invocations) == 1, "1 tool 実行"),
         _assert(summary.tool_invocations[0].tool_name == "read_file",
                 "tool name=read_file"),
         _assert("a.txt" in summary.tool_invocations[0].output,
                 "tool output が Session に積まれた"),
-        _assert(isinstance(tc, dict)
-                and tc.get("function", {}).get("name") == "read_file",
-                "OpenAI 形式 tool_choice 送信"),
+        _assert(tc == "required",
+                f"OpenAI tool_choice='required' (実={tc!r})"),
+        _assert(len(tools) == 1,
+                f"tools payload 1 個に絞られる (実={len(tools)})"),
+        _assert(tool_names == ["read_file"],
+                f"forced tool のみ送信 (実={tool_names})"),
     ])
 
 

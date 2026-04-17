@@ -4,7 +4,7 @@ claw-code の rust/crates/api/src/client.rs ApiClient trait の Python port。
 厳密 claw-code 準拠。
 """
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 
 @dataclass
@@ -24,10 +24,12 @@ class ApiRequest:
     max_tokens: int = 24000
     temperature: float = 0.7
     image_paths: Optional[list] = None
-    tool_choice: Optional[dict] = None
+    tool_choice: Optional[Union[str, dict]] = None
     # provider 固有の tool_choice 形式をそのまま渡す:
-    #   OpenAI 互換: {"type": "function", "function": {"name": "..."}}
-    #   Anthropic:   {"type": "tool", "name": "..."}
+    #   OpenAI 互換: "required" (string) — tools 側で単一 tool に絞って強制する。
+    #                object 形式 ({"type":"function",...}) は LM Studio 等
+    #                一部 backend 非対応なので避ける。
+    #   Anthropic:   {"type": "tool", "name": "..."} (object 形式が正式サポート)
     # None なら provider のデフォルト (OpenAI="auto" / Anthropic=未指定) を使う。
 
 
