@@ -293,6 +293,16 @@ def main():
         max_tokens=prompt_budget["completion_reserve"],
         temperature=0.4,
     )
+    # Session の observation label format を settings から反映
+    _runtime.session.observation_label_format = (
+        llm_cfg.get("prompt", {}).get("observation_label_format",
+                                      "structured_compact")
+    )
+
+    # Step E-3c: fire 境界で Session が clear されるため、fire 間に到着した
+    # observation は buffer に溜めて、次 fire 開始時に Session に流す。
+    # 3 箇所書込 (Session + UPS + archive) の Session 経路の実装。
+    _pending_observations: list = []
 
     while True:
         pp = load_pref().get("pressure_params", DEFAULT_PRESSURE_PARAMS)
@@ -386,6 +396,13 @@ def main():
                     match_source_actions=["output_display"],
                     limit=1,
                 )
+                # Step E-3c: Session buffer に積む (fire 開始時に流される)
+                _pending_observations.append({
+                    "observed_channel": "device",
+                    "content": chat_text,
+                    "source_action_hint": "living_presence",
+                    "observation_time": datetime.now().strftime("%H:%M"),
+                })
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
                 _chat_line = f"  [device_input] {chat_text[:80]}"
@@ -719,6 +736,12 @@ def main():
         )
         # Session clear (fire 境界、新しい user_input 受入のため)
         _runtime.session.clear()
+
+        # Step E-3c: buffer に溜まった observation を Session に流す
+        # (3 箇所書込の Session 経路完成、他 2 箇所 = UPS + archive は既存)
+        for _obs in _pending_observations:
+            _runtime.session.push_observation(**_obs)
+        _pending_observations.clear()
 
         chain_tools = selected.get("tools", [selected["tool"]])
         all_results = []
