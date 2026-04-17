@@ -210,7 +210,7 @@ def register(registry: ToolRegistry, workspace_root: Path) -> None:
         ToolSpec(
             name="TestingPermission",
             description="Test permission behaviour (no-op echo tool).",
-            input_schema={"type": "object"},
+            input_schema={"type": "object", "properties": {}},
             required_permission=PermissionMode.READ_ONLY,
             handler=testing_permission,
         ),

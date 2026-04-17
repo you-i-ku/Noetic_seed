@@ -184,7 +184,11 @@ def register(registry: ToolRegistry, settings_path: Path) -> None:
         ToolSpec(
             name="StructuredOutput",
             description="Return a structured JSON output.",
-            input_schema={"type": "object", "additionalProperties": True},
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": True,
+            },
             required_permission=PermissionMode.READ_ONLY,
             handler=structured_output,
         ),

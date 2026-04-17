@@ -180,7 +180,7 @@ def register(registry: ToolRegistry) -> None:
         ToolSpec(
             name="TaskList",
             description="List all tasks.",
-            input_schema={"type": "object"},
+            input_schema={"type": "object", "properties": {}},
             required_permission=PermissionMode.READ_ONLY,
             handler=task_list,
         ),

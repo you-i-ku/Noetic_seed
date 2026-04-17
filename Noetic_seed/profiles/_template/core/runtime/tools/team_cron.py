@@ -207,7 +207,7 @@ def register(registry: ToolRegistry) -> None:
                  required_permission=danger, handler=cron_create),
         ToolSpec(name="CronList",
                  description="List all cron jobs.",
-                 input_schema={"type": "object"},
+                 input_schema={"type": "object", "properties": {}},
                  required_permission=ro, handler=cron_list),
         ToolSpec(name="CronDelete",
                  description="Delete a cron job.",
