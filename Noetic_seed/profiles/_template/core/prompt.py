@@ -259,18 +259,9 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
             f"能動停止は camera_stream_stop。"
         )
 
-    # 反応待ち中の行動（催促防止: ルールではなく状況として提示）
-    feedback_status_line = ""
-    _pf_awaiting = [p for p in state.get("pending_feedback", [])
-                    if p.get("status") == "awaiting" and p.get("tool", "") != "output_display"]
-    if _pf_awaiting:
-        _pf_lines = []
-        for p in _pf_awaiting[-5:]:
-            _tool = p.get("tool", "?")
-            _cyc = p.get("cycle_id", "?")
-            _snippet = p.get("text_snippet", "")[:40]
-            _pf_lines.append(f"  {_tool} (cycle {_cyc}){': ' + _snippet if _snippet else ''}")
-        feedback_status_line = "\n[反応待ち — 通知を確認するまで結果不明]\n" + "\n".join(_pf_lines)
+    # Step E-3b: 反応待ち表示は旧 pending_feedback 由来だったが、UPS v2 pending
+    # (retro_log_entry_id 付き + observed_content=None) が上記 [未対応事項] に
+    # 表示されることで代替される。重複表示を避けて削除。
 
     return f"""[{now}]{fire_cause_line}
 
@@ -278,7 +269,7 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 {self_text}
 
 [未対応事項]
-{pending_text}{stream_status_line}{feedback_status_line}
+{pending_text}{stream_status_line}
 {f'{chr(10)}[関連記憶]{chr(10)}{memory_text}{chr(10)}' if memory_text else ''}
 [STM — 現在の状況 / given circumstances]
 {f'summaries:{chr(10)}{summary_text}{chr(10)}' if summary_text else ''}log:

@@ -74,7 +74,7 @@ from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_chang
                        calc_effective_change, apply_effective_change_to_e2, EXTERNAL_ACTION_TOOLS,
                        update_unresolved_intents, update_gaps_by_relevance,
                        _extract_action_key, append_action_ledger)
-from core.pending_unified import pending_add, pending_observe
+from core.pending_unified import pending_add, pending_observe, pending_prune
 
 # Phase 4 Step E-2d: ConversationRuntime 統合用 import
 from core.providers.openai_compat import OpenAIProvider
@@ -376,21 +376,16 @@ def main():
                     channel="device",
                     expiry_policy="protected",  # 外部由来は prune 対象外
                 )
-                # 5-d: 遅延フィードバック — external_message 到着 = output_display への反応
-                _pf_list = state.get("pending_feedback", [])
-                _pf_awaiting = [p for p in _pf_list if p.get("entity") == "default_user" and p.get("status") == "awaiting"]
-                if _pf_awaiting:
-                    _resolved = _pf_awaiting[-1]
-                    _resolved["status"] = "resolved"
-                    # 遡及的に E2 を上方修正（ログエントリを探して更新）
-                    for _le in state.get("log", []):
-                        if _le.get("id") == _resolved.get("log_entry_id"):
-                            _old_e2 = _le.get("e2", "")
-                            _m = re.search(r'(\d+)', str(_old_e2))
-                            if _m:
-                                _new_val = min(100, int(_m.group(1)) + 40)
-                                _le["e2"] = f"{_new_val}%"
-                            break
+                # Step E-3b: 過去の output_display action 起点 pending を observe
+                # → retro_log_entry_id があれば自動で log.e2 を +40% 遡及修正
+                # (旧 pending_feedback の resolve + E2 更新ロジックを UPS に吸収)
+                pending_observe(
+                    state, observed_content=chat_text[:500],
+                    channel="device",
+                    cycle_id=state.get("cycle_id", 0),
+                    match_source_actions=["output_display"],
+                    limit=1,
+                )
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
                 _chat_line = f"  [device_input] {chat_text[:80]}"
@@ -879,36 +874,34 @@ def main():
         _archive_entries([entry])
         state["log"].append(entry)
 
-        # 5-d: 対エンティティ行動の遅延フィードバック追跡
+        # Step E-3b: 対エンティティ action の遅延フィードバック追跡を UPS v2 に統合
+        #   旧 pending_feedback.append → pending_add(retro_log_entry_id=entry["id"])
+        #   旧 timeout 処理 → expiry_policy="time" + pending_prune の自然淘汰
+        #   observation 到着時の resolve + 遡及 E2 → pending_observe の自動発火
         _primary_tool = all_tool_names[0] if all_tool_names else ""
-        _ASYNC_ENTITY_TOOLS = {"output_display", "elyth_post", "elyth_reply", "x_post", "x_reply", "x_quote"}
+        _ASYNC_ENTITY_TOOLS = {"output_display", "elyth_post", "elyth_reply",
+                               "x_post", "x_reply", "x_quote"}
         if _primary_tool in _ASYNC_ENTITY_TOOLS:
-            _pf = state.setdefault("pending_feedback", [])
-            _entity = "default_user" if _primary_tool == "output_display" else f"{_primary_tool}:{_target_for_ec or 'public'}"
-            # ツール結果から tweet_url / text_snippet を抽出
-            _pf_url = ""
-            _pf_snippet = ""
-            if isinstance(result_str, str):
-                for _rl in result_str.split("\n"):
-                    if _rl.startswith("tweet_url: "):
-                        _pf_url = _rl[11:].strip()
-                    elif not _pf_snippet:
-                        for _pfx in ("投稿完了: ", "返信完了: ", "引用投稿完了: "):
-                            if _rl.startswith(_pfx):
-                                _pf_snippet = _rl[len(_pfx):].strip()[:80]
-                                break
-            _pf.append({
-                "cycle_id": cid, "tool": _primary_tool, "entity": _entity,
-                "log_entry_id": entry["id"], "status": "awaiting",
-                "tweet_url": _pf_url, "text_snippet": _pf_snippet,
-            })
-            if len(_pf) > 20:
-                state["pending_feedback"] = _pf[-20:]
+            # channel / lag_kind の tool 別マッピング
+            if _primary_tool == "output_display":
+                _async_channel, _async_lag = "device", "minutes"
+            elif _primary_tool.startswith("elyth_"):
+                _async_channel, _async_lag = "elyth", "hours"
+            else:  # x_*
+                _async_channel, _async_lag = "x", "hours"
 
-        # 5-d: タイムアウト（20サイクル以上 awaiting → expired）
-        for _pfe in state.get("pending_feedback", []):
-            if _pfe.get("status") == "awaiting" and cid - _pfe.get("cycle_id", cid) > 20:
-                _pfe["status"] = "expired"
+            pending_add(
+                state,
+                source_action=_primary_tool,
+                expected_observation=str(result_str)[:200],
+                lag_kind=_async_lag,
+                content=str(result_str)[:200],
+                cycle_id=cid,
+                channel=_async_channel,
+                expiry_policy="time",  # 旧 timeout 20 cycle を UPS の time policy で置換
+                ttl_cycles=20,
+                retro_log_entry_id=entry["id"],  # 遡及 E2 修正対象
+            )
 
         # Phase 4 Step E-2d: 以下 3 件は post hook (Step B factory) が担当するため削除
         #   - update_unresolved_intents (UPS v2 semantic_merge pending 追加)
@@ -917,6 +910,14 @@ def main():
         # hook は _post_hook_with_sync 経由で disk と同期される。
 
         maybe_compress_log(state, set(TOOLS.keys()))
+
+        # Step E-3b: UPS v2 pending の cycle 末尾淘汰
+        # - expiry_policy="time" の pending は ttl_cycles 経過分を削除
+        #   (旧 pending_feedback の timeout 20 cycle を UPS 機構に統合済)
+        # - expiry_policy="dynamic_n" (semantic_merge 由来) は gap 上位のみ保持
+        # - expiry_policy="protected" (外部由来 living_presence) は削除対象外
+        pending_prune(state, current_cycle=cid)
+
         save_state(state)
 
         # pressure reset + negentropy
