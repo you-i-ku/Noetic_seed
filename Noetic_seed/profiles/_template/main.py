@@ -304,6 +304,443 @@ def main():
     # 3 箇所書込 (Session + UPS + archive) の Session 経路の実装。
     _pending_observations: list = []
 
+    def _run_one_fire(fire_cause, _tunnel_fire, pp, threshold, tick_dt,
+                      _micro_iter=0):
+        """1 fire iteration 本体。micro-loop から複数回呼ばれる可能性。
+
+        state / _runtime / _hook_ctx / _pending_observations / TOOLS /
+        LEVEL_TOOLS / llm_cfg / BASE_DIR / prompt_budget / その他 import は
+        main() closure で参照 (state は in-place mutate 運用)。
+        pressure は nonlocal で main() のものを直接 mutate。
+
+        Returns:
+            dict {"executed": bool, "e1"-"e4": str ("N%"), "sc_bonus": float,
+                  "cid": int, "llm1_error": bool} または None (tool 未実行)。
+        """
+        nonlocal pressure
+        _refresh_state()
+        # サイクル先頭で LLM 設定と secrets を再読み込み（次サイクルからのプロバイダ切替を反映）
+        from core.llm import _reload_active_config
+        from core.auth import reload_secrets
+        _reload_active_config()
+        reload_secrets()
+        now = tick_dt.strftime("%H:%M:%S")
+        _fire_type = "TUNNEL" if _tunnel_fire else "threshold"
+        _cycle_line = f"--- cycle {state.get('cycle_id', 0) + 1} [{now}] p={pressure:.2f}/th={threshold:.1f} fire={fire_cause} ({_fire_type}) iter={_micro_iter} ---"
+        print(_cycle_line)
+
+        # WM_DEBUG: fire event
+        _wm_log("fire", {
+            "cycle": state.get("cycle_id", 0) + 1,
+            "fire_cause": fire_cause,
+            "fire_type": _fire_type,
+            "pressure": round(pressure, 2),
+            "threshold": round(threshold, 2),
+            "micro_iter": _micro_iter,
+            "pending_channels": [p.get("channel", "") for p in state.get("pending", []) if p.get("channel")],
+            "pending_types": [p.get("type", "") for p in state.get("pending", [])],
+            "pending_count": len(state.get("pending", [])),
+        })
+        broadcast_log(_cycle_line)
+        broadcast_state(state)
+        broadcast_self(state)
+
+        # Controller
+        ctrl = controller(state, TOOLS, LEVEL_TOOLS, AI_CREATED_TOOLS, _DANGEROUS_PATTERNS, _run_ai_tool)
+        allowed = ctrl["allowed_tools"]
+        # 動的フィルタ: camera_stream_stop はストリームがアクティブな時のみ見せる
+        if not state.get("stream_active"):
+            allowed = allowed - {"camera_stream_stop"}
+            ctrl["allowed_tools"] = allowed
+        new_lv = ctrl.get("tool_level", 0)
+        prev_lv = ctrl.get("tool_level_prev", 0)
+        lv_msg = ""
+        if new_lv != prev_lv:
+            state["tool_level"] = new_lv
+            added = sorted(LEVEL_TOOLS[new_lv] - LEVEL_TOOLS[prev_lv])
+            lv_msg = f"[system] tool_level {prev_lv}→{new_lv}: 追加ツール={added}"
+            print(f"  {lv_msg}")
+            save_state(state)
+            if new_lv == 3 and not X_SESSION_PATH.exists():
+                print("\n  [X] Level 3到達: X/Elythツールが解放されました。")
+                print("  [X] Xセッションがありません。ログインしますか？")
+                try:
+                    answer = input("  Xにログインする？ [y/N]: ").strip().lower()
+                except EOFError:
+                    answer = "n"
+                if answer == "y":
+                    _x_do_login()
+                else:
+                    print("  [X] スキップ。X系ツールはセッションなしで動作しません。")
+                print()
+        print(f"  ctrl: level={new_lv} tools={sorted(allowed)} log={len(state['log'])}件(全件)")
+
+        # ① LLM: 候補提案
+        propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause)
+
+        # 画像入力の決定
+        from core.ws_server import get_stream_snapshot
+        _last_seen_counter = state.get("last_seen_stream_counter", 0)
+        _stream_frames, _stream_counter, _stream_ended = get_stream_snapshot()
+        _pending_img_paths = []
+        _first_pending_rel = None
+        _pending_meta = {}
+        _is_stream = False
+
+        if _stream_frames and _stream_counter > _last_seen_counter:
+            for _rel, _m in _stream_frames:
+                _full = BASE_DIR / _rel
+                if _full.exists():
+                    _pending_img_paths.append(str(_full))
+            if _pending_img_paths:
+                _first_pending_rel = _stream_frames[0][0]
+                _pending_meta = _stream_frames[-1][1] if _stream_frames else {}
+                _pending_meta["stream_active"] = state.get("stream_active", False)
+                _is_stream = True
+                state["last_seen_stream_counter"] = _stream_counter
+        else:
+            _pending_imgs_rel = state.get("pending_images") or []
+            if not _pending_imgs_rel:
+                _single = state.get("pending_image")
+                if _single:
+                    _pending_imgs_rel = [_single]
+            if _pending_imgs_rel:
+                for _rel in _pending_imgs_rel:
+                    _full = BASE_DIR / _rel
+                    if _full.exists():
+                        _pending_img_paths.append(str(_full))
+                if _pending_img_paths:
+                    _first_pending_rel = _pending_imgs_rel[0]
+                    _pending_meta = state.get("pending_images_meta") or state.get("pending_image_meta", {})
+
+        if _pending_img_paths:
+            _n = len(_pending_img_paths)
+            if _is_stream:
+                stream_active = state.get("stream_active", False)
+                active_hint = (
+                    "ストリームは継続中です。camera_stream_stop で停止できます。"
+                    if stream_active else
+                    "ストリームは終了しています。"
+                )
+                if _n == 1:
+                    propose_prompt += (
+                        f"\n\n[視覚入力: camera_streamから1枚の画像が視覚に届いています。"
+                        f"この画像は既にあなたに見えています。{active_hint}"
+                        f"候補の意図欄には「画像で見えたもの」に言及してください]"
+                    )
+                else:
+                    propose_prompt += (
+                        f"\n\n[視覚入力: camera_streamから{_n}枚の時系列画像が視覚に届いています。"
+                        f"これは直近の連続撮影フレームです。時間経過による変化や動きを観察してください。"
+                        f"画像は既にあなたに見えており、read_fileは不要です。{active_hint}"
+                        f"候補の意図欄には「画像で見えたもの・その変化」に言及してください]"
+                    )
+            else:
+                if _n == 1:
+                    propose_prompt += (
+                        f"\n\n[視覚入力: 1枚の画像があなたの視覚に直接届いています。"
+                        f"この画像は既にあなたに見えており、read_fileで読む必要はありません。"
+                        f"画像で見えたものを踏まえて候補を提案してください。"
+                        f"候補の意図欄には「画像で見えたもの」に具体的に言及してください]"
+                    )
+                else:
+                    propose_prompt += (
+                        f"\n\n[視覚入力: {_n}枚の画像（時系列順）があなたの視覚に直接届いています。"
+                        f"これは直近の連続撮影フレームです。時間経過による変化や動きを観察してください。"
+                        f"画像は既にあなたに見えており、read_fileは不要です。"
+                        f"候補の意図欄には「画像で見えたもの・その変化」に具体的に言及してください]"
+                    )
+            if _pending_meta:
+                propose_prompt += f"\nmeta: {_pending_meta}"
+
+        # ストリーム終了通知
+        if _stream_ended and state.get("stream_active"):
+            _ended_params = state.get("stream_params", {}) or {}
+            state["stream_active"] = False
+            state["stream_id"] = None
+            state["stream_params"] = None
+            print("  [stream] ストリーム終了を検知")
+            _sys_end_id = f"{state.get('session_id','?')}_sys{int(time.time()*1000)%100000}"
+            _sys_end_entry = {
+                "id": _sys_end_id,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "tool": "[system]",
+                "type": "system",
+                "result": (
+                    f"camera_stream 自然終了: facing={_ended_params.get('facing','?')} "
+                    f"frames={_ended_params.get('frames','?')} "
+                    f"interval={_ended_params.get('interval_sec','?')}s"
+                ),
+            }
+            _archive_entries([_sys_end_entry])
+            state["log"].append(_sys_end_entry)
+            save_state(state)
+
+        try:
+            propose_resp = call_llm(propose_prompt, max_tokens=prompt_budget["completion_reserve"], temperature=1.0,
+                                    image_paths=_pending_img_paths if _pending_img_paths else None)
+            append_debug_log("LLM1 (Propose)", propose_resp)
+        except Exception as e:
+            print(f"  LLM①エラー: {e}")
+            pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
+            time.sleep(10)
+            return {"executed": False, "llm1_error": True}
+
+        # 画像クリア
+        if _pending_img_paths:
+            if not _is_stream:
+                state["pending_images"] = None
+                state["pending_images_meta"] = None
+                state["pending_image"] = None
+                state["pending_image_meta"] = None
+            save_state(state)
+            _src = "stream" if _is_stream else "pending"
+            print(f"  [vision] 画像を認識: {len(_pending_img_paths)}枚 ({_src}: {_first_pending_rel})")
+        candidates = parse_candidates(propose_resp, ctrl["allowed_tools"])
+        print(f"  LLM①raw: {propose_resp.strip()[:300]}")
+        print(f"  候補({len(candidates)}件): {[(c['tool'], c['reason'][:40]) for c in candidates]}")
+
+        _wm_log("candidates", {
+            "cycle": state.get("cycle_id", 0) + 1,
+            "candidates": [
+                {"tool": c["tool"], "channel": _get_channel(c["tool"]), "reason": c.get("reason", "")[:100]}
+                for c in candidates
+            ],
+        })
+
+        # ② Controller: 候補から選択
+        ics_debug = _intent_conditioned_scores(candidates, state)
+        for ci, c in enumerate(candidates):
+            ics_v = round(ics_debug[ci], 1)
+            if ics_v != 50.0:
+                print(f"    ics: {c['tool']}({c['reason'][:30]}) = {ics_v}")
+        selected = controller_select(candidates, ctrl, state)
+        _sel_line = f"  選択: {selected['tool']} - {selected['reason'][:60]}"
+        print(_sel_line)
+        broadcast_log(_sel_line)
+
+        _sel_ch = _get_channel(selected["tool"])
+        _pending_chs = [p.get("channel", "") for p in state.get("pending", []) if p.get("channel")]
+        if _sel_ch == "internal":
+            _ch_match = None
+        elif _pending_chs:
+            _ch_match = _sel_ch in _pending_chs
+        else:
+            _ch_match = None
+        _wm_log("selected", {
+            "cycle": state.get("cycle_id", 0) + 1,
+            "tool": selected["tool"],
+            "channel": _sel_ch,
+            "pending_channels": _pending_chs,
+            "channel_match": _ch_match,
+            "reason": selected.get("reason", "")[:100],
+        })
+
+        # ③ ConversationRuntime で chain 実行
+        _hook_ctx["state_before"] = {
+            "self": copy.deepcopy(state.get("self", {})),
+            "files_written": list(state.get("files_written", [])),
+            "files_read": list(state.get("files_read", [])),
+            "pending_count": len(state.get("pending", [])),
+        }
+
+        _runtime.system_prompt = assemble_system_prompt(
+            state=state,
+            tools_dict=TOOLS,
+            fire_cause=fire_cause,
+            allowed_tools=ctrl["allowed_tools"],
+        )
+        _runtime.session.clear()
+
+        for _obs in _pending_observations:
+            _runtime.session.push_observation(**_obs)
+        _pending_observations.clear()
+
+        chain_tools = selected.get("tools", [selected["tool"]])
+        all_results = []
+        all_tool_names = []
+        intent = ""
+        expect = ""
+        _chain_action_key = ""
+        parse_failed = False
+        prev_result = ""
+        _executed_targets = set()
+        _last_llm_text = ""
+
+        for chain_idx, chain_tool in enumerate(chain_tools):
+            if chain_tool not in ctrl["allowed_tools"]:
+                print(f"  (Controller却下: {chain_tool})")
+                parse_failed = f"却下: {chain_tool}"
+                break
+
+            user_input_parts = [selected["reason"]]
+            if chain_idx > 0 and prev_result:
+                user_input_parts.append(f"(前のツール結果: {prev_result[:200]})")
+            user_input = " ".join(user_input_parts)
+
+            try:
+                summary = _runtime.run_turn_with_forced_tool(
+                    forced_tool_name=chain_tool,
+                    user_input=user_input,
+                )
+            except Exception as e:
+                print(f"  LLM② run_turn エラー (chain {chain_idx+1}): {e}")
+                parse_failed = f"runtime error: {e}"
+                break
+
+            append_debug_log(
+                f"LLM2 via runtime (chain {chain_idx+1}/{len(chain_tools)})",
+                f"finish_reason={summary.finish_reason}",
+            )
+            if summary.assistant_messages:
+                _last_llm_text += (summary.assistant_messages[-1].text or "")
+
+            if not summary.tool_invocations:
+                print(f"  (tool 未実行: finish_reason={summary.finish_reason})")
+                parse_failed = f"no_tool: {summary.finish_reason}"
+                break
+
+            rec = summary.tool_invocations[-1]
+            ti = rec.tool_input or {}
+
+            if chain_idx == 0:
+                intent = str(ti.get("tool_intent", "") or "")
+                expect = str(ti.get("tool_expected_outcome", "") or "")
+                _chain_action_key = _extract_action_key(rec.tool_name, ti)
+
+            _target_id = (ti.get("reply_to_id") or ti.get("post_id")
+                          or ti.get("tweet_url") or ti.get("path") or "")
+            _exec_key = (rec.tool_name, _target_id)
+            if _target_id and _exec_key in _executed_targets:
+                print(f"  (重複スキップ: {rec.tool_name} target={str(_target_id)[:20]})")
+                continue
+            if _target_id:
+                _executed_targets.add(_exec_key)
+
+            prev_result = str(rec.output)[:500]
+            all_results.append(f"[{rec.tool_name}]\n{str(rec.output)[:20000]}")
+            all_tool_names.append(rec.tool_name)
+            _exec_line = f"  実行: {rec.tool_name} → {str(rec.output)[:100]}"
+            print(_exec_line)
+            broadcast_log(_exec_line)
+
+        if not all_tool_names:
+            return None
+
+        tool_name = "+".join(all_tool_names)
+        result_str = ("\n---\n".join(all_results))[:50000]
+
+        if intent:
+            print(f"  intent: {intent}")
+        if expect:
+            print(f"  expect: {expect}")
+
+        sc_bonus = calc_state_change_bonus(_hook_ctx["state_before"], state)
+
+        _executed_tools = set(all_tool_names)
+        if "output_display" in _executed_tools:
+            pending_observe(
+                state, observed_content=result_str[:500],
+                channel="device", cycle_id=state.get("cycle_id", 0),
+                match_source_actions=["living_presence"], limit=1,
+            )
+            _uec = state.get("unresponded_external_count", 0)
+            if _uec > 0:
+                state["unresponded_external_count"] = _uec - 1
+            if state.get("unresponded_external_count", 0) <= 0:
+                state["unresolved_external"] = 0.0
+                state["unresponded_external_count"] = 0
+            save_state(state)
+
+        _ev = state.get("e_values", {})
+        e1 = _ev.get("e1", "")
+        e2 = _ev.get("e2", "")
+        e3 = _ev.get("e3", "")
+        e4 = _ev.get("e4", "")
+        eff_change = float(_ev.get("eff", 0.0) or 0.0)
+        _target_for_ec = _chain_action_key.split(":", 1)[1] if ":" in _chain_action_key else ""
+
+        if e1 or e2 or e3 or e4:
+            _ec_str = f" ec={eff_change:.2f}" if eff_change < 0.5 else ""
+            print(f"  E1={e1} E2={e2} E3={e3} E4={e4}{_ec_str}")
+
+        delta = _update_energy(state, e2, e3, e4)
+        if delta != 0:
+            print(f"  energy: {round(state['energy'], 1)} (delta={delta:+.2f})")
+
+        _FLAG_TERMS = ["AIアシスタント", "AI assistant", "AIAssistant"]
+        detected = [t for t in _FLAG_TERMS if t in propose_resp or t in _last_llm_text]
+        if detected:
+            flag_msg = f"[SYSTEM] 検出: {' / '.join(f'「{t}」' for t in detected)} という自己定義が検出・記録されました。"
+            print(f"  {flag_msg}")
+            result_str += f"\n{flag_msg}"
+        if lv_msg:
+            result_str += f"\n{lv_msg}"
+
+        cid = state.get("cycle_id", 0) + 1
+        state["cycle_id"] = cid
+        entry = {
+            "id": f"{state.get('session_id','x')}_{cid:04d}",
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "tool": tool_name,
+            "channel": _get_channel(tool_name),
+            "result": result_str,
+        }
+        if parse_failed:
+            entry["parse_error"] = str(parse_failed)[:150]
+        if intent:
+            entry["intent"] = intent
+        if expect:
+            entry["expect"] = expect
+        if e1:
+            entry["e1"] = e1
+        if e2:
+            entry["e2"] = e2
+        if e3:
+            entry["e3"] = e3
+        if e4:
+            entry["e4"] = e4
+        _archive_entries([entry])
+        state["log"].append(entry)
+
+        # 対エンティティ action の UPS v2 pending_add (retro 付き)
+        _primary_tool = all_tool_names[0] if all_tool_names else ""
+        _ASYNC_ENTITY_TOOLS = {"output_display", "elyth_post", "elyth_reply",
+                               "x_post", "x_reply", "x_quote"}
+        if _primary_tool in _ASYNC_ENTITY_TOOLS:
+            if _primary_tool == "output_display":
+                _async_channel, _async_lag = "device", "minutes"
+            elif _primary_tool.startswith("elyth_"):
+                _async_channel, _async_lag = "elyth", "hours"
+            else:
+                _async_channel, _async_lag = "x", "hours"
+            pending_add(
+                state,
+                source_action=_primary_tool,
+                expected_observation=str(result_str)[:200],
+                lag_kind=_async_lag,
+                content=str(result_str)[:200],
+                cycle_id=cid,
+                channel=_async_channel,
+                expiry_policy="time",
+                ttl_cycles=20,
+                retro_log_entry_id=entry["id"],
+            )
+
+        maybe_compress_log(state, set(TOOLS.keys()))
+
+        # UPS v2 pending 淘汰
+        pending_prune(state, current_cycle=cid)
+
+        save_state(state)
+
+        return {
+            "executed": True,
+            "e1": e1, "e2": e2, "e3": e3, "e4": e4,
+            "sc_bonus": sc_bonus,
+            "cid": cid,
+        }
+
     while True:
         pp = load_pref().get("pressure_params", DEFAULT_PRESSURE_PARAMS)
         _last_env_inject = 0.0
@@ -490,496 +927,86 @@ def main():
         if _tunnel_fire:
             fire_cause = "tunnel"
 
-        _refresh_state()
-        # サイクル先頭で LLM 設定と secrets を再読み込み（次サイクルからのプロバイダ切替を反映）
-        from core.llm import _reload_active_config
-        from core.auth import reload_secrets
-        _reload_active_config()
-        reload_secrets()
-        now = tick_dt.strftime("%H:%M:%S")
-        _fire_type = "TUNNEL" if _tunnel_fire else "threshold"
-        _cycle_line = f"--- cycle {state.get('cycle_id', 0) + 1} [{now}] p={pressure:.2f}/th={threshold:.1f} fire={fire_cause} ({_fire_type}) ---"
-        print(_cycle_line)
+        # Step E-3d: fire body は _run_one_fire に抽出済み。
+        # micro-loop で 1 fire 内に最大 max_micro_iter 回消化する。
+        # energy/entropy 保護で即 break (Phase 5 動的閾値化予定:
+        # memory/project_phase5_dynamic_threshold.md)。
+        _max_micro_iter = llm_cfg.get("fire", {}).get("max_micro_iter", 3)
+        _last_fire_result = None
+        for _micro_iter in range(_max_micro_iter):
+            # TODO(Phase 5): 固定閾値 → 動的閾値 (state の pressure/entropy/
+            # energy から算出) に置換
+            if state.get("energy", 50) < 5 or state.get("entropy", 0.65) > 0.95:
+                print(f"  [micro-loop] energy/entropy 閾値超過で break "
+                      f"(iter={_micro_iter} energy={state.get('energy', 50):.1f} "
+                      f"entropy={state.get('entropy', 0.65):.2f})")
+                break
 
-        # WM_DEBUG: fire event
-        _wm_log("fire", {
-            "cycle": state.get("cycle_id", 0) + 1,
-            "fire_cause": fire_cause,
-            "fire_type": _fire_type,
-            "pressure": round(pressure, 2),
-            "threshold": round(threshold, 2),
-            "pending_channels": [p.get("channel", "") for p in state.get("pending", []) if p.get("channel")],
-            "pending_types": [p.get("type", "") for p in state.get("pending", [])],
-            "pending_count": len(state.get("pending", [])),
-        })
-        broadcast_log(_cycle_line)
-        broadcast_state(state)
-        broadcast_self(state)
+            _fire_result = _run_one_fire(fire_cause, _tunnel_fire, pp,
+                                          threshold, tick_dt, _micro_iter)
 
-        # Controller
-        ctrl = controller(state, TOOLS, LEVEL_TOOLS, AI_CREATED_TOOLS, _DANGEROUS_PATTERNS, _run_ai_tool)
-        allowed = ctrl["allowed_tools"]
-        # 動的フィルタ: camera_stream_stop はストリームがアクティブな時のみ見せる
-        if not state.get("stream_active"):
-            allowed = allowed - {"camera_stream_stop"}
-            ctrl["allowed_tools"] = allowed
-        new_lv = ctrl.get("tool_level", 0)
-        prev_lv = ctrl.get("tool_level_prev", 0)
-        lv_msg = ""
-        if new_lv != prev_lv:
-            state["tool_level"] = new_lv
-            added = sorted(LEVEL_TOOLS[new_lv] - LEVEL_TOOLS[prev_lv])
-            lv_msg = f"[system] tool_level {prev_lv}→{new_lv}: 追加ツール={added}"
-            print(f"  {lv_msg}")
-            save_state(state)
-            if new_lv == 3 and not X_SESSION_PATH.exists():
-                print("\n  [X] Level 3到達: X/Elythツールが解放されました。")
-                print("  [X] Xセッションがありません。ログインしますか？")
-                try:
-                    answer = input("  Xにログインする？ [y/N]: ").strip().lower()
-                except EOFError:
-                    answer = "n"
-                if answer == "y":
-                    _x_do_login()
-                else:
-                    print("  [X] スキップ。X系ツールはセッションなしで動作しません。")
-                print()
-        print(f"  ctrl: level={new_lv} tools={sorted(allowed)} log={len(state['log'])}件(全件)")
+            # LLM① エラーや tool 未実行なら break
+            if not _fire_result or _fire_result.get("llm1_error"):
+                break
+            if not _fire_result.get("executed"):
+                break
 
-        # ① LLM: 候補提案
-        propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause)
+            _last_fire_result = _fire_result
 
-        # 画像入力の決定: 優先順位
-        # 1. camera_stream のローリングバッファに新フレームが到着していればそれを使う
-        # 2. view_image / 旧 pending_images(state) があればそれを使う
-        # 3. なければ画像なし（Q2: 前回と同じフレームは再度見せない）
-        from core.ws_server import get_stream_snapshot
-        _last_seen_counter = state.get("last_seen_stream_counter", 0)
-        _stream_frames, _stream_counter, _stream_ended = get_stream_snapshot()
-        _pending_img_paths = []
-        _first_pending_rel = None
-        _pending_meta = {}
-        _is_stream = False
+            # 次 iter 継続条件: 未消化 UPS v2 pending (priority > 2.0) が残存
+            _actionable = [
+                p for p in state.get("pending", [])
+                if p.get("type") == "pending"
+                and p.get("observed_content") is None
+                and float(p.get("priority", 0)) > 2.0
+            ]
+            if not _actionable:
+                break
 
-        if _stream_frames and _stream_counter > _last_seen_counter:
-            # ストリーム由来の新フレームがある
-            for _rel, _m in _stream_frames:
-                _full = BASE_DIR / _rel
-                if _full.exists():
-                    _pending_img_paths.append(str(_full))
-            if _pending_img_paths:
-                _first_pending_rel = _stream_frames[0][0]
-                _pending_meta = _stream_frames[-1][1] if _stream_frames else {}
-                _pending_meta["stream_active"] = state.get("stream_active", False)
-                _is_stream = True
-                state["last_seen_stream_counter"] = _stream_counter
-        else:
-            # ストリーム以外のソース（view_image / 旧 pending_image）
-            _pending_imgs_rel = state.get("pending_images") or []
-            if not _pending_imgs_rel:
-                _single = state.get("pending_image")
-                if _single:
-                    _pending_imgs_rel = [_single]
-            if _pending_imgs_rel:
-                for _rel in _pending_imgs_rel:
-                    _full = BASE_DIR / _rel
-                    if _full.exists():
-                        _pending_img_paths.append(str(_full))
-                if _pending_img_paths:
-                    _first_pending_rel = _pending_imgs_rel[0]
-                    _pending_meta = state.get("pending_images_meta") or state.get("pending_image_meta", {})
+            if _micro_iter < _max_micro_iter - 1:
+                print(f"  [micro-loop] iter {_micro_iter + 1} 完了 → 継続 "
+                      f"(残 actionable={len(_actionable)})")
 
-        if _pending_img_paths:
-            _n = len(_pending_img_paths)
-            if _is_stream:
-                stream_active = state.get("stream_active", False)
-                active_hint = (
-                    "ストリームは継続中です。camera_stream_stop で停止できます。"
-                    if stream_active else
-                    "ストリームは終了しています。"
-                )
-                if _n == 1:
-                    propose_prompt += (
-                        f"\n\n[視覚入力: camera_streamから1枚の画像が視覚に届いています。"
-                        f"この画像は既にあなたに見えています。{active_hint}"
-                        f"候補の意図欄には「画像で見えたもの」に言及してください]"
-                    )
-                else:
-                    propose_prompt += (
-                        f"\n\n[視覚入力: camera_streamから{_n}枚の時系列画像が視覚に届いています。"
-                        f"これは直近の連続撮影フレームです。時間経過による変化や動きを観察してください。"
-                        f"画像は既にあなたに見えており、read_fileは不要です。{active_hint}"
-                        f"候補の意図欄には「画像で見えたもの・その変化」に言及してください]"
-                    )
-            else:
-                if _n == 1:
-                    propose_prompt += (
-                        f"\n\n[視覚入力: 1枚の画像があなたの視覚に直接届いています。"
-                        f"この画像は既にあなたに見えており、read_fileで読む必要はありません。"
-                        f"画像で見えたものを踏まえて候補を提案してください。"
-                        f"候補の意図欄には「画像で見えたもの」に具体的に言及してください]"
-                    )
-                else:
-                    propose_prompt += (
-                        f"\n\n[視覚入力: {_n}枚の画像（時系列順）があなたの視覚に直接届いています。"
-                        f"これは直近の連続撮影フレームです。時間経過による変化や動きを観察してください。"
-                        f"画像は既にあなたに見えており、read_fileは不要です。"
-                        f"候補の意図欄には「画像で見えたもの・その変化」に具体的に言及してください]"
-                    )
-            if _pending_meta:
-                propose_prompt += f"\nmeta: {_pending_meta}"
-
-        # ストリーム終了通知を受け取ったら state も更新 + iku の log に system 通知注入
-        if _stream_ended and state.get("stream_active"):
-            _ended_params = state.get("stream_params", {}) or {}
-            state["stream_active"] = False
-            state["stream_id"] = None
-            state["stream_params"] = None
-            print("  [stream] ストリーム終了を検知")
-            # iku が次サイクルで「終わった」事実を認識できるよう state.log に残す
-            _sys_end_id = f"{state.get('session_id','?')}_sys{int(time.time()*1000)%100000}"
-            _sys_end_entry = {
-                "id": _sys_end_id,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "tool": "[system]",
-                "type": "system",
-                "result": (
-                    f"camera_stream 自然終了: facing={_ended_params.get('facing','?')} "
-                    f"frames={_ended_params.get('frames','?')} "
-                    f"interval={_ended_params.get('interval_sec','?')}s"
-                ),
-            }
-            _archive_entries([_sys_end_entry])
-            state["log"].append(_sys_end_entry)
-            save_state(state)
-
-        try:
-            propose_resp = call_llm(propose_prompt, max_tokens=prompt_budget["completion_reserve"], temperature=1.0,
-                                    image_paths=_pending_img_paths if _pending_img_paths else None)
-            append_debug_log("LLM1 (Propose)", propose_resp)
-        except Exception as e:
-            print(f"  LLM①エラー: {e}")
+        # fire cycle 完了後の後処理 (最後の iter 結果を元に 1 回だけ実施)
+        if _last_fire_result and _last_fire_result.get("executed"):
+            def _e_to_float(e_str):
+                m = re.search(r'(\d+)', str(e_str))
+                return int(m.group(1)) / 100.0 if m else 0.5
+            e1_val = _e_to_float(_last_fire_result["e1"])
+            e2_val = _e_to_float(_last_fire_result["e2"])
+            e3_val = _e_to_float(_last_fire_result["e3"])
+            e4_val = _e_to_float(_last_fire_result["e4"]) if _last_fire_result["e4"] else 0.5
+            _sc_bonus = _last_fire_result["sc_bonus"]
             pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
-            time.sleep(10)
-            continue
+            state["last_e1"] = e1_val
+            state["last_e2"] = e2_val
+            state["last_e3"] = e3_val
+            state["last_e4"] = e4_val
 
-        # 画像を使い終わったらクリア（1回限りの知覚）
-        # ストリーム由来の場合は state 経由ではなくバッファ経由なので state.pending_images はクリア不要
-        # カウンタだけ更新（ストリーム中は next cycle で新フレームが来れば counter が進むので自動的に見える）
-        if _pending_img_paths:
-            if not _is_stream:
-                state["pending_images"] = None
-                state["pending_images_meta"] = None
-                state["pending_image"] = None
-                state["pending_image_meta"] = None
+            _spiral = getattr(main, '_cached_spiral', None)
+            _consistency = _spiral.get("consistency", 0) if _spiral else 0
+
+            ent_before = state.get("entropy", 0.65)
+            apply_negentropy(state, e1_val, e2_val, e3_val, e4_val,
+                            state_change_bonus=_sc_bonus, consistency_bonus=_consistency)
+            ent_after = state.get("entropy", 0.65)
+            print(f"  entropy: {ent_after:.3f} (neg={ent_before - ent_after:.4f} "
+                  f"sc={_sc_bonus:.1f} con={_consistency:.2f})")
+            broadcast_e_values(state.get("cycle_id", 0), e1_val, e2_val, e3_val,
+                               e4_val, ent_before - ent_after)
+            broadcast_state(state)
+            state["pressure"] = round(pressure, 2)
             save_state(state)
-            _src = "stream" if _is_stream else "pending"
-            print(f"  [vision] 画像を認識: {len(_pending_img_paths)}枚 ({_src}: {_first_pending_rel})")
-        candidates = parse_candidates(propose_resp, ctrl["allowed_tools"])
-        print(f"  LLM①raw: {propose_resp.strip()[:300]}")
-        print(f"  候補({len(candidates)}件): {[(c['tool'], c['reason'][:40]) for c in candidates]}")
+            print(f"  pressure reset: {pressure:.2f}")
 
-        # WM_DEBUG: candidates event
-        _wm_log("candidates", {
-            "cycle": state.get("cycle_id", 0) + 1,
-            "candidates": [
-                {"tool": c["tool"], "channel": _get_channel(c["tool"]), "reason": c.get("reason", "")[:100]}
-                for c in candidates
-            ],
-        })
-
-        # ② Controller: 候補から選択
-        ics_debug = _intent_conditioned_scores(candidates, state)
-        for ci, c in enumerate(candidates):
-            ics_v = round(ics_debug[ci], 1)
-            if ics_v != 50.0:
-                print(f"    ics: {c['tool']}({c['reason'][:30]}) = {ics_v}")
-        selected = controller_select(candidates, ctrl, state)
-        _sel_line = f"  選択: {selected['tool']} - {selected['reason'][:60]}"
-        print(_sel_line)
-        broadcast_log(_sel_line)
-
-        # WM_DEBUG: selected event（チャネル一致判定付き）
-        _sel_ch = _get_channel(selected["tool"])
-        _pending_chs = [p.get("channel", "") for p in state.get("pending", []) if p.get("channel")]
-        # match: selected ch が pending ch に含まれる / neutral: selected が internal（応答系でない）
-        if _sel_ch == "internal":
-            _ch_match = None  # neutral（チャネル非依存ツール）
-        elif _pending_chs:
-            _ch_match = _sel_ch in _pending_chs
-        else:
-            _ch_match = None  # pending に channel がない（評価対象外）
-        _wm_log("selected", {
-            "cycle": state.get("cycle_id", 0) + 1,
-            "tool": selected["tool"],
-            "channel": _sel_ch,
-            "pending_channels": _pending_chs,
-            "channel_match": _ch_match,
-            "reason": selected.get("reason", "")[:100],
-        })
-
-        # ③ ConversationRuntime で chain 実行 (Phase 4 Step E-2d)
-        # state_before snapshot (effective_change 計算用、post hook が参照)
-        _hook_ctx["state_before"] = {
-            "self": copy.deepcopy(state.get("self", {})),
-            "files_written": list(state.get("files_written", [])),
-            "files_read": list(state.get("files_read", [])),
-            "pending_count": len(state.get("pending", [])),
-        }
-
-        # system_prompt assemble (fire 毎に fresh、Magic-If Anchor + 承認 + 発火原因 + WM + log + tools)
-        _runtime.system_prompt = assemble_system_prompt(
-            state=state,
-            tools_dict=TOOLS,
-            fire_cause=fire_cause,
-            allowed_tools=ctrl["allowed_tools"],
-        )
-        # Session clear (fire 境界、新しい user_input 受入のため)
-        _runtime.session.clear()
-
-        # Step E-3c: buffer に溜まった observation を Session に流す
-        # (3 箇所書込の Session 経路完成、他 2 箇所 = UPS + archive は既存)
-        for _obs in _pending_observations:
-            _runtime.session.push_observation(**_obs)
-        _pending_observations.clear()
-
-        chain_tools = selected.get("tools", [selected["tool"]])
-        all_results = []
-        all_tool_names = []
-        intent = ""
-        expect = ""
-        _chain_action_key = ""
-        parse_failed = False
-        prev_result = ""
-        _executed_targets = set()  # (tool, target_id) 同一サイクル内重複防止
-        _last_llm_text = ""  # 自己定義フラグ検出用に assistant text を蓄積
-
-        for chain_idx, chain_tool in enumerate(chain_tools):
-            if chain_tool not in ctrl["allowed_tools"]:
-                print(f"  (Controller却下: {chain_tool})")
-                parse_failed = f"却下: {chain_tool}"
-                break
-
-            user_input_parts = [selected["reason"]]
-            if chain_idx > 0 and prev_result:
-                user_input_parts.append(f"(前のツール結果: {prev_result[:200]})")
-            user_input = " ".join(user_input_parts)
-
-            try:
-                summary = _runtime.run_turn_with_forced_tool(
-                    forced_tool_name=chain_tool,
-                    user_input=user_input,
-                )
-            except Exception as e:
-                print(f"  LLM② run_turn エラー (chain {chain_idx+1}): {e}")
-                parse_failed = f"runtime error: {e}"
-                break
-
-            append_debug_log(
-                f"LLM2 via runtime (chain {chain_idx+1}/{len(chain_tools)})",
-                f"finish_reason={summary.finish_reason}",
-            )
-            if summary.assistant_messages:
-                _last_llm_text += (summary.assistant_messages[-1].text or "")
-
-            if not summary.tool_invocations:
-                print(f"  (tool 未実行: finish_reason={summary.finish_reason})")
-                parse_failed = f"no_tool: {summary.finish_reason}"
-                break
-
-            rec = summary.tool_invocations[-1]
-            ti = rec.tool_input or {}
-
-            if chain_idx == 0:
-                intent = str(ti.get("tool_intent", "") or "")
-                expect = str(ti.get("tool_expected_outcome", "") or "")
-                _chain_action_key = _extract_action_key(rec.tool_name, ti)
-
-            # 同一サイクル内の (tool, target_id) 重複防止
-            _target_id = (ti.get("reply_to_id") or ti.get("post_id")
-                          or ti.get("tweet_url") or ti.get("path") or "")
-            _exec_key = (rec.tool_name, _target_id)
-            if _target_id and _exec_key in _executed_targets:
-                print(f"  (重複スキップ: {rec.tool_name} target={str(_target_id)[:20]})")
-                continue
-            if _target_id:
-                _executed_targets.add(_exec_key)
-
-            prev_result = str(rec.output)[:500]
-            all_results.append(f"[{rec.tool_name}]\n{str(rec.output)[:20000]}")
-            all_tool_names.append(rec.tool_name)
-            _exec_line = f"  実行: {rec.tool_name} → {str(rec.output)[:100]}"
-            print(_exec_line)
-            broadcast_log(_exec_line)
-
-        if not all_tool_names:
-            continue
-
-        tool_name = "+".join(all_tool_names)
-        result_str = ("\n---\n".join(all_results))[:50000]
-
-        if intent:
-            print(f"  intent: {intent}")
-        if expect:
-            print(f"  expect: {expect}")
-
-        # state 変化量 (standalone、apply_negentropy が使う)
-        # hook が既に state を in-place mutate 済み (E 値 / ledger / pending)。
-        sc_bonus = calc_state_change_bonus(_hook_ctx["state_before"], state)
-
-        # UPS v2 pending 消化 (AI が外部への応答 action を実行 → 該当 pending を observe)
-        _executed_tools = set(all_tool_names)
-        if "output_display" in _executed_tools:
-            pending_observe(
-                state, observed_content=result_str[:500],
-                channel="device", cycle_id=state.get("cycle_id", 0),
-                match_source_actions=["living_presence"], limit=1,
-            )
-            _uec = state.get("unresponded_external_count", 0)
-            if _uec > 0:
-                state["unresponded_external_count"] = _uec - 1
-            if state.get("unresponded_external_count", 0) <= 0:
-                state["unresolved_external"] = 0.0
-                state["unresponded_external_count"] = 0
-            save_state(state)
-
-        # E 値は post hook が state["e_values"] に書き込み済み
-        _ev = state.get("e_values", {})
-        e1 = _ev.get("e1", "")
-        e2 = _ev.get("e2", "")
-        e3 = _ev.get("e3", "")
-        e4 = _ev.get("e4", "")
-        eff_change = float(_ev.get("eff", 0.0) or 0.0)
-        _target_for_ec = _chain_action_key.split(":", 1)[1] if ":" in _chain_action_key else ""
-
-        if e1 or e2 or e3 or e4:
-            _ec_str = f" ec={eff_change:.2f}" if eff_change < 0.5 else ""
-            print(f"  E1={e1} E2={e2} E3={e3} E4={e4}{_ec_str}")
-
-        delta = _update_energy(state, e2, e3, e4)
-        if delta != 0:
-            print(f"  energy: {round(state['energy'], 1)} (delta={delta:+.2f})")
-
-        # 自己定義フラグ検出 (propose_resp + LLM② 最終 assistant text)
-        _FLAG_TERMS = ["AIアシスタント", "AI assistant", "AIAssistant"]
-        detected = [t for t in _FLAG_TERMS if t in propose_resp or t in _last_llm_text]
-        if detected:
-            flag_msg = f"[SYSTEM] 検出: {' / '.join(f'「{t}」' for t in detected)} という自己定義が検出・記録されました。"
-            print(f"  {flag_msg}")
-            result_str += f"\n{flag_msg}"
-        if lv_msg:
-            result_str += f"\n{lv_msg}"
-
-        # ログ記録
-        cid = state.get("cycle_id", 0) + 1
-        state["cycle_id"] = cid
-        entry = {
-            "id": f"{state.get('session_id','x')}_{cid:04d}",
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "tool": tool_name,
-            "channel": _get_channel(tool_name),
-            "result": result_str,
-        }
-        if parse_failed:
-            entry["parse_error"] = str(parse_failed)[:150]
-        if intent:
-            entry["intent"] = intent
-        if expect:
-            entry["expect"] = expect
-        if e1:
-            entry["e1"] = e1
-        if e2:
-            entry["e2"] = e2
-        if e3:
-            entry["e3"] = e3
-        if e4:
-            entry["e4"] = e4
-        _archive_entries([entry])
-        state["log"].append(entry)
-
-        # Step E-3b: 対エンティティ action の遅延フィードバック追跡を UPS v2 に統合
-        #   旧 pending_feedback.append → pending_add(retro_log_entry_id=entry["id"])
-        #   旧 timeout 処理 → expiry_policy="time" + pending_prune の自然淘汰
-        #   observation 到着時の resolve + 遡及 E2 → pending_observe の自動発火
-        _primary_tool = all_tool_names[0] if all_tool_names else ""
-        _ASYNC_ENTITY_TOOLS = {"output_display", "elyth_post", "elyth_reply",
-                               "x_post", "x_reply", "x_quote"}
-        if _primary_tool in _ASYNC_ENTITY_TOOLS:
-            # channel / lag_kind の tool 別マッピング
-            if _primary_tool == "output_display":
-                _async_channel, _async_lag = "device", "minutes"
-            elif _primary_tool.startswith("elyth_"):
-                _async_channel, _async_lag = "elyth", "hours"
-            else:  # x_*
-                _async_channel, _async_lag = "x", "hours"
-
-            pending_add(
-                state,
-                source_action=_primary_tool,
-                expected_observation=str(result_str)[:200],
-                lag_kind=_async_lag,
-                content=str(result_str)[:200],
-                cycle_id=cid,
-                channel=_async_channel,
-                expiry_policy="time",  # 旧 timeout 20 cycle を UPS の time policy で置換
-                ttl_cycles=20,
-                retro_log_entry_id=entry["id"],  # 遡及 E2 修正対象
-            )
-
-        # Phase 4 Step E-2d: 以下 3 件は post hook (Step B factory) が担当するため削除
-        #   - update_unresolved_intents (UPS v2 semantic_merge pending 追加)
-        #   - update_gaps_by_relevance (既存 pending gap 減衰)
-        #   - append_action_ledger (台帳追記)
-        # hook は _post_hook_with_sync 経由で disk と同期される。
-
-        maybe_compress_log(state, set(TOOLS.keys()))
-
-        # Step E-3b: UPS v2 pending の cycle 末尾淘汰
-        # - expiry_policy="time" の pending は ttl_cycles 経過分を削除
-        #   (旧 pending_feedback の timeout 20 cycle を UPS 機構に統合済)
-        # - expiry_policy="dynamic_n" (semantic_merge 由来) は gap 上位のみ保持
-        # - expiry_policy="protected" (外部由来 living_presence) は削除対象外
-        pending_prune(state, current_cycle=cid)
-
-        save_state(state)
-
-        # pressure reset + negentropy
-        def _e_to_float(e_str):
-            m = re.search(r'(\d+)', str(e_str))
-            return int(m.group(1)) / 100.0 if m else 0.5
-        e1_val = _e_to_float(e1)
-        e2_val = _e_to_float(e2)
-        e3_val = _e_to_float(e3)
-        e4_val = _e_to_float(e4) if e4 else 0.5
-        pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
-        state["last_e1"] = e1_val
-        state["last_e2"] = e2_val
-        state["last_e3"] = e3_val
-        state["last_e4"] = e4_val
-
-        # spiral一貫性ボーナス
-        _spiral = getattr(main, '_cached_spiral', None)
-        _consistency = _spiral.get("consistency", 0) if _spiral else 0
-
-        ent_before = state.get("entropy", 0.65)
-        apply_negentropy(state, e1_val, e2_val, e3_val, e4_val,
-                        state_change_bonus=sc_bonus, consistency_bonus=_consistency)
-        ent_after = state.get("entropy", 0.65)
-        print(f"  entropy: {ent_after:.3f} (neg={ent_before - ent_after:.4f} sc={sc_bonus:.1f} con={_consistency:.2f})")
-        broadcast_e_values(state.get("cycle_id", 0), e1_val, e2_val, e3_val, e4_val, ent_before - ent_after)
-        broadcast_state(state)
-        state["pressure"] = round(pressure, 2)
-        save_state(state)
-        print(f"  pressure reset: {pressure:.2f}")
-
-        # === Reflection（定期内省）===
-        state["reflection_cycle"] = state.get("reflection_cycle", 0) + 1
-        _refl_interval = load_pref().get("reflection_interval", 10)
-        if should_reflect(state, _refl_interval):
-            print("  [reflection] 内省開始...")
-            reflect(state, call_llm)
-            state["reflection_cycle"] = 0
-            save_state(state)
+            # === Reflection (cycle 境界で 1 回) ===
+            state["reflection_cycle"] = state.get("reflection_cycle", 0) + 1
+            _refl_interval = load_pref().get("reflection_interval", 10)
+            if should_reflect(state, _refl_interval):
+                print("  [reflection] 内省開始...")
+                reflect(state, call_llm)
+                state["reflection_cycle"] = 0
+                save_state(state)
 
         print()
 
