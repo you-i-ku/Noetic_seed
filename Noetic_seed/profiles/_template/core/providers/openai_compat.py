@@ -55,7 +55,7 @@ class OpenAIProvider(BaseProvider):
         }
         if req.tools:
             payload["tools"] = req.tools
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = req.tool_choice or "auto"
         return payload
 
     def _build_messages(self, req: ApiRequest) -> list:

@@ -102,7 +102,63 @@ class ConversationRuntime:
         summary.messages = [dict(m) for m in self.session.messages]
         return summary
 
-    def _call_llm(self) -> AssistantMessage:
+    def run_turn_with_forced_tool(
+        self, forced_tool_name: str,
+        user_input: Optional[str] = None,
+    ) -> TurnSummary:
+        """controller が事前選定した tool を LLM に強制実行させる (X-guided モード)。
+
+        通常の run_turn が LLM に tool を自由選択させるのに対し、本メソッドは
+        provider の tool_choice 機能で特定 tool を強制する。LLM は選択判断を
+        せず、args と 3 層 (tool_intent / tool_expected_outcome / message) の
+        生成に専念する。Noetic 哲学「構造で選ぶ、LLM に選ばせない」と整合
+        (memory/feedback_llm_as_brain.md)。
+
+        Args:
+            forced_tool_name: controller が選定した tool 名。
+            user_input: 任意の user テキスト (候補の reason など)。
+
+        Returns:
+            TurnSummary (通常の run_turn と同形式)
+        """
+        if user_input:
+            self.session.push_user_text(user_input)
+
+        summary = TurnSummary()
+        tool_choice = self._build_tool_choice(forced_tool_name)
+
+        for i in range(self.max_iterations):
+            summary.iterations = i + 1
+
+            msg = self._call_llm(tool_choice=tool_choice)
+            summary.assistant_messages.append(msg)
+            summary.usage = msg.usage
+            self.session.push_assistant_message(msg)
+
+            if not msg.tool_uses:
+                summary.finish_reason = "no_tool"
+                break
+
+            for tu in msg.tool_uses:
+                rec = self._execute_tool_use(tu.id, tu.name, tu.input)
+                summary.tool_invocations.append(rec)
+        else:
+            summary.finish_reason = "max_iterations"
+
+        summary.messages = [dict(m) for m in self.session.messages]
+        return summary
+
+    def _build_tool_choice(self, tool_name: str) -> dict:
+        """provider 固有の tool_choice 辞書を生成。"""
+        provider_name = getattr(self.provider, "name", "")
+        if provider_name == "anthropic":
+            return {"type": "tool", "name": tool_name}
+        # OpenAI 互換 (openai_compat / LM Studio / Gemini OpenAI 互換等)
+        return {"type": "function", "function": {"name": tool_name}}
+
+    def _call_llm(
+        self, tool_choice: Optional[dict] = None,
+    ) -> AssistantMessage:
         tool_specs = self._build_tool_specs_for_provider()
         messages = self._serialize_messages()
         req = ApiRequest(
@@ -111,6 +167,7 @@ class ConversationRuntime:
             tools=tool_specs,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
+            tool_choice=tool_choice,
         )
         return self.provider.stream(req)
 

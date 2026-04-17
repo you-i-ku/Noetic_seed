@@ -24,6 +24,11 @@ class ApiRequest:
     max_tokens: int = 24000
     temperature: float = 0.7
     image_paths: Optional[list] = None
+    tool_choice: Optional[dict] = None
+    # provider 固有の tool_choice 形式をそのまま渡す:
+    #   OpenAI 互換: {"type": "function", "function": {"name": "..."}}
+    #   Anthropic:   {"type": "tool", "name": "..."}
+    # None なら provider のデフォルト (OpenAI="auto" / Anthropic=未指定) を使う。
 
 
 @dataclass

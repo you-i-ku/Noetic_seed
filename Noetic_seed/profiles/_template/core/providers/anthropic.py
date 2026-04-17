@@ -57,6 +57,8 @@ class AnthropicProvider(BaseProvider):
             payload["temperature"] = req.temperature
         if req.tools:
             payload["tools"] = req.tools
+            if req.tool_choice:
+                payload["tool_choice"] = req.tool_choice
         return payload
 
     def _build_messages(self, req: ApiRequest) -> list:
