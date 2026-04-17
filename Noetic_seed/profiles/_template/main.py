@@ -75,6 +75,23 @@ from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_chang
                        update_unresolved_intents, update_gaps_by_relevance,
                        _extract_action_key, append_action_ledger)
 from core.pending_unified import pending_add, pending_observe
+
+# Phase 4 Step E-2d: ConversationRuntime 統合用 import
+from core.providers.openai_compat import OpenAIProvider
+from core.providers.anthropic import AnthropicProvider
+from core.runtime.registry import ToolRegistry
+from core.runtime.conversation import ConversationRuntime
+from core.runtime.hooks import (
+    HookRunner,
+    make_pre_tool_use_approval_check,
+    make_post_tool_use_evaluation,
+    make_post_tool_use_failure_logger,
+)
+from core.runtime.noetic_stub_tools import register_noetic_stubs
+from core.runtime.tools import register_all as register_claw_tools
+from core.runtime.permissions import PermissionEnforcer, PermissionMode
+from core.approval_callback import make_approval_callback
+from core.prompt_assembly import assemble_system_prompt
 from core.parser import parse_tool_calls, parse_candidates
 from core.entropy import (
     ENTROPY_PARAMS, tick_entropy, calc_dynamic_threshold,
@@ -191,6 +208,92 @@ def main():
     pressure = state.get("pressure", 0.0)
     print(f"  感覚層: エントロピーモード (entropy={state.get('entropy', 0.65):.2f})")
 
+    # ======================================================================
+    # Phase 4 Step E-2d: ConversationRuntime + hooks setup (fire 前に 1 度作る)
+    # ======================================================================
+    # 重要: 以下の hook / approval_callback / runtime は main() の `state`
+    # local 変数を closure で参照する。state は rebind せず **in-place mutate**
+    # で扱うこと (load_state() の戻り値を直接代入せず _refresh_state() で更新)。
+
+    def _refresh_state():
+        """state を in-place で disk から再読込 (rebind せず mutate)。"""
+        fresh = load_state()
+        state.clear()
+        state.update(fresh)
+
+    # Provider 選択
+    _provider_name_raw = (llm_cfg.get("provider") or "").lower()
+    if _provider_name_raw == "anthropic":
+        _rt_provider = AnthropicProvider(
+            model=llm_cfg.get("model", ""),
+            api_key=llm_cfg.get("api_key", ""),
+        )
+    else:
+        _rt_provider = OpenAIProvider(
+            model=llm_cfg.get("model", "gemma-4-26b-a4b-it"),
+            api_key=llm_cfg.get("api_key", ""),
+            base_url=llm_cfg.get("base_url", "http://localhost:1234/v1"),
+        )
+
+    # ToolRegistry: claw-code 50 tool + noetic stub 5 個
+    _rt_registry = ToolRegistry()
+    register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
+    register_noetic_stubs(_rt_registry, TOOLS)
+
+    # hook context (state_before snapshot, fire 毎に更新)
+    _hook_ctx = {"state_before": {}}
+
+    # hook runner 初期化 (approval 3 層 + post eval + failure)
+    _hook_runner = HookRunner()
+    _approval_cfg = llm_cfg.get("approval", {})
+    _hook_runner.register_pre(make_pre_tool_use_approval_check(
+        missing_field_policy=_approval_cfg.get("missing_field_policy", "deny"),
+    ))
+
+    _base_post_hook = make_post_tool_use_evaluation(
+        state=state,
+        get_state_before=lambda: _hook_ctx["state_before"],
+        call_llm_fn=call_llm,
+        get_cycle_id=lambda: state.get("cycle_id", 0),
+        get_recent_intents=lambda: [
+            e.get("intent", "") for e in state.get("log", [])[-3:]
+            if e.get("intent")
+        ],
+    )
+
+    def _post_hook_with_sync(tool_name, tool_input, output):
+        """tool 実行直後: disk から fresh state を in-place 取込 →
+        base_post_hook で mutation → save_state で永続化。
+        tool handler が内部で save_state した変更と hook の E 値等の
+        mutation を正しくマージする。"""
+        _refresh_state()
+        result = _base_post_hook(tool_name, tool_input, output)
+        save_state(state)
+        return result
+
+    _hook_runner.register_post(_post_hook_with_sync)
+    _hook_runner.register_failure(make_post_tool_use_failure_logger(
+        state=state,
+        get_cycle_id=lambda: state.get("cycle_id", 0),
+    ))
+
+    # Approval callback (pause_on_await + 3 層 UI)
+    _approval_cb = make_approval_callback(
+        pause_on_await=_approval_cfg.get("pause_on_await", True),
+    )
+
+    # ConversationRuntime (system_prompt は fire 毎に assemble 差替)
+    _runtime = ConversationRuntime(
+        provider=_rt_provider,
+        tool_registry=_rt_registry,
+        hook_runner=_hook_runner,
+        permission_enforcer=PermissionEnforcer(mode=PermissionMode.PROMPT),
+        max_iterations=1,
+        approval_callback=_approval_cb,
+        max_tokens=prompt_budget["completion_reserve"],
+        temperature=0.4,
+    )
+
     while True:
         pp = load_pref().get("pressure_params", DEFAULT_PRESSURE_PARAMS)
         _last_env_inject = 0.0
@@ -245,7 +348,7 @@ def main():
 
             # 外部入力チェック（chatキューからstate.logに注入 + pressure加算 + archive）
             for chat_text in get_pending_chats():
-                state = load_state()
+                _refresh_state()
                 _ext_id = f"{state.get('session_id','?')}_ext{int(time.time()*1000)%100000}"
                 _ext_entry = {
                     "id": _ext_id,
@@ -315,7 +418,7 @@ def main():
                     broadcast_log(_rline)
                     # テストタブ経由でも結果を state.log に積む（AI のコンテキストに入れる）
                     # type="test" でマーク、intent には [test] プレフィックスを付けて出処を明示
-                    state = load_state()
+                    _refresh_state()
                     _test_id = f"{state.get('session_id','?')}_test{int(time.time()*1000)%100000}"
                     _test_intent = _ta.get("intent", "").strip()
                     _test_entry = {
@@ -375,7 +478,7 @@ def main():
         if _tunnel_fire:
             fire_cause = "tunnel"
 
-        state = load_state()
+        _refresh_state()
         # サイクル先頭で LLM 設定と secrets を再読み込み（次サイクルからのプロバイダ切替を反映）
         from core.llm import _reload_active_config
         from core.auth import reload_secrets
@@ -603,14 +706,25 @@ def main():
             "reason": selected.get("reason", "")[:100],
         })
 
-        # ③ LLM: チェーン実行
-        # state_before: effective_change計算用スナップショット
-        _state_before_snapshot = {
+        # ③ ConversationRuntime で chain 実行 (Phase 4 Step E-2d)
+        # state_before snapshot (effective_change 計算用、post hook が参照)
+        _hook_ctx["state_before"] = {
             "self": copy.deepcopy(state.get("self", {})),
             "files_written": list(state.get("files_written", [])),
             "files_read": list(state.get("files_read", [])),
             "pending_count": len(state.get("pending", [])),
         }
+
+        # system_prompt assemble (fire 毎に fresh、Magic-If Anchor + 承認 + 発火原因 + WM + log + tools)
+        _runtime.system_prompt = assemble_system_prompt(
+            state=state,
+            tools_dict=TOOLS,
+            fire_cause=fire_cause,
+            allowed_tools=ctrl["allowed_tools"],
+        )
+        # Session clear (fire 境界、新しい user_input 受入のため)
+        _runtime.session.clear()
+
         chain_tools = selected.get("tools", [selected["tool"]])
         all_results = []
         all_tool_names = []
@@ -620,86 +734,63 @@ def main():
         parse_failed = False
         prev_result = ""
         _executed_targets = set()  # (tool, target_id) 同一サイクル内重複防止
+        _last_llm_text = ""  # 自己定義フラグ検出用に assistant text を蓄積
 
         for chain_idx, chain_tool in enumerate(chain_tools):
-            chain_candidate = {
-                "tool": chain_tool,
-                "tools": [chain_tool],
-                "reason": selected["reason"],
-            }
-            if chain_idx > 0 and prev_result:
-                chain_candidate["reason"] += f"（前のツール結果: {prev_result[:200]}）"
-
-            exec_prompt = build_prompt_execute(state, ctrl, chain_candidate, TOOLS)
-            try:
-                response = call_llm(exec_prompt, max_tokens=prompt_budget["completion_reserve"], temperature=0.4)
-                append_debug_log(f"LLM2 (Execute chain {chain_idx+1}/{len(chain_tools)})", response)
-            except Exception as e:
-                print(f"  LLM②エラー (chain {chain_idx+1}): {e}")
+            if chain_tool not in ctrl["allowed_tools"]:
+                print(f"  (Controller却下: {chain_tool})")
+                parse_failed = f"却下: {chain_tool}"
                 break
 
-            response_clean = response.strip()
-            print(f"  LLM② ({chain_idx+1}/{len(chain_tools)}): {response_clean[:200]}")
+            user_input_parts = [selected["reason"]]
+            if chain_idx > 0 and prev_result:
+                user_input_parts.append(f"(前のツール結果: {prev_result[:200]})")
+            user_input = " ".join(user_input_parts)
 
-            raw_calls = parse_tool_calls(response_clean, set(TOOLS.keys()))
-            if not raw_calls:
-                print(f"  (ツールマーカー検出失敗)")
-                parse_failed = response_clean[:120]
-                raw_calls = [("wait", {})]
+            try:
+                summary = _runtime.run_turn_with_forced_tool(
+                    forced_tool_name=chain_tool,
+                    user_input=user_input,
+                )
+            except Exception as e:
+                print(f"  LLM② run_turn エラー (chain {chain_idx+1}): {e}")
+                parse_failed = f"runtime error: {e}"
+                break
 
-            tname, targs = raw_calls[0]
-            if tname not in TOOLS:
-                print(f"  (未知のツール: {tname})")
-                parse_failed = f"未知のツール: {tname}"
-                tname, targs = "wait", {}
-            elif tname not in allowed:
-                print(f"  (Controller却下: {tname})")
-                parse_failed = f"却下: {tname}"
-                tname, targs = "wait", {}
+            append_debug_log(
+                f"LLM2 via runtime (chain {chain_idx+1}/{len(chain_tools)})",
+                f"finish_reason={summary.finish_reason}",
+            )
+            if summary.assistant_messages:
+                _last_llm_text += (summary.assistant_messages[-1].text or "")
+
+            if not summary.tool_invocations:
+                print(f"  (tool 未実行: finish_reason={summary.finish_reason})")
+                parse_failed = f"no_tool: {summary.finish_reason}"
+                break
+
+            rec = summary.tool_invocations[-1]
+            ti = rec.tool_input or {}
 
             if chain_idx == 0:
-                intent = targs.pop("intent", "")
-                expect = targs.pop("expect", "")
-                _msg_backup = targs.pop("message", "")
-                _chain_action_key = _extract_action_key(tname, targs)
-                if _msg_backup:
-                    targs["message"] = _msg_backup  # ツール関数に message を戻す
-            else:
-                targs.pop("intent", "")
-                targs.pop("expect", "")
+                intent = str(ti.get("tool_intent", "") or "")
+                expect = str(ti.get("tool_expected_outcome", "") or "")
+                _chain_action_key = _extract_action_key(rec.tool_name, ti)
 
             # 同一サイクル内の (tool, target_id) 重複防止
-            _target_id = targs.get("reply_to_id", "") or targs.get("post_id", "") or targs.get("tweet_url", "") or targs.get("path", "")
-            _exec_key = (tname, _target_id)
+            _target_id = (ti.get("reply_to_id") or ti.get("post_id")
+                          or ti.get("tweet_url") or ti.get("path") or "")
+            _exec_key = (rec.tool_name, _target_id)
             if _target_id and _exec_key in _executed_targets:
-                print(f"  (重複スキップ: {tname} target={_target_id[:20]})")
+                print(f"  (重複スキップ: {rec.tool_name} target={str(_target_id)[:20]})")
                 continue
             if _target_id:
                 _executed_targets.add(_exec_key)
 
-            try:
-                res = TOOLS[tname]["func"](targs)
-            except Exception as e:
-                res = f"エラー: {e}"
-            state = load_state()
-            if tname == "read_file":
-                path = targs.get("path", "")
-                if path and not str(res).startswith("エラー"):
-                    fr = state.setdefault("files_read", [])
-                    if path not in fr:
-                        fr.append(path)
-                    save_state(state)
-            elif tname == "write_file":
-                path = targs.get("path", "")
-                if path and not str(res).startswith("エラー"):
-                    fw = state.setdefault("files_written", [])
-                    if path not in fw:
-                        fw.append(path)
-                    save_state(state)
-            prev_result = str(res)[:500]
-            all_results.append(f"[{tname}]\n{str(res)[:20000]}")
-            all_tool_names.append(tname)
-            _exec_line = f"  実行: {tname} → {str(res)[:100]}"
+            prev_result = str(rec.output)[:500]
+            all_results.append(f"[{rec.tool_name}]\n{str(rec.output)[:20000]}")
+            all_tool_names.append(rec.tool_name)
+            _exec_line = f"  実行: {rec.tool_name} → {str(rec.output)[:100]}"
             print(_exec_line)
             broadcast_log(_exec_line)
 
@@ -714,24 +805,18 @@ def main():
         if expect:
             print(f"  expect: {expect}")
 
-        # state変化量（スナップショット vs 現在のstate差分）
-        state_after = load_state()
-        sc_bonus = calc_state_change_bonus(_state_before_snapshot, state_after)
-        _target_for_ec = _chain_action_key.split(":", 1)[1] if ":" in _chain_action_key else ""
-        eff_change = calc_effective_change(all_tool_names, result_str, _state_before_snapshot, state_after, current_intent=intent, target_id=_target_for_ec)
-        state = state_after
+        # state 変化量 (standalone、apply_negentropy が使う)
+        # hook が既に state を in-place mutate 済み (E 値 / ledger / pending)。
+        sc_bonus = calc_state_change_bonus(_hook_ctx["state_before"], state)
 
         # UPS v2 pending 消化 (AI が外部への応答 action を実行 → 該当 pending を observe)
         _executed_tools = set(all_tool_names)
-
         if "output_display" in _executed_tools:
-            # device channel の living_presence pending を 1 件 observe で消化
             pending_observe(
                 state, observed_content=result_str[:500],
                 channel="device", cycle_id=state.get("cycle_id", 0),
                 match_source_actions=["living_presence"], limit=1,
             )
-            # 旧 state 変数 unresponded_external_count (eval.py addressee_factor 連動)
             _uec = state.get("unresponded_external_count", 0)
             if _uec > 0:
                 state["unresponded_external_count"] = _uec - 1
@@ -740,50 +825,26 @@ def main():
                 state["unresponded_external_count"] = 0
             save_state(state)
 
-        # E1-E4評価（ベクトル類似度）
-        e1_vec = _compare_expect_result(intent, expect) if intent and expect else ""
-        e2_vec = _compare_expect_result(intent, result_str) if intent else ""
-        e3_vec = _compare_expect_result(expect, result_str) if expect else ""
-        e4 = _calc_e4(intent, result_str, state["log"]) if intent else ""
-
-        # E1-E4評価（LLM評価）
-        recent_intents = [e.get("intent", "") for e in state["log"][-3:] if e.get("intent")]
-        llm_eval = eval_with_llm(intent, expect, result_str, recent_intents, call_llm) if intent else None
-
-        # ブレンド: ベクトル0.3 + LLM0.7（LLM失敗時はベクトル100%）
-        def _blend_e(vec_str, llm_val, key):
-            m = re.search(r'(\d+)', str(vec_str))
-            vec_v = int(m.group(1)) / 100.0 if m else 0.5
-            if llm_val and key in llm_val:
-                return f"{round((vec_v * 0.3 + llm_val[key] * 0.7) * 100)}%"
-            return vec_str  # LLM失敗→ベクトルのみ
-
-        e1 = _blend_e(e1_vec, llm_eval, "e1")
-        e2_raw = _blend_e(e2_vec, llm_eval, "e2")
-        e3 = _blend_e(e3_vec, llm_eval, "e3")
-        if llm_eval and "e4" in llm_eval:
-            m4 = re.search(r'(\d+)', str(e4))
-            e4_vec_v = int(m4.group(1)) / 100.0 if m4 else 0.5
-            e4 = f"{round((e4_vec_v * 0.3 + llm_eval['e4'] * 0.7) * 100)}%"
-
-        # E2をeffective_changeで変調（変化ゼロ→E2上限30%）
-        _e2_raw_m = re.search(r'(\d+)', str(e2_raw))
-        _e2_raw_f = int(_e2_raw_m.group(1)) / 100.0 if _e2_raw_m else 0.5
-        _e2_adj_f = apply_effective_change_to_e2(_e2_raw_f, eff_change)
-        e2 = f"{round(_e2_adj_f * 100)}%"
+        # E 値は post hook が state["e_values"] に書き込み済み
+        _ev = state.get("e_values", {})
+        e1 = _ev.get("e1", "")
+        e2 = _ev.get("e2", "")
+        e3 = _ev.get("e3", "")
+        e4 = _ev.get("e4", "")
+        eff_change = float(_ev.get("eff", 0.0) or 0.0)
+        _target_for_ec = _chain_action_key.split(":", 1)[1] if ":" in _chain_action_key else ""
 
         if e1 or e2 or e3 or e4:
-            _eval_src = "LLM+vec" if llm_eval else "vec"
             _ec_str = f" ec={eff_change:.2f}" if eff_change < 0.5 else ""
-            print(f"  E1={e1} E2={e2} E3={e3} E4={e4} ({_eval_src}{_ec_str})")
+            print(f"  E1={e1} E2={e2} E3={e3} E4={e4}{_ec_str}")
 
         delta = _update_energy(state, e2, e3, e4)
         if delta != 0:
             print(f"  energy: {round(state['energy'], 1)} (delta={delta:+.2f})")
 
-        # 自己定義フラグ検出
+        # 自己定義フラグ検出 (propose_resp + LLM② 最終 assistant text)
         _FLAG_TERMS = ["AIアシスタント", "AI assistant", "AIAssistant"]
-        detected = [t for t in _FLAG_TERMS if t in propose_resp or t in response_clean]
+        detected = [t for t in _FLAG_TERMS if t in propose_resp or t in _last_llm_text]
         if detected:
             flag_msg = f"[SYSTEM] 検出: {' / '.join(f'「{t}」' for t in detected)} という自己定義が検出・記録されました。"
             print(f"  {flag_msg}")
@@ -849,16 +910,11 @@ def main():
             if _pfe.get("status") == "awaiting" and cid - _pfe.get("cycle_id", cid) > 20:
                 _pfe["status"] = "expired"
 
-        # 未達成ペンディング: E3 から gap を計算して unresolved_intent を更新
-        update_unresolved_intents(state, intent, e3, cid)
-
-        # 変更6: 行動結果が既存 unresolved_intent に関連していれば gap を下げる
-        update_gaps_by_relevance(state, result_str, eff_change)
-
-        # 行動台帳に追記（事前シミュレーションの材料。既存の仕組みとは独立）
-        if _primary_tool:
-            append_action_ledger(state, _primary_tool, _chain_action_key,
-                                 intent, result_str, eff_change, cid)
+        # Phase 4 Step E-2d: 以下 3 件は post hook (Step B factory) が担当するため削除
+        #   - update_unresolved_intents (UPS v2 semantic_merge pending 追加)
+        #   - update_gaps_by_relevance (既存 pending gap 減衰)
+        #   - append_action_ledger (台帳追記)
+        # hook は _post_hook_with_sync 経由で disk と同期される。
 
         maybe_compress_log(state, set(TOOLS.keys()))
         save_state(state)
