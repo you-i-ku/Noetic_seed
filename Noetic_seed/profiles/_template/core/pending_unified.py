@@ -46,6 +46,11 @@ class PendingEntry(TypedDict, total=False):
     observed_channel: Optional[str]
     expected_channel: Optional[str]  # tool メタデータ由来の想定 channel
 
+    # 遡及 E2 修正用 (pending_feedback 吸収、§6 "遡及 E2" の自動発火対象)
+    # action 実行時の log entry id を保持し、observation 到着で該当 entry の
+    # e2 を上方修正する (従来 pending_feedback の +40% 挙動を UPS に統合)
+    retro_log_entry_id: Optional[str]
+
     content: str
     gap: float
     attempts: int
@@ -119,6 +124,7 @@ def pending_add(
     ttl_cycles: Optional[int] = None,
     initial_gap: float = 1.0,
     semantic_merge: bool = False,
+    retro_log_entry_id: Optional[str] = None,
 ) -> PendingEntry:
     """UPS v2 pending を state['pending'] に追加。
 
@@ -138,6 +144,9 @@ def pending_add(
         ttl_cycles: policy="time" 時の TTL (cycle 数)。
         initial_gap: 初期 gap (default 1.0 = 未観測最大)。
         semantic_merge: semantic merge 候補に含めるか (unresolved_intent 相当)。
+        retro_log_entry_id: 遡及 E2 修正の対象 log entry id。
+            observation 到着時に pending_observe で該当 log entry の e2 を
+            上方修正する (§6 "pending_feedback 遅延 E2 遡及"の吸収)。
 
     Returns:
         追加された PendingEntry (dict、参照で state の pending list にも格納)。
@@ -165,6 +174,7 @@ def pending_add(
         "origin_cycle": cycle_id,
         "last_cycle": cycle_id,
         "timestamp": now,
+        "retro_log_entry_id": retro_log_entry_id,
     }
     entry["priority"] = calc_priority(entry)
     state.setdefault("pending", []).append(entry)
@@ -179,12 +189,17 @@ def pending_observe(
     cycle_id: int,
     match_source_actions: Optional[list[str]] = None,
     limit: int = 1,
+    retro_e2_bonus: int = 40,
 ) -> list[PendingEntry]:
-    """observation 到着 → 該当 pending の gap 更新。
+    """observation 到着 → 該当 pending の gap 更新 + 遡及 E2 修正。
 
     observed_content が埋まっていない UPS v2 pending を priority 降順で
     並び替え、上位 limit 件に observation を紐付ける。
     match_source_actions が指定された場合はそれらに限定する。
+
+    §6 "pending_feedback 遅延 E2 遡及" の吸収: observe 対象 pending が
+    `retro_log_entry_id` を持つ場合、state.log 中の該当 entry の `e2` を
+    +retro_e2_bonus% 上方修正 (上限 100%)。
 
     Args:
         observed_content: 到着した観測の本文。
@@ -193,6 +208,8 @@ def pending_observe(
         match_source_actions: この source_action の pending のみ対象にする。
             None なら全 UPS pending から選ぶ (spontaneous 到着のハンドル)。
         limit: 更新する pending 数の上限 (通常 1)。
+        retro_e2_bonus: 遡及 E2 修正の bonus 値 (% 単位)。default 40 は
+            旧 pending_feedback の既存挙動を継承。0 で無効化。
 
     Returns:
         observation が紐付いた PendingEntry のリスト。
@@ -216,8 +233,36 @@ def pending_observe(
         p["gap"] = 0.0
         p["last_cycle"] = cycle_id
         p["priority"] = calc_priority(p)
+        # 遡及 E2 修正 (旧 pending_feedback 相当の自動発火)
+        log_id = p.get("retro_log_entry_id")
+        if log_id and retro_e2_bonus > 0:
+            _apply_retro_e2(state, log_id, retro_e2_bonus)
         updated.append(p)
     return updated
+
+
+def _apply_retro_e2(state: dict, log_entry_id: str, bonus_pct: int) -> bool:
+    """指定 log entry の `e2` を `+bonus_pct%` 遡及修正 (上限 100%)。
+
+    旧 pending_feedback の `_resolved["status"] = "resolved"` + e2 上方修正
+    ロジックを UPS 側に吸収したもの。該当 log entry が見つからない、または
+    既存 e2 が数値パース不可なら何もせず False を返す (defensive)。
+
+    Returns:
+        修正を実行した場合 True、対象 entry 無し or e2 未設定の場合 False。
+    """
+    import re
+    for entry in state.get("log", []):
+        if entry.get("id") != log_entry_id:
+            continue
+        old_e2 = entry.get("e2", "")
+        m = re.search(r"(\d+)", str(old_e2))
+        if not m:
+            return False
+        new_val = min(100, int(m.group(1)) + int(bonus_pct))
+        entry["e2"] = f"{new_val}%"
+        return True
+    return False
 
 
 def pending_prune(

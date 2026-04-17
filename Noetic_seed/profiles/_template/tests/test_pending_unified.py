@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.pending_unified import (
     CHANNEL_MULTIPLIERS,
     LAG_WEIGHTS,
+    _apply_retro_e2,
     calc_priority,
     pending_add,
     pending_observe,
@@ -453,6 +454,126 @@ def test_recalc_skips_non_ups():
 # 統合シナリオ
 # ============================================================
 
+# ============================================================
+# 遡及 E2 修正 (旧 pending_feedback 吸収)
+# ============================================================
+
+def test_retro_e2_helper_basic():
+    print("== _apply_retro_e2: log entry の e2 を +bonus で上書き ==")
+    state = _fresh_state()
+    state["log"] = [
+        {"id": "e0", "e2": "50%"},
+        {"id": "e1", "e2": "30%"},
+    ]
+    ok = _apply_retro_e2(state, "e1", 40)
+    return all([
+        _assert(ok is True, "戻り値 True"),
+        _assert(state["log"][1]["e2"] == "70%", f"e1.e2=70% (30+40)"),
+        _assert(state["log"][0]["e2"] == "50%", "他 entry は無変更"),
+    ])
+
+
+def test_retro_e2_caps_at_100():
+    print("== _apply_retro_e2: 100% 超過で頭打ち ==")
+    state = _fresh_state()
+    state["log"] = [{"id": "e0", "e2": "80%"}]
+    _apply_retro_e2(state, "e0", 50)  # 80 + 50 = 130 → 100
+    return _assert(state["log"][0]["e2"] == "100%", "100% で頭打ち")
+
+
+def test_retro_e2_missing_entry():
+    print("== _apply_retro_e2: 該当 entry 無し → False ==")
+    state = _fresh_state()
+    state["log"] = [{"id": "e0", "e2": "50%"}]
+    ok = _apply_retro_e2(state, "nonexistent", 40)
+    return _assert(ok is False, "False 返却")
+
+
+def test_retro_e2_no_e2_field():
+    print("== _apply_retro_e2: e2 未設定 → False (defensive) ==")
+    state = _fresh_state()
+    state["log"] = [{"id": "e0", "tool": "x"}]  # e2 無し
+    ok = _apply_retro_e2(state, "e0", 40)
+    return _assert(ok is False, "e2 未設定なら False")
+
+
+def test_add_with_retro_log_entry_id():
+    print("== pending_add: retro_log_entry_id がスキーマに保持される ==")
+    state = _fresh_state()
+    entry = pending_add(
+        state, source_action="output_display",
+        expected_observation="返答", lag_kind="minutes",
+        content="x", cycle_id=5, channel="device",
+        retro_log_entry_id="log_123",
+    )
+    return _assert(entry.get("retro_log_entry_id") == "log_123",
+                   "retro_log_entry_id 保持")
+
+
+def test_observe_triggers_retro_e2():
+    print("== pending_observe: retro_log_entry_id 対象の log e2 を遡及修正 ==")
+    state = _fresh_state()
+    state["log"] = [
+        {"id": "log_123", "tool": "output_display", "e2": "40%"},
+    ]
+    pending_add(
+        state, source_action="output_display",
+        expected_observation="返答", lag_kind="minutes",
+        content="x", cycle_id=5, channel="device",
+        retro_log_entry_id="log_123",
+    )
+    updated = pending_observe(
+        state, observed_content="はーい", channel="device",
+        cycle_id=6, match_source_actions=["output_display"],
+    )
+    return all([
+        _assert(len(updated) == 1, "1 件 observe"),
+        _assert(state["log"][0]["e2"] == "80%",
+                f"log e2=80% (40 + 40): {state['log'][0]['e2']}"),
+    ])
+
+
+def test_observe_skips_retro_when_bonus_zero():
+    print("== pending_observe: retro_e2_bonus=0 で遡及スキップ ==")
+    state = _fresh_state()
+    state["log"] = [{"id": "log_x", "e2": "40%"}]
+    pending_add(
+        state, source_action="output_display",
+        expected_observation="x", lag_kind="minutes",
+        content="x", cycle_id=0, channel="device",
+        retro_log_entry_id="log_x",
+    )
+    pending_observe(
+        state, observed_content="ok", channel="device",
+        cycle_id=1, match_source_actions=["output_display"],
+        retro_e2_bonus=0,
+    )
+    return _assert(state["log"][0]["e2"] == "40%",
+                   "bonus=0 で修正なし")
+
+
+def test_observe_no_retro_when_id_missing():
+    print("== pending_observe: retro_log_entry_id 無しの pending は遡及なし ==")
+    state = _fresh_state()
+    state["log"] = [{"id": "log_y", "e2": "40%"}]
+    pending_add(
+        state, source_action="output_display",
+        expected_observation="x", lag_kind="minutes",
+        content="x", cycle_id=0, channel="device",
+        # retro_log_entry_id 省略
+    )
+    pending_observe(
+        state, observed_content="ok", channel="device",
+        cycle_id=1, match_source_actions=["output_display"],
+    )
+    return _assert(state["log"][0]["e2"] == "40%",
+                   "retro_log_entry_id 無しなら log は無変更")
+
+
+# ============================================================
+# 統合シナリオ
+# ============================================================
+
 def test_integration_add_observe_prune():
     print("== 統合: add 5 → observe 2 → prune で dynamic_n 動作 ==")
     state = _fresh_state()
@@ -515,6 +636,14 @@ if __name__ == "__main__":
         ("prune: 旧形式 skip", test_prune_ignores_non_ups),
         ("recalc: 全 UPS v2 再計算", test_recalc_priorities),
         ("recalc: 旧形式 skip", test_recalc_skips_non_ups),
+        ("retro: helper 基本", test_retro_e2_helper_basic),
+        ("retro: 100% 頭打ち", test_retro_e2_caps_at_100),
+        ("retro: 該当無し", test_retro_e2_missing_entry),
+        ("retro: e2 未設定", test_retro_e2_no_e2_field),
+        ("retro: add retro_log_entry_id", test_add_with_retro_log_entry_id),
+        ("retro: observe で遡及発火", test_observe_triggers_retro_e2),
+        ("retro: bonus=0 で skip", test_observe_skips_retro_when_bonus_zero),
+        ("retro: id 無しで遡及なし", test_observe_no_retro_when_id_missing),
         ("統合: add→observe→prune", test_integration_add_observe_prune),
     ]
     results = []
