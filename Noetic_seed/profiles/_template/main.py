@@ -90,7 +90,7 @@ from core.runtime.hooks import (
 )
 from core.runtime.legacy_bridge import register_legacy_bridge
 from core.runtime.tools import register_all as register_claw_tools
-from core.runtime.tools.noetic_ext import register_noetic_tools
+from core.runtime.tools.noetic_ext import NOETIC_TOOL_NAMES, register_noetic_tools
 from core.runtime.permissions import PermissionEnforcer, PermissionMode
 from core.approval_callback import make_approval_callback
 from core.prompt_assembly import assemble_system_prompt
@@ -239,16 +239,14 @@ def main():
 
     # ToolRegistry: claw-code 50 tool + noetic stub 5 個
     _rt_registry = ToolRegistry()
-    # 登録順は overwrite 順: claw → bridge → noetic_ext (strict)
+    # 登録順: claw → bridge (SNS 等のみ) → noetic_ext (Noetic 固有 17)
     #   1. claw: file_ops / shell / web / task / … の汎用 tool 50 個
-    #   2. bridge: legacy TOOLS 全部を loose schema で上書き登録
-    #      (read_file/write_file は bridge で削除済 → claw 版温存、
-    #       file_access_guard hook で Noetic 固有 security 適用)
-    #   3. noetic_ext: Noetic 固有 17 tool (reflect / update_self / memory_* /
-    #      view_image / camera_stream / auth 等) を claw 文法準拠の厳密
-    #      ToolSpec で最終上書き
+    #   2. bridge: noetic_ext がカバーする 17 tool を skip し、それ以外 (SNS
+    #      14 + create_tool / exec_code / self_modify / http_request = 18)
+    #      のみ loose schema で登録
+    #   3. noetic_ext: Noetic 固有 17 tool の claw 文法準拠厳密 ToolSpec
     register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
-    register_legacy_bridge(_rt_registry, TOOLS)
+    register_legacy_bridge(_rt_registry, TOOLS, skip_names=NOETIC_TOOL_NAMES)
     register_noetic_tools(_rt_registry, TOOLS)
 
     # hook context (state_before snapshot, fire 毎に更新)

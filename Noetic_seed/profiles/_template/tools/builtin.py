@@ -1,4 +1,10 @@
-"""組み込みツール（list_files, read_file, write_file, update_self）"""
+"""組み込みツール (update_self / wait / view_image / listen_audio)。
+
+H-2 Session A/B (2026-04-18) 以降、file_ops (read_file/write_file/list_files) は
+claw ネイティブ + file_access_guard hook に移行済。本モジュールの
+_HIDDEN_ALWAYS / _is_hidden / _find_similar_files / _format_not_found は
+view_image/listen_audio の "file not found" 時のサジェスト機能で利用される。
+"""
 import time
 from core.config import BASE_DIR, SANDBOX_DIR
 from core.state import load_state, save_state
@@ -15,23 +21,6 @@ def _is_hidden(name: str, state: dict | None = None) -> bool:
         st = state or load_state()
         return st.get("tool_level", 0) < 6
     return False
-
-def _list_files(path: str) -> str:
-    target = (BASE_DIR / path).resolve()
-    if not str(target).startswith(str(BASE_DIR.resolve())):
-        return "該当なし: アクセス範囲外のパスです"
-    if not target.exists():
-        # read_file と同じ tiered framing を使う（タイポ救済）
-        similar = _find_similar_files(path)
-        return _format_not_found(path, similar)
-    items = []
-    for item in sorted(target.iterdir()):
-        if _is_hidden(item.name):
-            continue
-        prefix = "[DIR]" if item.is_dir() else "[FILE]"
-        items.append(f"  {prefix} {item.name}")
-    rel = path if path else "."
-    return f"{rel}:\n" + "\n".join(items[:30]) if items else f"{rel}: (空)"
 
 def _find_similar_files(query_path: str, max_results: int = 3, min_ratio: float = 0.5) -> list[tuple[float, str]]:
     """要求パスに似た既存ファイルを文字列類似度で検索。
@@ -87,50 +76,6 @@ def _format_not_found(path: str, similar: list[tuple[float, str]]) -> str:
     names = " / ".join(p for _, p in similar[:3])
     return f"該当なし: {path}\nもしかして {names} のことですか？"
 
-
-def _read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
-    target = (BASE_DIR / path).resolve()
-    if not str(target).startswith(str(BASE_DIR.resolve())):
-        return "該当なし: アクセス範囲外のパスです"
-    # sandbox/secrets/ は secret_read 経由のみアクセス可（誤爆防止）
-    _secrets_dir = (SANDBOX_DIR / "secrets").resolve()
-    if str(target).startswith(str(_secrets_dir)):
-        return (
-            "sandbox/secrets/ は read_file から直接参照できません。\n"
-            "secret_read ツールを使ってください:\n"
-            "  [TOOL:secret_read name=<secret名>]"
-        )
-    # secrets.json 本体もガード（auth_profiles の型情報は auth_profile_info で取得、LLM キーは露出させない）
-    _secrets_file = (BASE_DIR / "secrets.json").resolve()
-    if target == _secrets_file:
-        return (
-            "secrets.json は read_file から直接参照できません。\n"
-            "auth_profile_info ツールで型情報を取得してください:\n"
-            "  [TOOL:auth_profile_info]                  ← 登録プロファイル名の一覧\n"
-            "  [TOOL:auth_profile_info name=<profile>]   ← 特定プロファイルのメタ情報\n"
-            "※ LLM の api_key は設計上 iku からは見えません（プロセス内で llm.py が直接使用）。"
-        )
-    if not target.exists():
-        # 近似マッチ（基名の完全一致）: 1件だけならそれを自動採用
-        from pathlib import Path
-        exact = [p for p in BASE_DIR.rglob(Path(path).name) if not _is_hidden(p.name) and p.is_file()]
-        if len(exact) == 1:
-            target = exact[0]
-            path = str(target.relative_to(BASE_DIR))
-        else:
-            # 類似検索（文字列類似度、段階的 framing）
-            similar = _find_similar_files(path)
-            return _format_not_found(path, similar)
-    if _is_hidden(target.name):
-        return f"該当なし: {path} はアクセスできません"
-    try:
-        lines = target.read_text(encoding="utf-8").splitlines()
-        total = len(lines)
-        sliced = lines[offset:] if limit is None else lines[offset:offset + limit]
-        header = f"[{path} | 行 {offset+1}–{offset+len(sliced)}/{total}]\n"
-        return header + "\n".join(sliced)
-    except Exception as e:
-        return f"エラー: {e}"
 
 def _view_image(args: dict) -> str:
     """画像を視覚入力として取り込み、その場でLLMに描写させて結果として返す。
@@ -250,23 +195,6 @@ def _listen_audio(args: dict) -> str:
     rel = str(target.relative_to(BASE_DIR)).replace("\\", "/")
     return f"{formatted}\nソース: {rel}"
 
-
-def _write_file(path: str, content: str) -> str:
-    if not path:
-        return "エラー: pathが空です"
-    if not content:
-        return "エラー: contentが空です"
-    target = (BASE_DIR / path).resolve()
-    sandbox_resolved = SANDBOX_DIR.resolve()
-    if not str(target).startswith(str(sandbox_resolved)):
-        return "エラー: sandbox/以下にのみ書き込めます"
-    # sandbox/secrets/ は secret_write 経由のみ書き込み可（承認が要るので経路を制限）
-    _secrets_dir = (SANDBOX_DIR / "secrets").resolve()
-    if str(target).startswith(str(_secrets_dir)):
-        return "エラー: sandbox/secrets/ には write_file で書き込めません（secret_write を使ってください）"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    return f"書き込み完了: {target.name} ({len(content)}文字)"
 
 def _update_self(key: str, value: str) -> str:
     if not key:
