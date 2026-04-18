@@ -151,13 +151,28 @@ _ELYTH_ARGS_HINT = {
 }
 
 
-def _build_tool_lines(allowed: set, tools_dict: dict) -> str:
-    """X/Elyth系を1行にまとめてプロンプトへの表示を圧縮する"""
+def _build_tool_lines(allowed: set, tools_dict: dict, registry=None) -> str:
+    """X/Elyth系を1行にまとめてプロンプトへの表示を圧縮する。
+
+    registry (ToolRegistry) を渡すと、tools_dict に entry がないが allowed に
+    含まれる tool (claw ネイティブ: read_file / write_file / glob_search /
+    WebSearch / WebFetch 等) の description を registry から取得して表示する。
+    Phase 4 H-2 C.4 A で claw 移行した tool が LLM① prompt から消失していた
+    バグの対策。
+    """
     grouped = set(_X_TOOLS + _ELYTH_TOOLS)
     lines = []
     for name in tools_dict:
         if name in allowed and name not in grouped:
             lines.append(f"  {name}: {tools_dict[name]['desc']}")
+    if registry is not None:
+        for name in sorted(allowed):
+            if name in tools_dict or name in grouped:
+                continue
+            spec = registry.get(name)
+            if spec is not None:
+                desc = (spec.description or "").replace("\n", " ")[:180]
+                lines.append(f"  {name}: {desc}")
     x_av = [t for t in _X_TOOLS if t in allowed]
     if x_av:
         parts = " / ".join(f"{t}({_X_ARGS_HINT[t]})" for t in x_av)
@@ -194,7 +209,7 @@ def _calc_log_budget() -> int:
     return max(1000, total - reserved)
 
 
-def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: str = "") -> str:
+def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: str = "", registry=None) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     self_text = json.dumps(state["self"], ensure_ascii=False) if state["self"] else "(なし)"
     energy = round(state.get("energy", 50), 1)
@@ -202,7 +217,7 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
     # 鮮度勾配で log 部を pack（全件維持、tier ごとに result を cap）
     log_text = _pack_log_block(state["log"], _calc_log_budget(), with_evals=False)
     allowed = ctrl.get("allowed_tools", set(tools_dict.keys()))
-    tool_lines = _build_tool_lines(allowed, tools_dict)
+    tool_lines = _build_tool_lines(allowed, tools_dict, registry=registry)
     summaries = state.get("summaries", [])
     summary_lines = [
         f"  [{s.get('label','')} {s.get('covers_from','').split(' ')[0]}〜{s.get('covers_to','').split(' ')[0]}] {s.get('text','')[:300]}"
@@ -213,6 +228,8 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
     fire_cause_line = f"\n[発火原因: {fire_cause}]" if fire_cause and ctrl.get("tool_level", 0) >= 2 else ""
 
     # pending（未対応事項） — UPS v2 (type='pending') / 旧形式両対応
+    # id 形式: p_{session}_{cycle:04d}_{source[:8]}_{ms} (log entry の
+    # {session}_{cycle:04d} に対応)。dismiss 時はこの p_ prefix id を渡す。
     pending = state.get("pending", [])
     if pending:
         pending_lines = []
@@ -230,13 +247,13 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
                 ch_tag = f" ch={ch}" if ch else ""
                 origin = p.get("origin_cycle", "?")
                 pending_lines.append(
-                    f"  [pending id={p_id} src={source} lag={lag} g={gap_pct}% x{attempts}{ch_tag}] {content} (cycle {origin}〜)"
+                    f"  [pending dismiss_id={p_id} src={source} lag={lag} g={gap_pct}% x{attempts}{ch_tag}] {content} (cycle {origin}〜)"
                 )
             else:
                 # 旧形式 fallback (migration 期間 safety; Phase 5 iku 再生成後は消える)
                 p_ch = p.get("channel", "")
                 ch_tag = f" ch={p_ch}" if p_ch else ""
-                pending_lines.append(f"  [{p_type} id={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
+                pending_lines.append(f"  [{p_type} dismiss_id={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
         pending_text = "\n".join(pending_lines)
     else:
         pending_text = "  なし"
@@ -271,7 +288,7 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 [未対応事項]
 {pending_text}{stream_status_line}
 {f'{chr(10)}[関連記憶]{chr(10)}{memory_text}{chr(10)}' if memory_text else ''}
-[STM — 現在の状況 / given circumstances]
+[STM — 現在の状況]
 {f'summaries:{chr(10)}{summary_text}{chr(10)}' if summary_text else ''}log:
 {log_text}
 
@@ -279,7 +296,7 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 {tool_lines}
 
 [候補生成プロトコル]
-上記のLTM（自己モデル）を起点に、STM（現在の状況）を読み、次にとりうる行動候補を【5個】列挙してください。
+LTM（自己モデル）と STM（現在の状況）を参照し、次にとりうる行動候補を【5個】列挙してください。
 
 ※ log の result 欄に「[表示上 N/M字。ツール実行時は完全取得済]」と付いているのは、
   コンテキスト予算の都合で表示を縮めているだけです。そのツール実行時は完全な結果を
@@ -297,108 +314,3 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 5. [意図・目的] → ツール名（または ツール名+ツール名+...）
 
 [TOOL:...]は不要です。候補のみ出力してください。"""
-
-
-def build_prompt_execute(state: dict, ctrl: dict, candidate: dict, tools_dict: dict) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    self_text = json.dumps(state["self"], ensure_ascii=False) if state["self"] else "(なし)"
-    # 鮮度勾配で log 部を pack（execute は e値付きで表示）
-    log_text = _pack_log_block(state["log"], _calc_log_budget(), with_evals=True)
-    selected_tools = set(candidate.get("tools", [candidate["tool"]]))
-    tool_text = _build_tool_lines(selected_tools, tools_dict)
-    summaries = state.get("summaries", [])
-    summary_lines = [
-        f"  [{s.get('label','')} {s.get('covers_from','').split(' ')[0]}〜{s.get('covers_to','').split(' ')[0]}] {s.get('text','')[:300]}"
-        for s in summaries
-    ]
-    summary_text = "\n".join(summary_lines)
-
-    t = candidate["tool"]
-    if t == "web_search":
-        example = '[TOOL:web_search query=キーワード intent=目的 expect=予測]\n[TOOL:write_file path=sandbox/memo.md content="まとめ内容"]'
-    elif t == "fetch_url":
-        example = '[TOOL:fetch_url url=https://... intent=目的 expect=予測]\n[TOOL:write_file path=sandbox/memo.md content="内容"]'
-    elif t == "read_file":
-        example = "[TOOL:read_file path=ファイル名 intent=目的 expect=予測]\n[TOOL:update_self key=キー名 value=値]"
-    elif t == "search_memory":
-        example = "[TOOL:search_memory query=キーワード intent=目的 expect=予測]\n[TOOL:update_self key=キー名 value=値]"
-    elif t == "memory_store":
-        example = '[TOOL:memory_store network=experience content="記憶内容" intent=目的 expect=予測]'
-    elif t == "memory_update":
-        example = '[TOOL:memory_update memory_id=mem_xxxx content="更新内容" intent=目的 expect=予測]'
-    elif t == "list_files":
-        example = "[TOOL:list_files path=. intent=目的 expect=予測]"
-    elif t == "write_file":
-        example = '[TOOL:write_file path=sandbox/memo.md content="内容" intent=目的 expect=予測]'
-    elif t == "update_self":
-        example = "[TOOL:update_self key=キー名 value=値 intent=目的 expect=予測]"
-    elif t == "wait":
-        example = "[TOOL:wait intent=目的 expect=予測]\n未対応事項を却下する場合: [TOOL:wait dismiss=pending_id intent=対応不要と判断 expect=pendingから除去]"
-    elif t == "create_tool":
-        example = '[TOOL:create_tool name=ツール名 code="def run(args): return str(args)" intent=目的 expect=予測]'
-    elif t == "exec_code":
-        example = '[TOOL:exec_code file=sandbox/xxx.py intent=目的 message="外部への説明" expect=予測]\n承認必須。message= は外部が承認を判断するための説明文。'
-    elif t == "self_modify":
-        example = '[TOOL:self_modify path=pref.json old="変更前" new="変更後" intent=目的 message="外部への説明" expect=予測]\n承認必須。message= は外部が承認を判断するための説明文。'
-    elif t == "camera_stream":
-        example = '[TOOL:camera_stream facing=back frames=15 interval_sec=2.0 intent=目的 message="外部への撮影依頼理由" expect=予測]\n非同期ストリーム開始（例は約30秒の連続観察）。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着（ローリング最新5枚）。観察中は他ツールを並行実行可能。単発は frames=1。\nframes=0 で無制限モード: 自分で camera_stream_stop を呼ぶまで継続（最大10分）。長時間の環境観察や変化の監視に使う。承認必須。'
-    elif t == "screen_peek":
-        example = '[TOOL:screen_peek frames=5 interval_sec=2.0 intent=目的 message="外部への画面キャプチャ依頼理由" expect=予測]\n端末スクリーンの非同期キャプチャ開始。最初のフレームは実行時に視覚入力、後続は次サイクル以降にバッファ経由で到着。観察中は他ツール並行実行可。frames=0 で無制限（camera_stream_stop で終了）。毎セッション MediaProjection 許可ダイアログが出る。承認必須。'
-    elif t == "camera_stream_stop":
-        example = '[TOOL:camera_stream_stop intent=観察完了 expect=予測]\nアクティブな camera_stream / screen_peek を停止する。観察対象を十分に把握した後に呼ぶ。'
-    elif t == "view_image":
-        example = '[TOOL:view_image path=（camera_streamの結果やlist_filesで得た実際のパス） intent=何を確認したいか expect=予測]\n画像を同期で認識し、intent に沿った描写を結果として返します。パスはファイル名を推測せず、camera_stream結果の「最初のフレーム:」行やlist_filesの出力から取得すること。'
-    elif t == "secret_read":
-        example = '[TOOL:secret_read name=secret名 intent=目的 expect=予測]\n引数は name=（path= ではない。read_file とは別物）。sandbox/secrets/{name} から読む。'
-    elif t == "secret_write":
-        example = '[TOOL:secret_write name=secret名 content="秘密データ" intent=目的 message="外部への説明" expect=予測]\n承認必須。sandbox/secrets/{name} に保存される。'
-    elif t == "auth_profile_info":
-        example = '[TOOL:auth_profile_info name=プロファイル名 intent=目的 expect=予測]\nname= 省略で一覧モード。token/key 等の機密フィールドは隠される（型情報のみ返る）。'
-    elif t in _X_TOOLS:
-        hint = _X_ARGS_HINT.get(t, "")
-        example = f"[TOOL:{t} {hint} intent=目的 expect=予測]".replace("  ", " ")
-    elif t in _ELYTH_TOOLS:
-        hint = _ELYTH_ARGS_HINT.get(t, "")
-        if t == "elyth_reply":
-            example = '[TOOL:elyth_reply content="返信内容" reply_to_id=投稿ID intent=目的 expect=予測]'
-        elif t == "elyth_post":
-            example = '[TOOL:elyth_post content="投稿内容" intent=目的 expect=予測]'
-        else:
-            example = f"[TOOL:{t} {hint} intent=目的 expect=予測]".replace("  ", " ")
-    elif t == "output_display":
-        example = '[TOOL:output_display content="メッセージ内容" intent=目的 expect=予測]\n注意: output_displayは外部への直接の言葉です。Elyth投稿とは異なる経路に届きます。'
-    else:
-        example = f"[TOOL:{t} intent=目的 expect=予測]"
-
-    tools_in_chain = candidate.get("tools", [candidate["tool"]])
-    tools_str = "+".join(tools_in_chain)
-
-    # 行動対象に関連する記憶を検索（エンティティ名が候補reasonに含まれていれば）
-    from core.memory import memory_network_search, format_memories_for_prompt
-    _reason = candidate.get("reason", "")
-    _context_memories = memory_network_search(_reason[:200], networks=["entity", "opinion"], limit=5) if _reason else []
-    _context_mem_text = format_memories_for_prompt(_context_memories) if _context_memories else ""
-
-    return f"""[LTM — 自己モデル]
-{self_text}
-{f'{chr(10)}[関連記憶]{chr(10)}{_context_mem_text}{chr(10)}' if _context_mem_text else ''}
-[STM — 現在の状況 / given circumstances]
-{f'summaries:{chr(10)}{summary_text}{chr(10)}' if summary_text else ''}log ({now}):
-{log_text}
-
-[利用可能なツール]
-{tool_text}
-
-[実行プロトコル — Magic-If Protocol]
-※ log の result に「[表示上 N/M字。ツール実行時は完全取得済]」と付いているのは、
-  コンテキスト予算の都合で表示を縮めているだけです。そのツール実行時は完全な結果を
-  受け取って処理済みなので、再取得は不要です。
-
-1. (Anchor) 上記のLTM（自己モデル）に自分自身を固定する。名前・ラベルではなく、意味的同一性として。
-2. (Select) STMを given circumstances として読み、選択行動「{tools_str}」の最適な引数を決定する。
-   **使用するツールは {tools_str} のみです。ここに含まれないツール名は出力しないでください。**
-3. (Bound)  必ず `[TOOL:ツール名 ...]` の形式で出力する。`[TOOL:` と `]` のブラケットは省略不可。JSONもコードブロックも使わない。ツール名は省略しない（例:`read` ではなく `read_file`）。自己紹介・説明・感想は一切不要。連鎖実行は複数行で可。
-4. (Enact)  正確なツール呼び出しを出力する。intent=とexpect=は必ず最初の[TOOL:]にのみ付け、このサイクル全体の目的を表すこと。2つ目以降のツールにはintent/expectは不要。
-            ツールの引数リストに [message=...] がある場合は必ず含めること。これは外部が承認を判断するための説明文で、省略すると外部は意図を読み取れず却下する可能性がある。
-
-出力（必ずこの形式で）: {example}"""
