@@ -1,7 +1,8 @@
 """Shell — bash / PowerShell / REPL.
 
 claw-code 参照: rust/crates/runtime/src/bash.rs:1-283
-厳密 claw-code 準拠。Noetic 固有 (Git Bash フォールバック等) は含めない。
+claw-code 厳密準拠を基本としつつ、Noetic 固有補完として Windows での
+Git Bash フォールバックを追加 (claw 本家は Unix 前提のため)。
 sandbox (Linux unshare) は将来実装。
 """
 import os
@@ -9,6 +10,43 @@ import shutil
 import subprocess
 import uuid
 from typing import Optional
+
+
+# ============================================================
+# Noetic 固有補完: Windows での bash 実行ファイル探索
+# ============================================================
+# claw 本家 (bash.rs) は `which bash` 相当のみで探索し、Windows に
+# bash 実行ファイルが PATH 上にない環境では常に failure する。
+# Noetic は Windows 常駐前提なので、Git Bash の典型的なインストール先も
+# fallback として探す。PATH 最優先で、見つからない場合のみ候補探索。
+# ============================================================
+
+_WINDOWS_BASH_CANDIDATES = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+)
+
+
+def _find_bash_executable() -> Optional[str]:
+    """bash 実行ファイルのフルパスを返す。
+
+    探索順:
+      1. shutil.which("bash")  — PATH (Unix / Git Bash が PATH にある Windows)
+      2. Windows のみ: Git Bash の典型的インストール先を候補探索
+      3. 見つからなければ None
+
+    Returns:
+        bash 実行ファイルのフルパス、または None。
+    """
+    path = shutil.which("bash")
+    if path:
+        return path
+    if os.name == "nt":
+        for cand in _WINDOWS_BASH_CANDIDATES:
+            if os.path.isfile(cand):
+                return cand
+    return None
 
 from core.runtime.permissions import PermissionMode
 from core.runtime.registry import ToolRegistry
@@ -32,9 +70,13 @@ def bash(inp: dict) -> str:
     timeout = max(1, min(timeout, 600))
     run_bg = bool(inp.get("run_in_background", False))
 
-    bash_path = shutil.which("bash")
+    bash_path = _find_bash_executable()
     if not bash_path:
-        return "Error: bash not found in PATH"
+        return (
+            "Error: bash not found. "
+            "Windows の場合は Git for Windows (https://git-scm.com/) を "
+            "インストールしてください (C:\\Program Files\\Git\\bin\\bash.exe 等を自動検出)。"
+        )
 
     if run_bg:
         return _spawn_background([bash_path, "-c", command])
