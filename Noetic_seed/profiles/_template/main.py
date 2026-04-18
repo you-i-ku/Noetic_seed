@@ -89,7 +89,7 @@ from core.runtime.hooks import (
     make_post_tool_use_failure_logger,
 )
 from core.runtime.legacy_bridge import register_legacy_bridge
-from core.runtime.tools import register_all as register_claw_tools
+from core.runtime.tools import ensure_approval_props, ensure_noetic_file_hints, register_all as register_claw_tools
 from core.runtime.tools.noetic_ext import NOETIC_TOOL_NAMES, register_noetic_tools
 from core.runtime.permissions import PermissionEnforcer, PermissionMode
 from core.approval_callback import make_approval_callback
@@ -101,7 +101,7 @@ from core.entropy import (
 )
 from core.memory import _archive_entries, maybe_compress_log, get_relevant_memories, format_memories_for_prompt
 from core.reflection import should_reflect, reflect
-from core.prompt import build_prompt_propose, build_prompt_execute
+from core.prompt import build_prompt_propose
 from core.controller import controller, controller_select, _intent_conditioned_scores
 
 from tools import TOOLS, LEVEL_TOOLS
@@ -248,6 +248,17 @@ def main():
     register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
     register_legacy_bridge(_rt_registry, TOOLS, skip_names=NOETIC_TOOL_NAMES)
     register_noetic_tools(_rt_registry, TOOLS)
+    # claw ネイティブ tool (file_ops/web/shell/task/...) は元々承認 3 層なし。
+    # Noetic 固有要件として registry 登録後に input_schema へ一括注入する。
+    _approval_injected = ensure_approval_props(_rt_registry)
+    if _approval_injected:
+        print(f"  [approval] 承認 3 層注入: {_approval_injected} tool")
+
+    # claw ネイティブ file 系 tool の description に Noetic 固有制約 (sandbox/
+    # 外書込禁止、secrets 保護) を hint として追記。LLM が事前に制約を知れる。
+    _file_hints_injected = ensure_noetic_file_hints(_rt_registry)
+    if _file_hints_injected:
+        print(f"  [file_hints] Noetic 制約 hint 注入: {_file_hints_injected} tool")
 
     # hook context (state_before snapshot, fire 毎に更新)
     _hook_ctx = {"state_before": {}}
@@ -389,7 +400,7 @@ def main():
         print(f"  ctrl: level={new_lv} tools={sorted(allowed)} log={len(state['log'])}件(全件)")
 
         # ① LLM: 候補提案
-        propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause)
+        propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause, registry=_rt_registry)
 
         # 画像入力の決定
         from core.ws_server import get_stream_snapshot
@@ -562,6 +573,7 @@ def main():
             tools_dict=TOOLS,
             fire_cause=fire_cause,
             allowed_tools=ctrl["allowed_tools"],
+            registry=_rt_registry,
         )
         _runtime.session.clear()
 
@@ -636,6 +648,25 @@ def main():
             _exec_line = f"  実行: {rec.tool_name} → {str(rec.output)[:100]}"
             print(_exec_line)
             broadcast_log(_exec_line)
+
+            # master L678-692 の files_read/written tracking を ConversationRuntime
+            # 経由へ移植 (Step E-2d での移植漏れ)。controller.py:65 の tool_level
+            # 遷移 (lv 0→1 は read_file 1 回成功) を機能させるために必須。
+            _out_str = str(rec.output)
+            if rec.tool_name == "read_file":
+                _p = ti.get("path", "")
+                if _p and not _out_str.startswith(("Error", "エラー", "該当なし")):
+                    fr = state.setdefault("files_read", [])
+                    if _p not in fr:
+                        fr.append(_p)
+                    save_state(state)
+            elif rec.tool_name == "write_file":
+                _p = ti.get("path", "")
+                if _p and not _out_str.startswith(("Error", "エラー")):
+                    fw = state.setdefault("files_written", [])
+                    if _p not in fw:
+                        fw.append(_p)
+                    save_state(state)
 
         if not all_tool_names:
             return None
