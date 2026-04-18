@@ -1,6 +1,5 @@
 """ツール定義・段階解放テーブル"""
 from tools.builtin import _list_files, _read_file, _write_file, _update_self, _wait_or_dismiss, _view_image, _listen_audio
-from tools.web import _web_search, _fetch_url
 from tools.x_tools import _x_timeline, _x_search, _x_get_notifications, _x_post, _x_reply, _x_quote, _x_like
 from tools.elyth_tools import _elyth_post, _elyth_reply, _elyth_like, _elyth_follow, _elyth_info, _elyth_get, _elyth_mark_read
 from tools.memory_tool import _search_memory, _tool_memory_store, _tool_memory_update, _tool_memory_forget, _tool_search_memory
@@ -17,8 +16,6 @@ TOOLS = {
     "write_file":   {"desc": "ファイルに書き込む（sandbox/以下のみ）。引数: path=ファイルパス content=内容", "func": lambda args: _write_file(args.get("path", ""), args.get("content", ""))},
     "update_self":  {"desc": "自己モデルを更新する。引数: key=キー名 value=値", "func": lambda args: _update_self(args.get("key", ""), args.get("value", ""))},
     "wait":         {"desc": "待機。dismiss=pending_idで未対応事項を明示的に却下できる", "func": _wait_or_dismiss},
-    "web_search":   {"desc": "Brave APIでWeb検索。引数: query=検索キーワード [max_results=件数]", "func": _web_search},
-    "fetch_url":    {"desc": "URLの本文を取得（Jina経由）。引数: url=URL", "func": _fetch_url},
     "x_timeline":   {"desc": "Xのタイムライン取得。引数: [count=件数] [tab=following/recommend デフォルトfollowing]", "func": _x_timeline},
     "x_search":     {"desc": "Xでキーワード検索。引数: query=キーワード [count=件数]", "func": _x_search},
     "x_get_notifications": {"desc": "Xの通知一覧取得", "func": _x_get_notifications},
@@ -55,13 +52,15 @@ TOOLS = {
 }
 
 # === ツール段階解放テーブル ===
-_LV3_TOOLS = set(TOOLS.keys()) - {"create_tool", "exec_code", "self_modify"}
+# H-2 C.1 (2026-04-18): web_search/fetch_url は claw-code の WebSearch/WebFetch に
+# 直接吸収。level 2 以上で claw 版を expose する。
+_LV3_TOOLS = set(TOOLS.keys()) - {"create_tool", "exec_code", "self_modify"} | {"WebSearch", "WebFetch"}
 LEVEL_TOOLS = {
     0: {"list_files", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio"},
     1: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio"},
-    2: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "web_search", "fetch_url", "output_display", "view_image", "listen_audio"},
+    2: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio"},
     3: _LV3_TOOLS,
     4: _LV3_TOOLS | {"create_tool"},
-    5: set(TOOLS.keys()) - {"self_modify"},
-    6: set(TOOLS.keys()),
+    5: set(TOOLS.keys()) - {"self_modify"} | {"WebSearch", "WebFetch"},
+    6: set(TOOLS.keys()) | {"WebSearch", "WebFetch"},
 }
