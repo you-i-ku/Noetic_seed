@@ -462,25 +462,36 @@ def make_file_access_guard(
         # 1. secrets.json 保護
         if target == secrets_json:
             return HookRunResult.deny([
-                f"[file_guard] secrets.json は直接アクセスできません。"
-                f"auth_profile_info を使ってください (tool={tool_name})"
+                f"[file_guard] secrets.json は直接アクセスできません "
+                f"(tool={tool_name}, path={path_arg})。"
+                f"auth_profile_info を使って型情報のみ取得してください "
+                f"(機密フィールドは隠されます)。"
             ])
 
         # 2. sandbox/secrets/ 保護
         if _is_inside(target, secrets_dir):
             redirect = "secret_write" if is_write else "secret_read"
+            action = "書き込む" if is_write else "読む"
             return HookRunResult.deny([
-                f"[file_guard] sandbox/{secrets_subdir}/ には直接アクセスできません。"
-                f"{redirect} を使ってください (tool={tool_name})"
+                f"[file_guard] sandbox/{secrets_subdir}/ には直接アクセスできません "
+                f"(tool={tool_name}, path={path_arg})。"
+                f"{redirect} を使って {action} (引数は name=<secret名>)。"
             ])
 
         # 3. 書込系 tool は sandbox/ 以下限定 (self_modify が legacy 経由で
         #    main.py/pref.json を更新するのは別経路なので影響なし)
         if is_write and require_write_in_sandbox:
             if not _is_inside(target, sandbox_root):
+                # 失敗パスから sandbox/ 以下への誘導パス例を構築
+                try:
+                    suggested = f"sandbox/{Path(path_arg).name}"
+                except Exception:
+                    suggested = "sandbox/memo.md"
                 return HookRunResult.deny([
                     f"[file_guard] {tool_name} は sandbox/ 以下にのみ書き込めます "
-                    f"(path={path_arg})"
+                    f"(指定パス: {path_arg})。"
+                    f"パスを sandbox/ 配下に変更してください "
+                    f"(例: {suggested}, sandbox/identity/draft.md, sandbox/notes/)。"
                 ])
 
         return HookRunResult.allow()
