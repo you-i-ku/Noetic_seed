@@ -355,13 +355,6 @@ def main():
         if not state.get("stream_active"):
             allowed = allowed - {"camera_stream_stop"}
             ctrl["allowed_tools"] = allowed
-        # [Phase 4 H-1 一時 bridge] 2 宇宙問題対応。H-2 で legacy TOOLS 廃止後に削除。
-        # ConversationRuntime.ToolRegistry には noetic_stub 5 個のみ登録されているため、
-        # controller が propose する tool を stub 集合に限定する。詳細は
-        # PHASE4_TASKS.md v3 §5.0 / memory/project_v05_phase4_status.md 参照。
-        _H1_STUB_ONLY = {"output_display", "wait", "reflect", "update_self", "search_memory"}
-        allowed = allowed & _H1_STUB_ONLY
-        ctrl["allowed_tools"] = allowed
         new_lv = ctrl.get("tool_level", 0)
         prev_lv = ctrl.get("tool_level_prev", 0)
         lv_msg = ""
