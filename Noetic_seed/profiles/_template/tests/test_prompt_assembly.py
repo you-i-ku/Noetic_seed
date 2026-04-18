@@ -88,15 +88,19 @@ def test_world_model_section_none():
 
 
 def test_world_model_section_renders():
-    print("== 世界モデル: 段階2 実装 (init_world_model で生成した dict を描画) ==")
-    from core.world_model import init_world_model
+    print("== 世界モデル: 段階6-C v3 実装 (観察で channel が生えた WM を描画) ==")
+    from core.world_model import init_world_model, ensure_channel
+    from core.channel_registry import channel_from_device_input, channel_from_mcp_client
     wm = init_world_model()
+    # (v3) 起動直後は channels 空、観察で生える。テスト目的で device/claude を明示登録
+    ensure_channel(wm, **channel_from_device_input())
+    ensure_channel(wm, **channel_from_mcp_client("claude-code"))
     s = build_world_model_section(wm)
     return all([
         _assert("## 世界モデル" in s, "section heading"),
         _assert("### チャネル" in s, "チャネル heading"),
         _assert("device (direct)" in s, "device 行"),
-        _assert("elyth (social)" in s, "elyth 行"),
+        _assert("claude (social)" in s, "claude 行"),
         _assert("まだ観測されていない" in s, "未観測メッセージ (facts=空)"),
     ])
 

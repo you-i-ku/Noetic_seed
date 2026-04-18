@@ -1,18 +1,20 @@
 """世界モデル (WM) — schema 定義・初期化・アクセサ・prompt レンダリング。
 
-WORLD_MODEL.md §5-§6 段階2-3 の実装。
-段階3: Fact β+ 更新 + channel activity 追跡 + C-gradual 同期。
+WORLD_MODEL.md §5-§6 段階2-3 の実装 + 段階6-C v3 で動的 channel 化。
 
-設計指針 (STAGE2_IMPLEMENTATION_PLAN.md / STAGE3_IMPLEMENTATION_PLAN.md 準拠):
+設計指針 (STAGE2/3/6C_IMPLEMENTATION_PLAN.md 準拠):
 - ミニマリズム: 消費者のない field は段階を待って追加
 - ent_self は構造的スロット (段階7 で state["self"] 統合予定)
 - 生 dict アクセス禁止、必ず本モジュールの accessor 経由 (§10-1 accessor-only)
 - 将来の unified memory_store 移行時は accessor 内部のみ書き換える
+- **(v3) World is observed, not given**: channel は bootstrap せず、観察で ensure_channel から生える
+- channel spec 生成ロジックは `core/channel_registry.py` の判定関数が所有
 
 段階4 以降の契約:
 - entity_id 生成は段階4 で Entity Resolver に差替予定
 - Tool→entity fact 更新は段階4 で target entity 解決後に追加
 - channel_mismatch 乗算は段階5
+- **channel は動的登録 (段階6-C v3)**: 起動直後 channels={}、観察で ensure_channel 経由で生える
 """
 import re
 from collections import defaultdict
@@ -20,32 +22,6 @@ from datetime import datetime
 from typing import Optional
 
 WM_SCHEMA_VERSION = 1
-
-# 段階2 で bootstrap する channel 定義。type / tools_in / tools_out のみ。
-# health / last_error / tags は段階3+ で追加。
-_CHANNEL_BOOTSTRAP = {
-    "device": {
-        "type": "direct",
-        "tools_in": ["[device_input]"],
-        "tools_out": ["output_display", "camera_stream", "screen_peek",
-                      "view_image", "listen_audio", "mic_record"],
-    },
-    "elyth": {
-        "type": "social",
-        "tools_in": ["elyth_info", "elyth_get"],
-        "tools_out": ["elyth_post", "elyth_reply", "elyth_like", "elyth_follow"],
-    },
-    "x": {
-        "type": "social",
-        "tools_in": ["x_timeline", "x_search", "x_get_notifications"],
-        "tools_out": ["x_post", "x_reply", "x_quote", "x_like"],
-    },
-    "internal": {
-        "type": "self",
-        "tools_in": [],
-        "tools_out": [],
-    },
-}
 
 
 def _now() -> str:
@@ -57,7 +33,7 @@ def _now() -> str:
 # ============================================================
 
 def init_world_model() -> dict:
-    """初期 world_model を返す。冪等 (何度呼んでも同構造)。
+    """初期 world_model を返す。channels は空 (観察で ensure_channel 経由で生える)。
 
     ent_self は構造的スロットとして予約 (name="self" 固定)。
     個人名情報は state["self"]["name"] に任せる (段階7 で統合予定)。
@@ -68,21 +44,16 @@ def init_world_model() -> dict:
             "id": "ent_self",
             "name": "self",
             "facts": [],
+            "aliases": [],
+            "channels": [],
+            "last_seen": None,
             "created_at": now,
             "updated_at": now,
         }
     }
-    channels = {}
-    for cid, meta in _CHANNEL_BOOTSTRAP.items():
-        channels[cid] = {
-            "id": cid,
-            "type": meta["type"],
-            "tools_in": list(meta["tools_in"]),
-            "tools_out": list(meta["tools_out"]),
-        }
     return {
         "entities": entities,
-        "channels": channels,
+        "channels": {},   # (v3) 空から始まる。観察で channel_registry 判定関数 + ensure_channel 経由で動的に生える
         "version": WM_SCHEMA_VERSION,
         "last_updated": now,
     }
@@ -269,6 +240,41 @@ def migrate_entity_fields(entity: dict) -> None:
         entity["channels"] = []
     if "last_seen" not in entity:
         entity["last_seen"] = None
+
+
+# ============================================================
+# 段階6-C v3: Channel 動的登録 (ensure_entity と対称)
+# ============================================================
+
+def ensure_channel(wm: dict, id: str, type: str,
+                   tools_in=None, tools_out=None) -> dict:
+    """channel id 存在なら既存を返却、未存在なら新規作成して返却。in-place。
+
+    `ensure_entity` と対称設計、冪等。
+    spec は `core/channel_registry.py` の判定関数が生成して渡してくる前提
+    (caller は生 dict を組み立てない)。
+
+    Args:
+        wm: world_model
+        id: channel id (例: "device", "claude", "mcp_discord-bot")
+        type: "direct" / "social" / "self" など
+        tools_in / tools_out: 観察ツール / 出力ツール名のリスト
+
+    Returns:
+        channel dict (新規作成 or 既存)
+    """
+    channels = wm.setdefault("channels", {})
+    if id in channels:
+        return channels[id]
+    channel = {
+        "id": id,
+        "type": type,
+        "tools_in": list(tools_in or []),
+        "tools_out": list(tools_out or []),
+    }
+    channels[id] = channel
+    wm["last_updated"] = _now()
+    return channel
 
 
 # ============================================================

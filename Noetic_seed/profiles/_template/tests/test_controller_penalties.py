@@ -24,7 +24,22 @@ from core.controller import (
     controller_select,
 )
 from core.config import WORLD_MODEL_CFG
-from core.world_model import init_world_model
+from core.world_model import init_world_model, ensure_channel
+from core.channel_registry import channel_from_device_input
+
+
+def _wm_with_test_channels():
+    """(v3) テスト用 WM: 起動直後 channels={} なので、device + x + claude を ensure。
+    bootstrap 撤去により、段階5 penalty テストは明示登録で channel_mismatch を発火させる。
+    """
+    wm = init_world_model()
+    ensure_channel(wm, **channel_from_device_input())
+    # x channel は channel_registry にない (将来 skills/computer use 吸収予定)。
+    # テスト目的で手動 spec 登録。
+    ensure_channel(wm, id="x", type="social",
+                   tools_in=["x_timeline", "x_search", "x_get_notifications"],
+                   tools_out=["x_post", "x_reply", "x_quote", "x_like"])
+    return wm
 
 
 def _assert(cond, label):
@@ -39,7 +54,7 @@ def _assert(cond, label):
 
 def test_channel_mismatch_penalty_reduces_score():
     print("== channel_mismatch: 不一致で multiplier 適用 + penalties 記録 ==")
-    wm = init_world_model()
+    wm = _wm_with_test_channels()  # (v3) device + x channels を ensure 済
     state = {
         "world_model": wm,
         "pending": [{
@@ -60,7 +75,7 @@ def test_channel_mismatch_penalty_reduces_score():
 
 def test_channel_mismatch_match_no_penalty():
     print("== channel_mismatch: 一致で 1.0 (penalty なし) ==")
-    wm = init_world_model()
+    wm = _wm_with_test_channels()  # (v3) device channel を ensure 済
     state = {
         "world_model": wm,
         "pending": [{
@@ -170,7 +185,7 @@ def test_predicted_outcome_other_no_penalty():
 
 def test_multipliers_read_from_cfg():
     print("== 設定値: cfg override で multiplier 変動 ==")
-    wm = init_world_model()
+    wm = _wm_with_test_channels()  # (v3) device + x channels を ensure 済
     state = {
         "world_model": wm,
         "pending": [{"type": "pending", "observed_channel": "device",

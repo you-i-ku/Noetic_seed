@@ -850,9 +850,14 @@ def main():
                     "source_action_hint": "living_presence",
                     "observation_time": datetime.now().strftime("%H:%M"),
                 })
-                # WM 段階3: device channel の activity を記録
-                from core.world_model import observe_channel_activity
-                observe_channel_activity(state.get("world_model"), "device")
+                # WM 段階6-C v3: device channel を動的登録 (観察で生える)
+                # → 段階3: その channel の activity を記録
+                from core.world_model import ensure_channel, observe_channel_activity
+                from core.channel_registry import channel_from_device_input
+                _wm = state.get("world_model")
+                if _wm is not None:
+                    ensure_channel(_wm, **channel_from_device_input())
+                    observe_channel_activity(_wm, "device")
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
                 _chat_line = f"  [device_input] {chat_text[:80]}"

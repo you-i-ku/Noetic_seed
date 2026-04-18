@@ -1,10 +1,10 @@
-"""world_model.py テスト (段階2 ミニマル)。
+"""world_model.py テスト (段階2-3 + 段階6-C v3 動的 channel)。
 
 成功条件:
   - init_world_model() が WorldModel 構造を返す
   - ent_self が構造的スロットとして予約されている
-  - device/elyth/x/internal 4 channels が bootstrap されている
-  - 特に device.tools_out に output_display が含まれる (回帰ガード)
+  - **(v3) channels は空から始まる** (bootstrap 撤去)、観察で ensure_channel 経由で生える
+  - ensure_channel accessor が冪等かつ ensure_entity と対称
   - accessor が存在・不存在を正しく返す
   - render_for_prompt が空 WM と None を正しく扱う
 
@@ -35,6 +35,12 @@ from core.world_model import (
     ensure_entity,
     migrate_entity_fields,
     sync_from_memory_entities,
+    # 段階6-C v3
+    ensure_channel,
+)
+from core.channel_registry import (
+    channel_from_device_input,
+    channel_from_mcp_client,
 )
 
 
@@ -74,31 +80,13 @@ def test_init_includes_ent_self():
     ])
 
 
-def test_init_bootstrap_four_channels():
-    print("== init: device/elyth/x/internal 4 channels bootstrap ==")
+def test_init_channels_empty():
+    print("== (v3) init: channels は空から始まる (bootstrap 撤去、観察で生える) ==")
     wm = init_world_model()
     ch = wm["channels"]
     return all([
-        _assert("device" in ch, "device"),
-        _assert("elyth" in ch, "elyth"),
-        _assert("x" in ch, "x"),
-        _assert("internal" in ch, "internal"),
-        _assert(ch["device"].get("type") == "direct", "device.type=direct"),
-        _assert(ch["elyth"].get("type") == "social", "elyth.type=social"),
-        _assert(ch["x"].get("type") == "social", "x.type=social"),
-        _assert(ch["internal"].get("type") == "self", "internal.type=self"),
-    ])
-
-
-def test_device_channel_tools_out_includes_output_display():
-    print("== init: device.tools_out に output_display 含む (回帰ガード) ==")
-    wm = init_world_model()
-    device = wm["channels"]["device"]
-    return all([
-        _assert("output_display" in device.get("tools_out", []),
-                "output_display 含む"),
-        _assert("[device_input]" in device.get("tools_in", []),
-                "[device_input] が tools_in"),
+        _assert(isinstance(ch, dict), "channels dict"),
+        _assert(len(ch) == 0, f"channels 空 (actual keys: {list(ch.keys())})"),
     ])
 
 
@@ -137,30 +125,32 @@ def test_get_entity_missing():
 
 
 def test_get_channel_existing():
-    print("== get_channel: device を取得 ==")
+    print("== get_channel: ensure_channel 後に device を取得 ==")
     wm = init_world_model()
+    ensure_channel(wm, **channel_from_device_input())
     ch = get_channel(wm, "device")
     return _assert(ch is not None and ch.get("id") == "device",
-                   "device 取得")
+                   "device 取得 (ensure_channel 後)")
 
 
 def test_get_channel_missing():
-    print("== get_channel: 存在しない id で None ==")
+    print("== get_channel: 存在しない id で None (起動直後は device も未登録) ==")
     wm = init_world_model()
     return all([
+        _assert(get_channel(wm, "device") is None, "device 起動直後は未登録"),
         _assert(get_channel(wm, "nonexistent") is None, "不存在で None"),
         _assert(get_channel(None, "device") is None, "wm=None で None"),
     ])
 
 
 def test_list_entities_and_channels():
-    print("== list_entities / list_channels: 全件返却 ==")
+    print("== list_entities / list_channels: 全件返却 (起動直後 channels 空) ==")
     wm = init_world_model()
     ents = list_entities(wm)
     chs = list_channels(wm)
     return all([
         _assert(len(ents) == 1, "entity 1 件 (ent_self)"),
-        _assert(len(chs) == 4, "channel 4 件"),
+        _assert(len(chs) == 0, f"channel 0 件 (v3 bootstrap 撤去) actual: {len(chs)}"),
         _assert(list_entities(None) == [], "None で空リスト"),
         _assert(list_channels(None) == [], "None で空リスト"),
     ])
@@ -176,16 +166,26 @@ def test_render_with_none():
 
 
 def test_render_empty_facts():
-    print("== render: facts 空 → '(まだ観測されていない)' 表示 ==")
+    print("== render: facts 空 → '(まだ観測されていない)' 表示 (v3: channels も空) ==")
     wm = init_world_model()
     s = render_for_prompt(wm)
     return all([
         _assert("## 世界モデル" in s, "セクション heading"),
-        _assert("### チャネル" in s, "チャネル heading"),
-        _assert("device (direct)" in s, "device 行"),
-        _assert("elyth (social)" in s, "elyth 行"),
+        # (v3) channels 空なので「### チャネル」heading は出ない
+        _assert("### チャネル" not in s, "channels 空のためチャネル heading 省略"),
         _assert("### 観測された存在" in s, "存在 heading"),
         _assert("まだ観測されていない" in s, "未観測メッセージ"),
+    ])
+
+
+def test_render_after_ensure_channel():
+    print("== (v3) render: ensure_channel 後にチャネルセクション出現 ==")
+    wm = init_world_model()
+    ensure_channel(wm, **channel_from_device_input())
+    s = render_for_prompt(wm)
+    return all([
+        _assert("### チャネル" in s, "チャネル heading 出現"),
+        _assert("device (direct)" in s, "device 行"),
     ])
 
 
@@ -318,8 +318,9 @@ def test_add_or_update_fact_differing_value():
 # ============================================================
 
 def test_observe_channel_activity():
-    print("== observe_channel_activity: last_activity_at + count 更新 ==")
+    print("== observe_channel_activity: ensure_channel 後に count 更新 ==")
     wm = init_world_model()
+    ensure_channel(wm, **channel_from_device_input())
     observe_channel_activity(wm, "device")
     observe_channel_activity(wm, "device")
     dev = wm["channels"]["device"]
@@ -333,7 +334,9 @@ def test_observe_channel_nonexistent_silent():
     print("== observe_channel_activity: 不明 channel で silent (エラーなし) ==")
     wm = init_world_model()
     try:
+        # (v3) 起動直後は device も未登録、silent skip される
         observe_channel_activity(wm, "nonexistent_channel")
+        observe_channel_activity(wm, "device")  # 未 ensure なので skip
         observe_channel_activity(None, "device")
         return _assert(True, "例外なく終了")
     except Exception as e:
@@ -341,16 +344,20 @@ def test_observe_channel_nonexistent_silent():
 
 
 def test_get_tool_channel():
-    print("== get_tool_channel: ツール → channel 逆引き ==")
+    print("== get_tool_channel: ensure_channel 後に逆引き成立 ==")
     wm = init_world_model()
+    # (v3) 起動直後は channel 空、逆引きは全部 None
+    empty_result = get_tool_channel(wm, "output_display")
+    # device channel を ensure してから逆引き
+    ensure_channel(wm, **channel_from_device_input())
     return all([
+        _assert(empty_result is None,
+                "起動直後は output_display → None (channel 未登録)"),
         _assert(get_tool_channel(wm, "output_display") == "device",
-                "output_display → device"),
-        _assert(get_tool_channel(wm, "elyth_post") == "elyth",
-                "elyth_post → elyth"),
-        _assert(get_tool_channel(wm, "x_reply") == "x",
-                "x_reply → x"),
-        _assert(get_tool_channel(wm, "read_file") is None,
+                "ensure 後 output_display → device"),
+        _assert(get_tool_channel(wm, "[device_input]") == "device",
+                "ensure 後 [device_input] → device"),
+        _assert(get_tool_channel(wm, "unknown_tool") is None,
                 "tool なし → None"),
         _assert(get_tool_channel(None, "output_display") is None,
                 "wm=None → None"),
@@ -396,6 +403,60 @@ def test_migrate_entity_fields_idempotent():
         _assert(ent["aliases"] == ["a"], "aliases 既存保持"),
         _assert(ent["channels"] == [], "channels 追加"),
         _assert(ent["last_seen"] is None, "last_seen 追加"),
+    ])
+
+
+# ============================================================
+# 段階6-C v3: ensure_channel (entity と対称な動的 channel 登録)
+# ============================================================
+
+def test_ensure_channel_creates_new():
+    print("== (v3) ensure_channel: 未存在 id で新規作成、channels 登録、last_updated 更新 ==")
+    wm = init_world_model()
+    before = wm["last_updated"]
+    # ちょっと待つ代わりに last_updated を過去値に書き換えて検出可能にする
+    wm["last_updated"] = "2000-01-01 00:00:00"
+    ch = ensure_channel(wm, id="claude", type="social",
+                        tools_in=["[claude_input]"],
+                        tools_out=["output_display"])
+    return all([
+        _assert(ch["id"] == "claude", "返却 id=claude"),
+        _assert(ch["type"] == "social", "type=social"),
+        _assert(ch["tools_in"] == ["[claude_input]"], "tools_in"),
+        _assert(ch["tools_out"] == ["output_display"], "tools_out"),
+        _assert("claude" in wm["channels"], "wm.channels に登録"),
+        _assert(wm["last_updated"] != "2000-01-01 00:00:00",
+                "last_updated 更新"),
+    ])
+
+
+def test_ensure_channel_idempotent():
+    print("== (v3) ensure_channel: 既存 id で 2 回目は既存を返却、重複作成なし ==")
+    wm = init_world_model()
+    ch1 = ensure_channel(wm, **channel_from_device_input())
+    # 2 回目は spec を変えても既存を返す (上書きしない、ensure_entity と対称)
+    ch2 = ensure_channel(wm, id="device", type="social",
+                         tools_in=["something_else"], tools_out=[])
+    return all([
+        _assert(ch1 is ch2, "同一インスタンス返却"),
+        _assert(ch2["type"] == "direct", "既存の type 維持 (上書きしない)"),
+        _assert("output_display" in ch2["tools_out"], "既存の tools_out 維持"),
+        _assert(len(wm["channels"]) == 1, "channels に 1 件のみ"),
+    ])
+
+
+def test_ensure_channel_entity_symmetry():
+    print("== (v3) ensure_channel: ensure_entity と対称な動作 ==")
+    wm = init_world_model()
+    # ensure_entity は既存 ent_self を返す (上書きしない)
+    ent = ensure_entity(wm, "ent_self", "something_else")
+    # ensure_channel も同じ挙動で、2 回呼んでも新規作成しない
+    ch_a = ensure_channel(wm, id="test_ch", type="direct")
+    ch_b = ensure_channel(wm, id="test_ch", type="social")
+    return all([
+        _assert(ent["name"] == "self", "ensure_entity: name 上書きされない"),
+        _assert(ch_a is ch_b, "ensure_channel: 同一インスタンス"),
+        _assert(ch_b["type"] == "direct", "ensure_channel: 既存 type 維持"),
     ])
 
 
@@ -553,16 +614,16 @@ if __name__ == "__main__":
         # 段階2
         ("init: トップレベル構造", test_init_world_model_shape),
         ("init: ent_self 予約", test_init_includes_ent_self),
-        ("init: 4 channels bootstrap", test_init_bootstrap_four_channels),
-        ("init: device.tools_out 回帰ガード", test_device_channel_tools_out_includes_output_display),
+        ("(v3) init: channels 空", test_init_channels_empty),
         ("init: 冪等", test_init_idempotent),
         ("get_entity: 存在", test_get_entity_existing),
         ("get_entity: 不存在", test_get_entity_missing),
-        ("get_channel: 存在", test_get_channel_existing),
-        ("get_channel: 不存在", test_get_channel_missing),
+        ("get_channel: ensure 後に存在", test_get_channel_existing),
+        ("get_channel: 起動直後 device も None", test_get_channel_missing),
         ("list_entities/channels", test_list_entities_and_channels),
         ("render: None", test_render_with_none),
-        ("render: 空 facts", test_render_empty_facts),
+        ("render: 空 facts (channels も空)", test_render_empty_facts),
+        ("(v3) render: ensure 後に channel 出現", test_render_after_ensure_channel),
         ("render: facts 入り", test_render_with_facts),
         # 段階3: Fact schema + β+
         ("make_fact: 構造", test_make_fact_structure),
@@ -581,6 +642,10 @@ if __name__ == "__main__":
         ("ensure_entity: 新規作成", test_ensure_entity_creates),
         ("ensure_entity: 既存返却", test_ensure_entity_returns_existing),
         ("migrate_entity_fields: 冪等", test_migrate_entity_fields_idempotent),
+        # 段階6-C v3: ensure_channel
+        ("(v3) ensure_channel: 新規作成", test_ensure_channel_creates_new),
+        ("(v3) ensure_channel: 冪等", test_ensure_channel_idempotent),
+        ("(v3) ensure_channel: entity と対称", test_ensure_channel_entity_symmetry),
         # 段階3: C-gradual
         ("sync: 新規作成", test_sync_from_memory_entities_creates_new),
         ("sync: description fact", test_sync_appends_description_fact),
