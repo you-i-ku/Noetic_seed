@@ -238,10 +238,12 @@ def main():
 
     # ToolRegistry: claw-code 50 tool + noetic stub 5 個
     _rt_registry = ToolRegistry()
+    # 登録順は overwrite 順: claw 仮配置 → bridge で legacy 上書き
+    # (read_file/write_file の secrets guard 保護) → stub の厳密 schema で
+    # 最終上書き (output_display 等 5 個)
     register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
-    register_noetic_stubs(_rt_registry, TOOLS)
-    # H-2 A: legacy TOOLS を bridge で全登録 (noetic_stubs / claw と名前衝突は skip)
     register_legacy_bridge(_rt_registry, TOOLS)
+    register_noetic_stubs(_rt_registry, TOOLS)
 
     # hook context (state_before snapshot, fire 毎に更新)
     _hook_ctx = {"state_before": {}}

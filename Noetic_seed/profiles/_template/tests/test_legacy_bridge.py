@@ -50,8 +50,8 @@ def test_bridge_registers_all_when_empty():
     ])
 
 
-def test_bridge_skips_existing_names():
-    print("== 既登録 name は skip される ==")
+def test_bridge_overwrites_existing_names():
+    print("== 既登録 name は上書きされる (legacy guard 優先) ==")
     reg = ToolRegistry()
     # claw 側が read_file を先に登録してると仮定
     reg.register(ToolSpec(
@@ -62,9 +62,9 @@ def test_bridge_skips_existing_names():
     ))
     n = register_legacy_bridge(reg, _fake_tools_dict())
     return all([
-        _assert(n == 8, f"登録数=8 (read_file skip 後) (実={n})"),
-        _assert(reg.get("read_file").handler({}) == "claw_read",
-                "claw handler が温存"),
+        _assert(n == 9, f"登録数=9 (overwrite、全件登録) (実={n})"),
+        _assert(reg.get("read_file").handler({}) == "read",
+                "legacy handler で上書き (secrets guard 保護)"),
     ])
 
 
@@ -142,7 +142,7 @@ def test_readonly_set_reasonable():
 if __name__ == "__main__":
     groups = [
         ("bridge: 空 registry 登録", test_bridge_registers_all_when_empty),
-        ("bridge: 既登録 skip", test_bridge_skips_existing_names),
+        ("bridge: 既登録 overwrite", test_bridge_overwrites_existing_names),
         ("bridge: skip_names パラメータ", test_bridge_skip_names_param),
         ("bridge: permission 判定", test_bridge_permissions),
         ("bridge: handler passthrough", test_bridge_handler_passthrough),

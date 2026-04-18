@@ -10,13 +10,24 @@ legacy tool も ConversationRuntime 経由で LLM② から呼出可能になる
 
 ### 動作
 
-- 全 legacy TOOLS エントリを走査
-- registry.has(name) が True の場合 (claw-code / noetic_stub が先に登録済)
-  は skip。claw / stub 側を尊重する
-- skip_names で追加除外可能
+- 全 legacy TOOLS エントリを走査し、ToolSpec 化して registry に登録
+- registry に既登録の name は **上書き** (overwrite)。legacy 側のセキュリティ
+  guard (read_file の sandbox/secrets/ ガード、write_file の書込先制限等) を
+  保つため、claw 同名 tool があっても legacy が勝つ
+- skip_names で明示除外可能 (noetic_stub 等、bridge より後で登録したい場合に使用)
 - handler は tools_dict[name]["func"] 呼出の単純な passthrough
 - input_schema は承認 3 層 + additionalProperties=True の緩い形
   (H-2 C.4 で native ToolSpec に昇格時に厳密化される)
+
+### 登録順序 (main.py)
+
+```
+register_claw_tools(registry, ...)      # 1. claw 50 を配置
+register_legacy_bridge(registry, TOOLS) # 2. legacy 40 で上書き
+                                         #    (read_file/write_file は legacy の
+                                         #     secrets guard 版が勝つ)
+register_noetic_stubs(registry, TOOLS)  # 3. stub 5 の厳密 schema で最終上書き
+```
 
 ### Phase 5 方針
 
@@ -80,13 +91,13 @@ def register_legacy_bridge(
 ) -> int:
     """legacy TOOLS dict の全エントリを ToolSpec で passthrough 登録する。
 
-    既に同名が registry に存在する場合 (claw-code / noetic_stub が先に登録済)
-    は skip する。skip_names で追加除外可能。
+    既登録 name は上書きする (overwrite)。legacy のセキュリティガードを保つため
+    claw 同名 tool を上書きする設計。明示的に除外したい場合は skip_names で指定。
 
     Args:
         registry: 登録先 ToolRegistry
         tools_dict: legacy TOOLS dict ({name: {"desc": str, "func": callable}})
-        skip_names: 除外する tool 名の set
+        skip_names: 除外する tool 名の set (上書き対象外にしたい name)
 
     Returns:
         実際に登録した tool 数 (skip した数は含まない)。
@@ -95,8 +106,6 @@ def register_legacy_bridge(
     count = 0
     for name, meta in tools_dict.items():
         if name in skip_names:
-            continue
-        if registry.has(name):
             continue
         perm = (
             PermissionMode.READ_ONLY
