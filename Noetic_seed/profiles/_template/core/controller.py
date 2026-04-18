@@ -1,10 +1,14 @@
 """Controller（制御層）+ controller_select + intent-conditioned scoring"""
 import re
 import random
-from core.config import SANDBOX_TOOLS_DIR
+from core.config import SANDBOX_TOOLS_DIR, WORLD_MODEL_CFG
 from core.state import load_pref
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
 from core.eval import predict_result_novelty
+from core.predictor import get_predictor
+
+# 段階5: Predictor インスタンス (WM 設定に従って初期化、モジュールシングルトン)
+_PREDICTOR = get_predictor(WORLD_MODEL_CFG.get("predictor_mode", "light"))
 
 
 def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tools: dict, dangerous_patterns: list, run_ai_tool_fn) -> dict:
@@ -211,6 +215,58 @@ def _pending_priority_boost(state: dict, candidate: dict) -> float:
     return 1.0 + min(2.0, max_pri / 6.0)
 
 
+# ============================================================
+# 段階5: channel_mismatch + predicted_outcome ペナルティ
+# (STAGE5_IMPLEMENTATION_PLAN.md §4)
+# ============================================================
+
+def _channel_mismatch_multiplier(candidate: dict, state: dict, cfg: dict) -> float:
+    """候補 tool の channel が pending の channel と一致しないなら
+    multiplier (<1.0) を返す。internal tool (channel=None) は影響なし (1.0)。
+    pending が channel を持たなければ 1.0。
+    副作用: 減点時に candidate["penalties"] に理由を追記。
+    """
+    # 循環 import 回避 (world_model は controller を import する経路がないため
+    # 実害はないが、他の controller 拡張との対称性のため関数内 import)
+    from core.world_model import get_tool_channel
+
+    wm = state.get("world_model")
+    tool_name = candidate.get("tool", "")
+    tool_channel = get_tool_channel(wm, tool_name)
+    if tool_channel is None:
+        return 1.0
+    pending_channels = set()
+    for p in state.get("pending", []):
+        if p.get("type") != "pending":
+            continue
+        if p.get("observed_content") is not None:
+            continue
+        for field in ("observed_channel", "expected_channel"):
+            v = p.get(field)
+            if v:
+                pending_channels.add(v)
+    if not pending_channels or tool_channel in pending_channels:
+        return 1.0
+    mult = float(cfg.get("channel_mismatch_multiplier", 0.5))
+    candidate.setdefault("penalties", []).append(
+        f"channel_mismatch: {tool_channel} not in {sorted(pending_channels)}"
+    )
+    return mult
+
+
+def _predicted_outcome_multiplier(prediction: dict, candidate: dict,
+                                  cfg: dict) -> float:
+    """predictor の予測が error / no_response なら multiplier (<1.0) を返す。
+    副作用: 減点時に candidate["penalties"] に理由を追記。
+    """
+    cat = prediction.get("category") if isinstance(prediction, dict) else None
+    if cat in ("error", "no_response"):
+        mult = float(cfg.get("predicted_error_multiplier", 0.5))
+        candidate.setdefault("penalties", []).append(f"predicted_{cat}")
+        return mult
+    return 1.0
+
+
 def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
     """D-4設計 + intent-conditioned scoring + entropy認知品質 + UPS v2 priority"""
     energy = state.get("energy", 50) / 100.0
@@ -233,6 +289,12 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         w *= max(0.05, novelty)
         # UPS v2 priority boost: 未消化 pending を解消する候補を優先
         w *= _pending_priority_boost(state, c)
+        # 段階5: channel_mismatch 乗算 (PLAN §4-1)
+        w *= _channel_mismatch_multiplier(c, state, WORLD_MODEL_CFG)
+        # 段階5: predicted_outcome ペナルティ (PLAN §4-2)
+        prediction = _PREDICTOR.predict(c, state, state.get("world_model"))
+        c["predicted_outcome"] = prediction
+        w *= _predicted_outcome_multiplier(prediction, c, WORLD_MODEL_CFG)
         if novelty < 0.5:
             try:
                 from core.config import RESOLUTION_LOG
