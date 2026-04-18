@@ -81,6 +81,32 @@ def memory_forget(memory_id: str) -> str:
     return f"エラー: {memory_id} が見つかりません"
 
 
+def list_records(network: str, limit: int = 20) -> list:
+    """指定ネットワークの jsonl を新しい順に読んで直近 limit 件を返す。
+    WM の C-gradual 同期 (段階3) 等、検索ではなく全件走査系の消費者向け。
+    """
+    if network not in _VALID_NETWORKS:
+        return []
+    fpath = _network_file(network)
+    if not fpath.exists():
+        return []
+    try:
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    records = []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except Exception:
+            continue
+        if len(records) >= limit:
+            break
+    return records
+
+
 def memory_network_search(query: str, networks: list = None, limit: int = 5) -> list:
     """Entity/Opinionネットワークをベクトル検索。"""
     if not networks:

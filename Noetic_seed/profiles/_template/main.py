@@ -680,6 +680,13 @@ def main():
                         fw.append(_p)
                     save_state(state)
 
+            # WM 段階3: ツールが属する channel の activity を記録
+            # internal な自作 tool (どの channel にも属さない) は silent skip
+            from core.world_model import get_tool_channel, observe_channel_activity
+            _tool_ch = get_tool_channel(state.get("world_model"), rec.tool_name)
+            if _tool_ch:
+                observe_channel_activity(state.get("world_model"), _tool_ch)
+
         if not all_tool_names:
             return None
 
@@ -843,6 +850,9 @@ def main():
                     "source_action_hint": "living_presence",
                     "observation_time": datetime.now().strftime("%H:%M"),
                 })
+                # WM 段階3: device channel の activity を記録
+                from core.world_model import observe_channel_activity
+                observe_channel_activity(state.get("world_model"), "device")
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
                 _chat_line = f"  [device_input] {chat_text[:80]}"
