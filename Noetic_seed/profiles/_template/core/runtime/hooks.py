@@ -367,3 +367,122 @@ def make_post_tool_use_failure_logger(
         ])
 
     return _handler
+
+
+# ============================================================
+# Noetic 固有 factory: ファイルアクセスガード (H-2 C.4 Session A)
+# ============================================================
+# 背景: H-2 で read_file / write_file / list_files を claw ネイティブ
+# (file_ops.read_file / write_file / glob_search) に切替える際、legacy
+# 版にあった Noetic 固有のセキュリティガード (secrets.json / sandbox/secrets/
+# の保護、sandbox/ 外書込禁止) を PreToolUse hook で再現する。
+#
+# 将来: memory/project_unified_file_ops_future.md の Phase 5 統合時に
+# permission ルール (arg pattern match) 拡張と合わせて settings 化可能。
+# ============================================================
+
+
+def make_file_access_guard(
+    workspace_root,
+    *,
+    sandbox_dir_name: str = "sandbox",
+    secrets_subdir: str = "secrets",
+    secrets_json_name: str = "secrets.json",
+    guarded_write_tools: tuple = ("write_file", "edit_file"),
+    guarded_read_tools: tuple = ("read_file", "edit_file", "glob_search", "grep_search"),
+    require_write_in_sandbox: bool = True,
+) -> PreHandler:
+    """ファイル系 tool のアクセスガード PreHandler を生成。
+
+    判定:
+      1. path が `<workspace_root>/<sandbox_dir_name>/<secrets_subdir>/` 以下
+         → read/write 問わず DENY (secret_read / secret_write 経由に誘導)
+      2. path が `<workspace_root>/<secrets_json_name>` と一致
+         → read/write 問わず DENY (auth_profile_info に誘導)
+      3. tool が guarded_write_tools に含まれ、require_write_in_sandbox=True
+         かつ path が sandbox/ 以下でない → DENY (sandbox 外書込禁止)
+
+    path の取得: tool_input の "path" フィールド (read_file/write_file/
+    edit_file)、または "pattern"/"query" (glob_search/grep_search)。
+
+    Args:
+        workspace_root: プロファイルの workspace root (pathlib.Path)
+        sandbox_dir_name: sandbox ディレクトリ名 (default "sandbox")
+        secrets_subdir: secrets サブディレクトリ名 (default "secrets")
+        secrets_json_name: 保護対象 JSON ファイル名 (default "secrets.json")
+        guarded_write_tools: 書込系 tool 名 tuple
+        guarded_read_tools: 読取系 tool 名 tuple
+        require_write_in_sandbox: True で write_file/edit_file の対象を
+            sandbox/ 以下に限定
+
+    Returns:
+        PreHandler (tool_name, tool_input) → HookRunResult
+    """
+    from pathlib import Path
+
+    root = Path(workspace_root).resolve()
+    secrets_dir = (root / sandbox_dir_name / secrets_subdir).resolve()
+    sandbox_root = (root / sandbox_dir_name).resolve()
+    secrets_json = (root / secrets_json_name).resolve()
+
+    def _resolve(path_str: str):
+        if not path_str:
+            return None
+        try:
+            return (root / path_str).resolve()
+        except Exception:
+            return None
+
+    def _is_inside(target, base) -> bool:
+        try:
+            target.relative_to(base)
+            return True
+        except ValueError:
+            return False
+
+    def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        if tool_name not in set(guarded_read_tools) | set(guarded_write_tools):
+            return HookRunResult.allow()
+
+        # tool 別に path / pattern 引数を取得
+        if tool_name in ("glob_search", "grep_search"):
+            path_arg = str(tool_input.get("path") or tool_input.get("pattern") or "").strip()
+        else:
+            path_arg = str(tool_input.get("path") or "").strip()
+
+        if not path_arg:
+            return HookRunResult.allow()
+
+        target = _resolve(path_arg)
+        if target is None:
+            return HookRunResult.allow()  # claw 側の boundary check に委譲
+
+        is_write = tool_name in guarded_write_tools
+
+        # 1. secrets.json 保護
+        if target == secrets_json:
+            return HookRunResult.deny([
+                f"[file_guard] secrets.json は直接アクセスできません。"
+                f"auth_profile_info を使ってください (tool={tool_name})"
+            ])
+
+        # 2. sandbox/secrets/ 保護
+        if _is_inside(target, secrets_dir):
+            redirect = "secret_write" if is_write else "secret_read"
+            return HookRunResult.deny([
+                f"[file_guard] sandbox/{secrets_subdir}/ には直接アクセスできません。"
+                f"{redirect} を使ってください (tool={tool_name})"
+            ])
+
+        # 3. 書込系 tool は sandbox/ 以下限定 (self_modify が legacy 経由で
+        #    main.py/pref.json を更新するのは別経路なので影響なし)
+        if is_write and require_write_in_sandbox:
+            if not _is_inside(target, sandbox_root):
+                return HookRunResult.deny([
+                    f"[file_guard] {tool_name} は sandbox/ 以下にのみ書き込めます "
+                    f"(path={path_arg})"
+                ])
+
+        return HookRunResult.allow()
+
+    return _check

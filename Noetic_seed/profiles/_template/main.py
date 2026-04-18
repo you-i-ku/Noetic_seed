@@ -83,6 +83,7 @@ from core.runtime.registry import ToolRegistry
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import (
     HookRunner,
+    make_file_access_guard,
     make_pre_tool_use_approval_check,
     make_post_tool_use_evaluation,
     make_post_tool_use_failure_logger,
@@ -248,9 +249,13 @@ def main():
     # hook context (state_before snapshot, fire 毎に更新)
     _hook_ctx = {"state_before": {}}
 
-    # hook runner 初期化 (approval 3 層 + post eval + failure)
+    # hook runner 初期化 (file guard + approval 3 層 + post eval + failure)
     _hook_runner = HookRunner()
     _approval_cfg = llm_cfg.get("approval", {})
+    # H-2 C.4 Session A: claw ネイティブ read_file/write_file/edit_file/
+    # glob_search/grep_search に Noetic 固有の secrets guard + sandbox 外書込禁止
+    # を Pre-hook で被せる (legacy _read_file/_write_file/_list_files の代替)
+    _hook_runner.register_pre(make_file_access_guard(BASE_DIR))
     _hook_runner.register_pre(make_pre_tool_use_approval_check(
         missing_field_policy=_approval_cfg.get("missing_field_policy", "deny"),
     ))

@@ -1,5 +1,5 @@
 """ツール定義・段階解放テーブル"""
-from tools.builtin import _list_files, _read_file, _write_file, _update_self, _wait_or_dismiss, _view_image, _listen_audio
+from tools.builtin import _update_self, _wait_or_dismiss, _view_image, _listen_audio
 from tools.x_tools import _x_timeline, _x_search, _x_get_notifications, _x_post, _x_reply, _x_quote, _x_like
 from tools.elyth_tools import _elyth_post, _elyth_reply, _elyth_like, _elyth_follow, _elyth_info, _elyth_get, _elyth_mark_read
 from tools.memory_tool import _search_memory, _tool_memory_store, _tool_memory_update, _tool_memory_forget, _tool_search_memory
@@ -11,9 +11,6 @@ from tools.secret_tools import secret_read, secret_write
 from tools.auth_tools import auth_profile_info
 
 TOOLS = {
-    "list_files":   {"desc": "ディレクトリの一覧を取得。引数: path=相対パス", "func": lambda args: _list_files(args.get("path", "."))},
-    "read_file":    {"desc": "ファイルの内容を読み取る。引数: path=ファイルパス [offset=行番号 limit=行数]", "func": lambda args: _read_file(args.get("path", ""), int(args.get("offset", "0") or "0"), int(args.get("limit", "0") or "0") or None)},
-    "write_file":   {"desc": "ファイルに書き込む（sandbox/以下のみ）。引数: path=ファイルパス content=内容", "func": lambda args: _write_file(args.get("path", ""), args.get("content", ""))},
     "update_self":  {"desc": "自己モデルを更新する。引数: key=キー名 value=値", "func": lambda args: _update_self(args.get("key", ""), args.get("value", ""))},
     "wait":         {"desc": "待機。dismiss=pending_idで未対応事項を明示的に却下できる", "func": _wait_or_dismiss},
     "x_timeline":   {"desc": "Xのタイムライン取得。引数: [count=件数] [tab=following/recommend デフォルトfollowing]", "func": _x_timeline},
@@ -52,15 +49,21 @@ TOOLS = {
 }
 
 # === ツール段階解放テーブル ===
-# H-2 C.1 (2026-04-18): web_search/fetch_url は claw-code の WebSearch/WebFetch に
-# 直接吸収。level 2 以上で claw 版を expose する。
-_LV3_TOOLS = set(TOOLS.keys()) - {"create_tool", "exec_code", "self_modify"} | {"WebSearch", "WebFetch"}
+# H-2 C.1 (2026-04-18): web_search/fetch_url は claw の WebSearch/WebFetch に移行。
+# H-2 C.4 Session A (2026-04-18): list_files/read_file/write_file は claw ネイティブ
+# (glob_search / read_file / write_file) に移行。Noetic ガードは file_access_guard
+# hook で再現。legacy handler は bridge から削除。
+_CLAW_FILE_OPS = {"read_file", "write_file", "glob_search", "WebSearch", "WebFetch"}
+_LV3_TOOLS = (
+    set(TOOLS.keys()) - {"create_tool", "exec_code", "self_modify"}
+    | _CLAW_FILE_OPS
+)
 LEVEL_TOOLS = {
-    0: {"list_files", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio"},
-    1: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio"},
-    2: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio"},
+    0: {"glob_search", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio"},
+    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio"},
+    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio"},
     3: _LV3_TOOLS,
     4: _LV3_TOOLS | {"create_tool"},
-    5: set(TOOLS.keys()) - {"self_modify"} | {"WebSearch", "WebFetch"},
-    6: set(TOOLS.keys()) | {"WebSearch", "WebFetch"},
+    5: set(TOOLS.keys()) - {"self_modify"} | _CLAW_FILE_OPS,
+    6: set(TOOLS.keys()) | _CLAW_FILE_OPS,
 }
