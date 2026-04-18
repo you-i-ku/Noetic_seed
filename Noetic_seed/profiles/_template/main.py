@@ -83,13 +83,14 @@ from core.runtime.registry import ToolRegistry
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import (
     HookRunner,
+    make_bash_validation_hook,
     make_file_access_guard,
     make_pre_tool_use_approval_check,
     make_post_tool_use_evaluation,
     make_post_tool_use_failure_logger,
 )
 from core.runtime.legacy_bridge import register_legacy_bridge
-from core.runtime.tools import ensure_approval_props, ensure_noetic_file_hints, register_all as register_claw_tools
+from core.runtime.tools import ensure_approval_props, ensure_noetic_bash_hint, ensure_noetic_file_hints, register_all as register_claw_tools
 from core.runtime.tools.noetic_ext import NOETIC_TOOL_NAMES, register_noetic_tools
 from core.runtime.permissions import PermissionEnforcer, PermissionMode
 from core.approval_callback import make_approval_callback
@@ -260,6 +261,11 @@ def main():
     if _file_hints_injected:
         print(f"  [file_hints] Noetic 制約 hint 注入: {_file_hints_injected} tool")
 
+    # bash tool の description に Level-aware 制約 hint を追記。
+    _bash_hint_injected = ensure_noetic_bash_hint(_rt_registry)
+    if _bash_hint_injected:
+        print(f"  [bash_hint] Level-aware 制約 hint 注入: bash")
+
     # hook context (state_before snapshot, fire 毎に更新)
     _hook_ctx = {"state_before": {}}
 
@@ -270,6 +276,11 @@ def main():
     # glob_search/grep_search に Noetic 固有の secrets guard + sandbox 外書込禁止
     # を Pre-hook で被せる (legacy _read_file/_write_file/_list_files の代替)
     _hook_runner.register_pre(make_file_access_guard(BASE_DIR))
+    # bash は Level-aware validation で Level 0-2 では read-only 系のみ、
+    # 破壊的コマンドは Level 問わず自動拒否、WARN は承認画面に警告付き表示
+    _hook_runner.register_pre(make_bash_validation_hook(
+        state_getter=lambda: state,
+    ))
     _hook_runner.register_pre(make_pre_tool_use_approval_check(
         missing_field_policy=_approval_cfg.get("missing_field_policy", "deny"),
     ))

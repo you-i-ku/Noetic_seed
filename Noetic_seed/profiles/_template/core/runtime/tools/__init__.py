@@ -91,6 +91,41 @@ _NOETIC_FILE_HINTS = {
 }
 
 
+_NOETIC_BASH_HINT = (
+    "[Noetic 制約] Level-aware 安全性検査あり。"
+    "Level 0-2 は read-only モード (ls/cat/grep/find/git/head/tail/wc/echo/"
+    "pwd/whoami/date/env/stat/file/du/df/ps/uname 等の whitelist のみ)。"
+    "Level 3+ でフル bash 解放。"
+    "破壊的コマンド (rm -rf /, dd of=/dev/sd*, fork bomb, mkfs 等) は"
+    "Level 問わず常に自動拒否。"
+    "注意喚起コマンド (rm -rf, sudo, chmod 777, curl|bash, eval, --force push) は"
+    "承認画面に警告付きで表示。"
+)
+
+
+def ensure_noetic_bash_hint(registry: ToolRegistry) -> int:
+    """bash tool の description に Noetic 固有 Level-aware 制約 hint を追記。
+
+    claw 本家の bash description は実行方法のみ説明で、Noetic の
+    make_bash_validation_hook (hooks.py) が敷く段階的解放ルールを
+    LLM に知らせない。事前に制約を description で教えることで、
+    Level 0-2 で破壊系コマンド選択 → deny → 再試行のサイクル浪費を防ぐ。
+
+    idempotent: 既に "[Noetic 制約]" が含まれていれば skip。
+
+    Returns:
+        hint を注入した tool 数 (0 または 1)。
+    """
+    spec = registry.get("bash")
+    if spec is None:
+        return 0
+    current = spec.description or ""
+    if "[Noetic 制約]" in current:
+        return 0
+    spec.description = f"{current.rstrip()}\n\n{_NOETIC_BASH_HINT}"
+    return 1
+
+
 def ensure_noetic_file_hints(registry: ToolRegistry) -> int:
     """file 系 claw ネイティブ tool の description に Noetic 固有制約を追記。
 

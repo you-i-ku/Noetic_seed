@@ -59,11 +59,11 @@ _LV3_TOOLS = (
     | _CLAW_FILE_OPS
 )
 LEVEL_TOOLS = {
-    0: {"glob_search", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio"},
-    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio"},
-    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio"},
-    3: _LV3_TOOLS,
-    4: _LV3_TOOLS | {"create_tool"},
-    5: set(TOOLS.keys()) - {"self_modify"} | _CLAW_FILE_OPS,
-    6: set(TOOLS.keys()) | _CLAW_FILE_OPS,
+    0: {"glob_search", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio", "bash"},
+    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio", "bash"},
+    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio", "bash"},
+    3: _LV3_TOOLS | {"bash"},
+    4: _LV3_TOOLS | {"create_tool", "bash"},
+    5: set(TOOLS.keys()) - {"self_modify"} | _CLAW_FILE_OPS | {"bash"},
+    6: set(TOOLS.keys()) | _CLAW_FILE_OPS | {"bash"},
 }

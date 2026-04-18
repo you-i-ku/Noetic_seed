@@ -497,3 +497,70 @@ def make_file_access_guard(
         return HookRunResult.allow()
 
     return _check
+
+
+# ============================================================
+# Noetic 固有 factory: bash validation (Level-aware)
+# ============================================================
+# 背景: claw-code は bash を常時提供で「承認 + permission_enforcer で防御」する
+# 設計。Noetic は承認者 (iku 所有者) が bash に不慣れな可能性を踏まえ、
+# tool_level に応じた段階的解放を行う:
+#   - Level 0-2: read_only_mode=True (whitelist: ls/cat/grep/find/git 等 27 種)
+#   - Level 3+:  フル bash (ただし DENY パターンは常に自動拒否)
+# bash_validation.py の 3 層 (DENY / WARN / READ_ONLY_WHITELIST) を使用。
+# ============================================================
+
+
+def make_bash_validation_hook(state_getter) -> PreHandler:
+    """bash tool の Level-aware 安全性検査 PreHandler を生成。
+
+    tool_name == "bash" の時のみ作用。他 tool は passthrough。
+    - 破壊的コマンド (rm -rf /, dd of=/dev/sda, fork bomb 等) → 常に DENY
+    - tool_level < 3 では whitelist 以外も DENY (read-only モード)
+    - WARN パターン (rm -rf, sudo, chmod 777, curl|bash 等) は allow だが
+      承認者への messages に警告を含める
+
+    Args:
+        state_getter: state dict を返す callable。tool_level 判定に使う。
+
+    Returns:
+        PreHandler (tool_name, tool_input) → HookRunResult
+    """
+    from core.runtime.bash_validation import (
+        ValidationSeverity,
+        validate_bash,
+    )
+
+    def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        if tool_name != "bash":
+            return HookRunResult.allow()
+
+        command = str(tool_input.get("command") or "").strip()
+        if not command:
+            return HookRunResult.allow()  # claw 側の schema check に委譲
+
+        state = state_getter() or {}
+        tool_level = int(state.get("tool_level", 0))
+        read_only = tool_level < 3
+
+        result = validate_bash(command, read_only_mode=read_only)
+
+        if result.severity == ValidationSeverity.DENY:
+            reasons = "; ".join(result.reasons) if result.reasons else "unspecified"
+            return HookRunResult.deny([
+                f"[bash_validation] DENY: {reasons} "
+                f"(Level {tool_level}, read_only_mode={read_only})。"
+                f"Level 0-2 は whitelist 系コマンド (ls/cat/grep/find/git 等) のみ。"
+                f"Level 3 以降でフル bash 解放。"
+            ])
+
+        if result.severity == ValidationSeverity.WARN:
+            reasons = "; ".join(result.reasons) if result.reasons else ""
+            return HookRunResult(
+                denied=False,
+                messages=[f"[⚠ bash_validation] WARN: {reasons}"],
+            )
+
+        return HookRunResult.allow()
+
+    return _check
