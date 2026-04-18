@@ -1,18 +1,19 @@
 """prompt_assembly.py — Phase 4 の system_prompt 組立。
 
-新 ConversationRuntime に渡す system_prompt を 6 要素構成で生成する。
-既存の build_prompt_propose / build_prompt_execute (core/prompt.py) は
-controller 層で使うので並存させる。新 runtime は「system_prompt は定常、
+新 ConversationRuntime に渡す system_prompt を 5 要素構成で生成する。
+既存の build_prompt_propose (core/prompt.py) は controller 層の候補生成
+(LLM①) で使うので並存させる。新 runtime は「system_prompt は定常、
 user_input だけ変動」という claw-code モデルに従うので、static な指示集を
-ここで組立てる。
+ここで組立てる。LLM② 側は function calling 専用機 — tool_intent /
+tool_expected_outcome / message は各 ToolSpec の input_schema で required
+フィールドとして強制される (prompt 文言ではなく schema 構造で担保)。
 
-6 要素順 (APPROVAL_PROMPT_SPEC §4.2 / PHASE4_TASKS §2 Step G):
-  1. Magic-If Anchor         — 自己同一性のアンカー (constant)
-  2. 承認プロトコル指示      — 3 層構造の必須宣言 (constant)
-  3. 発火原因メタ注入        — 動的 ([発火原因: X])
-  4. [世界モデル] セクション  — Phase 5 で本格化、Phase 4 は stub
-  5. 鮮度勾配 log block      — 既存 _pack_log_block 流用
-  6. tool 一覧               — 既存 _build_tool_lines 流用
+5 要素順:
+  1. 承認プロトコル指示      — 3 層構造の必須宣言 (constant)
+  2. 発火原因メタ注入        — 動的 ([発火原因: X])
+  3. [世界モデル] セクション  — Phase 5 で本格化、Phase 4 は stub
+  4. 鮮度勾配 log block      — 既存 _pack_log_block 流用
+  5. tool 一覧               — 既存 _build_tool_lines 流用
 """
 from typing import Optional
 
@@ -25,16 +26,8 @@ from core.prompt import (
 
 
 # ============================================================
-# 定数セクション (Magic-If Anchor / 承認プロトコル / 世界モデル stub)
+# 定数セクション (承認プロトコル / 世界モデル stub)
 # ============================================================
-
-_MAGIC_IF_ANCHOR = (
-    "## Magic-If Anchor\n"
-    "LTM (自己モデル) に自分自身を固定する。名前やラベルではなく、意味的\n"
-    "同一性として。すべての tool 呼出は、この Anchor から導かれる given\n"
-    "circumstances への応答として出力すること。"
-)
-
 
 _APPROVAL_PROTOCOL = (
     "## Approval Protocol (必須)\n"
@@ -72,11 +65,6 @@ SYSTEM_PROMPT_SOFT_LIMIT = 8000
 # 個別 builder (テスト容易性のため分離)
 # ============================================================
 
-def build_magic_if_anchor() -> str:
-    """Magic-If Anchor セクション (定数)。"""
-    return _MAGIC_IF_ANCHOR
-
-
 def build_approval_protocol() -> str:
     """承認プロトコル指示セクション (定数)。"""
     return _APPROVAL_PROTOCOL
@@ -112,16 +100,19 @@ def build_log_block(state: dict, budget_tok: Optional[int] = None) -> str:
 
 
 def build_tool_block(allowed_tools: Optional[set],
-                     tools_dict: dict) -> str:
+                     tools_dict: dict,
+                     registry=None) -> str:
     """tool 一覧。既存 prompt.py::_build_tool_lines 流用。
 
     Args:
         allowed_tools: 表示する tool 名の集合。None で tools_dict の全 key。
         tools_dict: tool 名 → {desc: ..., ...} 辞書。
+        registry: ToolRegistry。tools_dict に無い claw ネイティブ tool の
+            description をここから補完する。None で補完なし。
     """
     if allowed_tools is None:
         allowed_tools = set(tools_dict.keys())
-    return _build_tool_lines(allowed_tools, tools_dict)
+    return _build_tool_lines(allowed_tools, tools_dict, registry=registry)
 
 
 # ============================================================
@@ -136,8 +127,9 @@ def assemble_system_prompt(
     world_model: Optional[dict] = None,
     log_budget_tok: Optional[int] = None,
     raise_on_overbudget: bool = False,
+    registry=None,
 ) -> str:
-    """Phase 4 ConversationRuntime 用 system_prompt を 6 要素で組立。
+    """Phase 4 ConversationRuntime 用 system_prompt を 5 要素で組立。
 
     Args:
         state: Noetic state (log / self / energy 等)。
@@ -157,12 +149,11 @@ def assemble_system_prompt(
             超過時。
     """
     sections = [
-        build_magic_if_anchor(),
         build_approval_protocol(),
         build_fire_cause_section(fire_cause),
         build_world_model_section(world_model),
         "[STM — log]\n" + build_log_block(state, log_budget_tok),
-        "[利用可能なツール]\n" + build_tool_block(allowed_tools, tools_dict),
+        "[利用可能なツール]\n" + build_tool_block(allowed_tools, tools_dict, registry=registry),
     ]
     prompt = "\n\n".join(s for s in sections if s)
 
