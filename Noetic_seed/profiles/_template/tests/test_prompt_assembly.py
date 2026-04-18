@@ -1,8 +1,8 @@
 """prompt_assembly.py テスト。
 
-PHASE4_TASKS §2 Step G の成功条件を網羅:
-  - 6 要素が順序良く含まれる
-  - Magic-If Anchor / 承認プロトコル指示 / 世界モデル stub が LLM に届く形
+成功条件:
+  - 5 要素が順序良く含まれる
+  - 承認プロトコル指示 / 世界モデル stub が LLM に届く形
   - 発火原因メタ注入が動的
   - prompt 予算超過で警告 or raise
   - 既存 _pack_log_block / _build_tool_lines が流用されている
@@ -22,7 +22,6 @@ from core.prompt_assembly import (
     build_approval_protocol,
     build_fire_cause_section,
     build_log_block,
-    build_magic_if_anchor,
     build_tool_block,
     build_world_model_section,
 )
@@ -55,17 +54,6 @@ def _sample_tools():
 # ============================================================
 # 個別 builder
 # ============================================================
-
-def test_magic_if_anchor_has_core_phrase():
-    print("== Magic-If Anchor: 自己同一性の核心文言を含む ==")
-    s = build_magic_if_anchor()
-    return all([
-        _assert("Magic-If Anchor" in s, "section heading"),
-        _assert("自己モデル" in s, "LTM 参照"),
-        _assert("意味的" in s, "意味的同一性"),
-        _assert("tool 呼出" in s, "tool 呼出の基盤"),
-    ])
-
 
 def test_approval_protocol_has_3_fields():
     print("== 承認プロトコル: 3 フィールド + 対等協力者 文言 ==")
@@ -138,12 +126,48 @@ def test_tool_block_filters_by_allowed():
     ])
 
 
+def test_tool_block_registry_fallback():
+    print("== tool block: tools_dict に無い tool を registry から補完 (B 案) ==")
+    from types import SimpleNamespace
+
+    class _MockReg:
+        def get(self, name):
+            specs = {
+                "glob_search": SimpleNamespace(
+                    description="ファイルパターン検索 (claw)"),
+                "WebSearch": SimpleNamespace(
+                    description="Web 検索 (claw)"),
+            }
+            return specs.get(name)
+
+    tools = _sample_tools()  # read_file, write_file, wait のみ
+    allowed = {"read_file", "glob_search", "WebSearch"}
+    s = build_tool_block(allowed, tools, registry=_MockReg())
+    return all([
+        _assert("read_file" in s, "TOOLS にある tool 表示継続"),
+        _assert("glob_search" in s, "registry から glob_search 補完"),
+        _assert("ファイルパターン検索 (claw)" in s, "claw description 取得"),
+        _assert("WebSearch" in s, "registry から WebSearch 補完"),
+    ])
+
+
+def test_tool_block_no_registry_still_works():
+    print("== tool block: registry=None で従来動作 (後方互換) ==")
+    tools = _sample_tools()
+    allowed = {"read_file", "glob_search"}
+    s = build_tool_block(allowed, tools, registry=None)
+    return all([
+        _assert("read_file" in s, "TOOLS 経由で read_file"),
+        _assert("glob_search" not in s, "registry なしなら glob_search 非表示"),
+    ])
+
+
 # ============================================================
 # 全体 assembly
 # ============================================================
 
-def test_assemble_contains_all_six_sections():
-    print("== assemble: 6 要素全部含む ==")
+def test_assemble_contains_all_five_sections():
+    print("== assemble: 5 要素全部含む ==")
     state = _fresh_state()
     state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
                      "intent": "x", "result": "y"}]
@@ -153,18 +177,17 @@ def test_assemble_contains_all_six_sections():
         fire_cause="threshold breach",
     )
     return all([
-        _assert("Magic-If Anchor" in prompt, "① Anchor"),
-        _assert("Approval Protocol" in prompt, "② 承認プロトコル"),
-        _assert("発火原因: threshold breach" in prompt, "③ 発火原因"),
-        _assert("世界モデル" in prompt, "④ 世界モデル stub"),
-        _assert("STM — log" in prompt, "⑤ log block heading"),
-        _assert("read_file" in prompt, "⑤ log 中身"),
-        _assert("利用可能なツール" in prompt, "⑥ tool 一覧 heading"),
+        _assert("Approval Protocol" in prompt, "① 承認プロトコル"),
+        _assert("発火原因: threshold breach" in prompt, "② 発火原因"),
+        _assert("世界モデル" in prompt, "③ 世界モデル stub"),
+        _assert("STM — log" in prompt, "④ log block heading"),
+        _assert("read_file" in prompt, "④ log 中身"),
+        _assert("利用可能なツール" in prompt, "⑤ tool 一覧 heading"),
     ])
 
 
 def test_assemble_section_order():
-    print("== assemble: 6 要素の順序が正しい ==")
+    print("== assemble: 5 要素の順序が正しい ==")
     state = _fresh_state()
     state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
                      "intent": "x", "result": "y"}]
@@ -172,15 +195,12 @@ def test_assemble_section_order():
         state=state, tools_dict=_sample_tools(),
         fire_cause="test cause",
     )
-    # 順序チェック (文字列中の位置比較)
-    i_anchor = prompt.find("Magic-If Anchor")
     i_approval = prompt.find("Approval Protocol")
     i_fire = prompt.find("発火原因")
     i_wm = prompt.find("世界モデル")
     i_log = prompt.find("STM — log")
     i_tools = prompt.find("利用可能なツール")
     return all([
-        _assert(i_anchor < i_approval, "Anchor < Approval"),
         _assert(i_approval < i_fire, "Approval < 発火原因"),
         _assert(i_fire < i_wm, "発火原因 < 世界モデル"),
         _assert(i_wm < i_log, "世界モデル < log"),
@@ -196,8 +216,21 @@ def test_assemble_fire_cause_omitted():
     )
     return all([
         _assert("発火原因" not in prompt, "発火原因なし"),
-        _assert("Magic-If Anchor" in prompt, "他 5 要素は残る"),
+        _assert("Approval Protocol" in prompt, "他 4 要素は残る"),
         _assert("利用可能なツール" in prompt, "tool 一覧残る"),
+    ])
+
+
+def test_assemble_no_magic_if():
+    print("== assemble: Magic-If 語彙が残っていない ==")
+    prompt = assemble_system_prompt(
+        state=_fresh_state(), tools_dict=_sample_tools(),
+        fire_cause="",
+    )
+    return all([
+        _assert("Magic-If" not in prompt, "Magic-If 言及なし"),
+        _assert("意味的同一性" not in prompt, "意味的同一性 言及なし"),
+        _assert("given circumstances" not in prompt, "given circumstances 言及なし"),
     ])
 
 
@@ -274,7 +307,6 @@ def test_assemble_allowed_tools_filter():
 
 if __name__ == "__main__":
     groups = [
-        ("Magic-If Anchor: 核心文言", test_magic_if_anchor_has_core_phrase),
         ("承認プロトコル: 3 層 + 対等", test_approval_protocol_has_3_fields),
         ("発火原因: 空なら空文字", test_fire_cause_section_empty),
         ("発火原因: 値で prefix 付与", test_fire_cause_section_with_value),
@@ -282,9 +314,12 @@ if __name__ == "__main__":
         ("log block: 空 OK", test_log_block_empty),
         ("log block: entries", test_log_block_with_entries),
         ("tool block: allowed_tools 絞込", test_tool_block_filters_by_allowed),
-        ("assemble: 6 要素含む", test_assemble_contains_all_six_sections),
+        ("tool block: registry fallback (B 案)", test_tool_block_registry_fallback),
+        ("tool block: registry なし後方互換", test_tool_block_no_registry_still_works),
+        ("assemble: 5 要素含む", test_assemble_contains_all_five_sections),
         ("assemble: 順序", test_assemble_section_order),
         ("assemble: fire_cause 省略", test_assemble_fire_cause_omitted),
+        ("assemble: Magic-If 痕跡なし", test_assemble_no_magic_if),
         ("assemble: 予算内", test_assemble_within_budget),
         ("assemble: 予算超過 raise", test_assemble_overbudget_raises),
         ("assemble: 予算超過 warn", test_assemble_overbudget_warns_no_raise),
