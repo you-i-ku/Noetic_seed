@@ -64,3 +64,101 @@ def register_all(
     plan.register(registry)
     skill.register(registry, skill_dirs)
     util.register(registry, workspace_root)
+
+
+_NOETIC_FILE_HINTS = {
+    "read_file": (
+        "[Noetic 制約] secrets.json と sandbox/secrets/ は直接読めません "
+        "(auth_profile_info / secret_read を使用)。"
+        "その他の workspace 配下は自由に読めます。"
+    ),
+    "write_file": (
+        "[Noetic 制約] 書込先は sandbox/ 以下のみ (例: sandbox/memo.md, "
+        "sandbox/identity/draft.md)。sandbox/secrets/ は secret_write を使用。"
+        "sandbox/ 外への書込はガードで拒否されます。"
+    ),
+    "edit_file": (
+        "[Noetic 制約] 編集対象は sandbox/ 以下のみ。"
+        "sandbox/secrets/ は secret_write を使用。"
+    ),
+    "glob_search": (
+        "[Noetic 制約] sandbox/secrets/ と secrets.json は検索対象から除外されます。"
+        "pattern は '**/*.py' のような glob を使用 (bash の ** とは挙動が違うので注意)。"
+    ),
+    "grep_search": (
+        "[Noetic 制約] sandbox/secrets/ と secrets.json は検索対象から除外されます。"
+    ),
+}
+
+
+def ensure_noetic_file_hints(registry: ToolRegistry) -> int:
+    """file 系 claw ネイティブ tool の description に Noetic 固有制約を追記。
+
+    claw 本家の description は claw-code の純粋 file_ops 仕様を説明するだけで、
+    Noetic の make_file_access_guard (hooks.py) が敷く追加制約
+    (sandbox/ 外書込禁止、secrets 保護) は LLM に知らされない。
+    LLM が sandbox/ 外への書込で deny を食らってから学習するより、
+    事前に description で制約を知らせる方がサイクル効率が良い。
+
+    claw 本家ソースには触らず、registry 登録後に ToolSpec.description を
+    mutate する後付け設計 (ensure_approval_props と同パターン)。
+    idempotent: 既に "[Noetic 制約]" が含まれていれば skip。
+
+    Returns:
+        hint を注入した tool 数。
+    """
+    count = 0
+    for name, hint in _NOETIC_FILE_HINTS.items():
+        spec = registry.get(name)
+        if spec is None:
+            continue
+        current = spec.description or ""
+        if "[Noetic 制約]" in current:
+            continue
+        spec.description = f"{current.rstrip()}\n\n{hint}"
+        count += 1
+    return count
+
+
+def ensure_approval_props(registry: ToolRegistry) -> int:
+    """Registry 全 tool の input_schema に承認 3 層を後付け注入する。
+
+    Noetic 固有の承認 3 層 (tool_intent / tool_expected_outcome / message)
+    は全 tool で required。claw 本家準拠の tool (file_ops/web/shell/task/...)
+    は元々 3 層を持たないため、この関数で registry 登録後に一括注入する。
+    noetic_ext / legacy_bridge は既に 3 層持ちなので no-op で skip。
+
+    claw 本家ソース (file_ops.py 等) には触らず、input_schema を実行時に
+    書き換えるので claw 準拠との分離を保つ。
+
+    Returns:
+        注入対象となった tool 数 (1 つでも field を追加した tool 数)。
+    """
+    from core.runtime.tools.noetic_ext.cognition import (
+        _APPROVAL_REQUIRED,
+        _approval_props,
+    )
+
+    props_def = _approval_props()
+    count = 0
+    for name in registry.all_names():
+        spec = registry.get(name)
+        if spec is None:
+            continue
+        schema = spec.input_schema
+        if not isinstance(schema, dict):
+            continue
+        props = schema.setdefault("properties", {})
+        required = schema.setdefault("required", [])
+        touched = False
+        for fld, defn in props_def.items():
+            if fld not in props:
+                props[fld] = defn
+                touched = True
+        for fld in _APPROVAL_REQUIRED:
+            if fld not in required:
+                required.append(fld)
+                touched = True
+        if touched:
+            count += 1
+    return count
