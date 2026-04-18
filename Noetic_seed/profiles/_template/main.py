@@ -828,15 +828,27 @@ def main():
             threshold = calc_dynamic_threshold(state, base_threshold)
 
             # 外部入力チェック（chatキューからstate.logに注入 + pressure加算 + archive）
+            # WM 段階6-C v3: channel spec を channel_registry から引き、spec["tools_in"][0] を tool tag に
             for chat_text in get_pending_chats():
                 _refresh_state()
+                from core.channel_registry import channel_from_device_input
+                from core.world_model import ensure_channel, observe_channel_activity
+                _spec = channel_from_device_input()
+                _channel_id = _spec["id"]
+                _input_tag = _spec["tools_in"][0] if _spec["tools_in"] else f"[{_channel_id}_input]"
+
+                _wm = state.get("world_model")
+                if _wm is not None:
+                    ensure_channel(_wm, **_spec)
+                    observe_channel_activity(_wm, _channel_id)
+
                 _ext_id = f"{state.get('session_id','?')}_ext{int(time.time()*1000)%100000}"
                 _ext_entry = {
                     "id": _ext_id,
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "tool": "[device_input]",
+                    "tool": _input_tag,
                     "type": "external",
-                    "channel": "device",
+                    "channel": _channel_id,
                     "result": chat_text,
                 }
                 _archive_entries([_ext_entry])
@@ -845,34 +857,26 @@ def main():
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
                 # Step E-3c: Session buffer に積む (fire 開始時に流される)
                 _pending_observations.append({
-                    "observed_channel": "device",
+                    "observed_channel": _channel_id,
                     "content": chat_text,
                     "source_action_hint": "living_presence",
                     "observation_time": datetime.now().strftime("%H:%M"),
                 })
-                # WM 段階6-C v3: device channel を動的登録 (観察で生える)
-                # → 段階3: その channel の activity を記録
-                from core.world_model import ensure_channel, observe_channel_activity
-                from core.channel_registry import channel_from_device_input
-                _wm = state.get("world_model")
-                if _wm is not None:
-                    ensure_channel(_wm, **channel_from_device_input())
-                    observe_channel_activity(_wm, "device")
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
-                _chat_line = f"  [device_input] {chat_text[:80]}"
+                _chat_line = f"  {_input_tag} {chat_text[:80]}"
                 print(_chat_line)
                 broadcast_log(_chat_line)
 
-            # WM 段階6-C v3: pending_claude_inputs.jsonl consume (MCP client 経由の外部入力)
+            # WM 段階6-C v3: pending_mcp_inputs.jsonl consume (MCP client 経由の外部入力)
             # MCP server が書き込み → main.py が cycle 頭で consume + unlink。
             # record に channel_spec があればそれを使う (server 判定済)、
             # なければ client_name から channel_from_mcp_client で fallback 生成。
-            _claude_input_file = BASE_DIR / "pending_claude_inputs.jsonl"
-            if _claude_input_file.exists():
+            _mcp_input_file = BASE_DIR / "pending_mcp_inputs.jsonl"
+            if _mcp_input_file.exists():
                 try:
-                    _lines = _claude_input_file.read_text(encoding="utf-8").splitlines()
-                    _claude_input_file.unlink()
+                    _lines = _mcp_input_file.read_text(encoding="utf-8").splitlines()
+                    _mcp_input_file.unlink()
                     for _line in _lines:
                         if not _line.strip():
                             continue
@@ -884,6 +888,7 @@ def main():
                         _spec = _rec.get("channel_spec") or channel_from_mcp_client(
                             _rec.get("client_name", ""))
                         _channel_id = _spec["id"]
+                        _input_tag = _spec["tools_in"][0] if _spec["tools_in"] else f"[{_channel_id}_input]"
 
                         _wm = state.get("world_model")
                         if _wm is not None:
@@ -899,7 +904,7 @@ def main():
                             "time": _rec.get(
                                 "time",
                                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                            "tool": f"[{_channel_id}_input]",
+                            "tool": _input_tag,
                             "type": "external",
                             "channel": _channel_id,
                             "result": _rec.get("content", ""),
@@ -918,7 +923,7 @@ def main():
                         save_state(state)
                         pressure += 3.0
                         _line_msg = (
-                            f"  [{_channel_id}_input] "
+                            f"  {_input_tag} "
                             f"{_rec.get('content','')[:80]}"
                         )
                         print(_line_msg)
