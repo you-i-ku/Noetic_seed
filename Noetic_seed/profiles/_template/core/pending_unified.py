@@ -105,10 +105,18 @@ def _now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _new_id(source_action: str, cycle_id: int) -> str:
-    """UPS v2 pending ID。衝突防止に timestamp ms を含める。"""
-    sa_short = str(source_action)[:12].replace(" ", "_")
-    return f"ups_{sa_short}_{cycle_id:04d}_{int(time.time() * 1000) % 10000}"
+def _new_id(source_action: str, cycle_id: int, session_id: str = "x") -> str:
+    """UPS v2 pending ID。
+
+    形式: p_{session_id}_{cycle_id:04d}_{source_action[:8]}_{ms%1000}
+    例:   p_30c4d130_0008_listen_a_123
+
+    log entry id ({session_id}_{cycle_id:04d}) と同じ session+cycle prefix
+    を含めることで、LLM が log 欄と pending 欄の対応関係を視覚的に追える。
+    prefix "p_" で log entry id と明確に区別。
+    """
+    sa_short = str(source_action)[:8].replace(" ", "_")
+    return f"p_{session_id}_{cycle_id:04d}_{sa_short}_{int(time.time() * 1000) % 1000}"
 
 
 def pending_add(
@@ -152,9 +160,10 @@ def pending_add(
         追加された PendingEntry (dict、参照で state の pending list にも格納)。
     """
     now = _now_ts()
+    session_id = state.get("session_id", "x")
     entry: PendingEntry = {
         "type": "pending",
-        "id": _new_id(source_action, cycle_id),
+        "id": _new_id(source_action, cycle_id, session_id),
         "source_action": source_action,
         "source_action_time": now,
         "source_action_cycle": cycle_id,
