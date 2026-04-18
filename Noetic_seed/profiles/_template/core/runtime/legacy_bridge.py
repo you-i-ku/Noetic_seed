@@ -23,10 +23,12 @@ legacy tool も ConversationRuntime 経由で LLM② から呼出可能になる
 
 ```
 register_claw_tools(registry, ...)      # 1. claw 50 を配置
-register_legacy_bridge(registry, TOOLS) # 2. legacy 40 で上書き
-                                         #    (read_file/write_file は legacy の
-                                         #     secrets guard 版が勝つ)
-register_noetic_stubs(registry, TOOLS)  # 3. stub 5 の厳密 schema で最終上書き
+register_legacy_bridge(registry, TOOLS) # 2. legacy 40 を loose schema で上書き
+                                         #    (bridge で登録対象外なのは read_file/
+                                         #     write_file/list_files。これらは claw
+                                         #     版 + file_access_guard hook で対応)
+register_noetic_tools(registry, TOOLS)  # 3. Noetic 固有 17 tool の claw 文法準拠
+                                         #    厳密 ToolSpec で最終上書き
 ```
 
 ### Phase 5 方針

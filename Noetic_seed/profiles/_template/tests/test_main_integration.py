@@ -38,7 +38,7 @@ from core.runtime.hooks import (
     make_post_tool_use_failure_logger,
     make_pre_tool_use_approval_check,
 )
-from core.runtime.noetic_stub_tools import register_noetic_stubs
+from core.runtime.tools.noetic_ext import register_noetic_tools
 from core.runtime.permissions import PermissionEnforcer, PermissionMode
 from core.runtime.registry import ToolRegistry
 
@@ -75,13 +75,15 @@ def _fake_tools(fail_tool_name: str = "") -> dict:
             content = args.get("content") or args.get("query") or "(no content)"
             return f"[{name} executed] {str(content)[:40]}"
         return _h
-    return {
-        "output_display": {"desc": "発話", "func": _make_handler("output_display")},
-        "wait":           {"desc": "待機", "func": _make_handler("wait")},
-        "reflect":        {"desc": "内省", "func": _make_handler("reflect")},
-        "update_self":    {"desc": "self 更新", "func": _make_handler("update_self")},
-        "search_memory":  {"desc": "記憶検索", "func": _make_handler("search_memory")},
-    }
+    # Noetic 固有 17 tool (noetic_ext 登録対象) を mock
+    names = [
+        "output_display", "wait", "reflect", "update_self",
+        "search_memory", "memory_store", "memory_update", "memory_forget",
+        "view_image", "listen_audio", "mic_record",
+        "camera_stream", "camera_stream_stop", "screen_peek",
+        "auth_profile_info", "secret_read", "secret_write",
+    ]
+    return {n: {"desc": n, "func": _make_handler(n)} for n in names}
 
 
 def _fresh_state():
@@ -113,7 +115,7 @@ def _build_runtime(state: dict, provider: _FakeProvider,
     main() の Step E-2d 相当を手動で並行に組む (state は in-place mutate)。
     """
     registry = ToolRegistry()
-    register_noetic_stubs(registry, _fake_tools(fail_tool_name))
+    register_noetic_tools(registry, _fake_tools(fail_tool_name))
 
     hook_runner = HookRunner()
     hook_runner.register_pre(make_pre_tool_use_approval_check(
