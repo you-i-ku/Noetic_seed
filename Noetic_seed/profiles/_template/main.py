@@ -864,6 +864,68 @@ def main():
                 print(_chat_line)
                 broadcast_log(_chat_line)
 
+            # WM 段階6-C v3: pending_claude_inputs.jsonl consume (MCP client 経由の外部入力)
+            # MCP server が書き込み → main.py が cycle 頭で consume + unlink。
+            # record に channel_spec があればそれを使う (server 判定済)、
+            # なければ client_name から channel_from_mcp_client で fallback 生成。
+            _claude_input_file = BASE_DIR / "pending_claude_inputs.jsonl"
+            if _claude_input_file.exists():
+                try:
+                    _lines = _claude_input_file.read_text(encoding="utf-8").splitlines()
+                    _claude_input_file.unlink()
+                    for _line in _lines:
+                        if not _line.strip():
+                            continue
+                        _refresh_state()
+                        _rec = _json.loads(_line)
+                        # channel_spec 決定 (server 判定優先、なければ registry で生成)
+                        from core.channel_registry import channel_from_mcp_client
+                        from core.world_model import ensure_channel, observe_channel_activity
+                        _spec = _rec.get("channel_spec") or channel_from_mcp_client(
+                            _rec.get("client_name", ""))
+                        _channel_id = _spec["id"]
+
+                        _wm = state.get("world_model")
+                        if _wm is not None:
+                            ensure_channel(_wm, **_spec)
+                            observe_channel_activity(_wm, _channel_id)
+
+                        _ext_id = _rec.get(
+                            "id",
+                            f"mcp_{uuid.uuid4().hex[:12]}"
+                        )
+                        _ext_entry = {
+                            "id": _ext_id,
+                            "time": _rec.get(
+                                "time",
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                            "tool": f"[{_channel_id}_input]",
+                            "type": "external",
+                            "channel": _channel_id,
+                            "result": _rec.get("content", ""),
+                        }
+                        _archive_entries([_ext_entry])
+                        state["log"].append(_ext_entry)
+                        state["unresponded_external_count"] = (
+                            state.get("unresponded_external_count", 0) + 1
+                        )
+                        _pending_observations.append({
+                            "observed_channel": _channel_id,
+                            "content": _rec.get("content", ""),
+                            "source_action_hint": "living_presence",
+                            "observation_time": datetime.now().strftime("%H:%M"),
+                        })
+                        save_state(state)
+                        pressure += 3.0
+                        _line_msg = (
+                            f"  [{_channel_id}_input] "
+                            f"{_rec.get('content','')[:80]}"
+                        )
+                        print(_line_msg)
+                        broadcast_log(_line_msg)
+                except Exception as _e:
+                    print(f"  [mcp_input consume エラー: {_e}]")
+
             # テストタブからのツール実行要求（同期実行）
             # 自律動作と同じ挙動にするため、承認待ちもカメラもmainが待つ
             from core.ws_server import get_pending_test_tools

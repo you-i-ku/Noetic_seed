@@ -46,5 +46,10 @@
     "channel_mismatch_multiplier": 0.5,
     "predicted_error_multiplier": 0.5,
     "_comment": "段階5 設定。multiplier は WM.md 推奨 0.3 より弱め (Phase 4 H-1 固着ループ観測への配慮)。実走行で調整"
+  },
+  "mcp_bridge": {
+    "enabled": true,
+    "pending_inputs_file": "pending_claude_inputs.jsonl",
+    "_comment": "段階6-C v3 設定。MCP client (Claude Code 等) からの入力は pending_inputs_file に書かれ main.py が cycle 頭で consume。channel は channel_registry の判定関数で動的生成"
   }
 }
