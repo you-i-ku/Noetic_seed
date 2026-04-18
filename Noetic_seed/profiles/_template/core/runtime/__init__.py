@@ -1,7 +1,7 @@
 """v0.5 Conversation Runtime layer.
 
 claw-code 準拠の堅牢なツール実行基盤。
-既存 main.py の ★★★★ 機構 (pressure/entropy/E値/spiral/Magic-If) は変更せず、
+既存 main.py の ★★★★ 機構 (pressure/entropy/E値/spiral) は変更せず、
 ツール実行・hook・permission・provider 抽象化だけをこの層で置き換える。
 
 構成:
