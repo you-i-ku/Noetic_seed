@@ -49,13 +49,6 @@ _APPROVAL_PROTOCOL = (
 )
 
 
-_WORLD_MODEL_STUB = (
-    "## 世界モデル (stub)\n"
-    "Phase 4 時点では stub。Phase 5 で実装される世界モデル (channel 状態、\n"
-    "社会モデル、自己連続性の変動予測) がここに挿入される。"
-)
-
-
 # system_prompt のソフト上限。超えても動くが警告ログに残す
 # (context_window 全体から completion_reserve / safety_margin を引いた余裕)。
 SYSTEM_PROMPT_SOFT_LIMIT = 8000
@@ -80,10 +73,12 @@ def build_fire_cause_section(fire_cause: str) -> str:
 def build_world_model_section(world_model: Optional[dict] = None) -> str:
     """世界モデルセクション。
 
-    Phase 4 時点では stub を返す。Phase 5 で world_model 引数の中身
-    (channel 状態、社会モデル等) をレンダリングするよう拡張予定。
+    段階2: world_model dict を core.world_model.render_for_prompt に
+    委譲してレンダリング。world_model=None や空の場合は空文字を返し、
+    assemble_system_prompt 側でセクションごと省略される。
     """
-    return _WORLD_MODEL_STUB
+    from core.world_model import render_for_prompt
+    return render_for_prompt(world_model)
 
 
 def build_log_block(state: dict, budget_tok: Optional[int] = None) -> str:

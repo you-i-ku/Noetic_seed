@@ -9,7 +9,7 @@ from core.llm import call_llm
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
 
 # === Entity/Opinion Network ===
-_VALID_NETWORKS = {"world", "experience", "opinion", "entity"}
+_VALID_NETWORKS = {"experience", "opinion", "entity"}
 
 
 def _network_file(network: str):

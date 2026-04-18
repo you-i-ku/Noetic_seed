@@ -68,7 +68,7 @@ OPINIONS:
 
 ENTITIES:
 - name: エンティティ名, content: その存在について新たに学んだこと
-（自分自身についての気づきも「name: 自分」で記録可。既に知っていることの繰り返しは不要）
+（既に知っていることの繰り返しは不要）
 
 DISPOSITION:
 - curiosity_delta: -0.1~+0.1の変化量

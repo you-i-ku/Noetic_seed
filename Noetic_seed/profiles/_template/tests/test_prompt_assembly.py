@@ -81,12 +81,23 @@ def test_fire_cause_section_with_value():
     ])
 
 
-def test_world_model_stub():
-    print("== 世界モデル: Phase 4 は stub ==")
-    s = build_world_model_section()
+def test_world_model_section_none():
+    print("== 世界モデル: world_model=None で空文字 (セクション省略) ==")
+    s = build_world_model_section(None)
+    return _assert(s == "", "空文字返却")
+
+
+def test_world_model_section_renders():
+    print("== 世界モデル: 段階2 実装 (init_world_model で生成した dict を描画) ==")
+    from core.world_model import init_world_model
+    wm = init_world_model()
+    s = build_world_model_section(wm)
     return all([
-        _assert("stub" in s.lower() or "世界モデル" in s, "section あり"),
-        _assert("Phase 5" in s, "Phase 5 言及"),
+        _assert("## 世界モデル" in s, "section heading"),
+        _assert("### チャネル" in s, "チャネル heading"),
+        _assert("device (direct)" in s, "device 行"),
+        _assert("elyth (social)" in s, "elyth 行"),
+        _assert("まだ観測されていない" in s, "未観測メッセージ (facts=空)"),
     ])
 
 
@@ -167,7 +178,8 @@ def test_tool_block_no_registry_still_works():
 # ============================================================
 
 def test_assemble_contains_all_five_sections():
-    print("== assemble: 5 要素全部含む ==")
+    print("== assemble: 5 要素全部含む (world_model 明示渡し) ==")
+    from core.world_model import init_world_model
     state = _fresh_state()
     state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
                      "intent": "x", "result": "y"}]
@@ -175,11 +187,12 @@ def test_assemble_contains_all_five_sections():
     prompt = assemble_system_prompt(
         state=state, tools_dict=tools,
         fire_cause="threshold breach",
+        world_model=init_world_model(),
     )
     return all([
         _assert("Approval Protocol" in prompt, "① 承認プロトコル"),
         _assert("発火原因: threshold breach" in prompt, "② 発火原因"),
-        _assert("世界モデル" in prompt, "③ 世界モデル stub"),
+        _assert("世界モデル" in prompt, "③ 世界モデル section heading"),
         _assert("STM — log" in prompt, "④ log block heading"),
         _assert("read_file" in prompt, "④ log 中身"),
         _assert("利用可能なツール" in prompt, "⑤ tool 一覧 heading"),
@@ -187,13 +200,15 @@ def test_assemble_contains_all_five_sections():
 
 
 def test_assemble_section_order():
-    print("== assemble: 5 要素の順序が正しい ==")
+    print("== assemble: 5 要素の順序が正しい (world_model 明示渡し) ==")
+    from core.world_model import init_world_model
     state = _fresh_state()
     state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
                      "intent": "x", "result": "y"}]
     prompt = assemble_system_prompt(
         state=state, tools_dict=_sample_tools(),
         fire_cause="test cause",
+        world_model=init_world_model(),
     )
     i_approval = prompt.find("Approval Protocol")
     i_fire = prompt.find("発火原因")
@@ -205,6 +220,23 @@ def test_assemble_section_order():
         _assert(i_fire < i_wm, "発火原因 < 世界モデル"),
         _assert(i_wm < i_log, "世界モデル < log"),
         _assert(i_log < i_tools, "log < tools"),
+    ])
+
+
+def test_assemble_wm_omitted_when_none():
+    print("== assemble: world_model=None なら 世界モデル section 省略 ==")
+    state = _fresh_state()
+    state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
+                     "intent": "x", "result": "y"}]
+    prompt = assemble_system_prompt(
+        state=state, tools_dict=_sample_tools(),
+        fire_cause="",
+        world_model=None,
+    )
+    return all([
+        _assert("世界モデル" not in prompt, "世界モデル heading 非含"),
+        _assert("Approval Protocol" in prompt, "他 sections は残る"),
+        _assert("利用可能なツール" in prompt, "tool 一覧残る"),
     ])
 
 
@@ -310,7 +342,8 @@ if __name__ == "__main__":
         ("承認プロトコル: 3 層 + 対等", test_approval_protocol_has_3_fields),
         ("発火原因: 空なら空文字", test_fire_cause_section_empty),
         ("発火原因: 値で prefix 付与", test_fire_cause_section_with_value),
-        ("世界モデル: stub", test_world_model_stub),
+        ("世界モデル: None で空", test_world_model_section_none),
+        ("世界モデル: 段階2 render", test_world_model_section_renders),
         ("log block: 空 OK", test_log_block_empty),
         ("log block: entries", test_log_block_with_entries),
         ("tool block: allowed_tools 絞込", test_tool_block_filters_by_allowed),
@@ -318,6 +351,7 @@ if __name__ == "__main__":
         ("tool block: registry なし後方互換", test_tool_block_no_registry_still_works),
         ("assemble: 5 要素含む", test_assemble_contains_all_five_sections),
         ("assemble: 順序", test_assemble_section_order),
+        ("assemble: wm=None で省略", test_assemble_wm_omitted_when_none),
         ("assemble: fire_cause 省略", test_assemble_fire_cause_omitted),
         ("assemble: Magic-If 痕跡なし", test_assemble_no_magic_if),
         ("assemble: 予算内", test_assemble_within_budget),

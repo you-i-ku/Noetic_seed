@@ -584,6 +584,7 @@ def main():
             tools_dict=TOOLS,
             fire_cause=fire_cause,
             allowed_tools=ctrl["allowed_tools"],
+            world_model=state.get("world_model"),
             registry=_rt_registry,
         )
         _runtime.session.clear()
