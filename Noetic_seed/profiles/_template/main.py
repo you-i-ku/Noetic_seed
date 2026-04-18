@@ -88,6 +88,7 @@ from core.runtime.hooks import (
     make_post_tool_use_failure_logger,
 )
 from core.runtime.noetic_stub_tools import register_noetic_stubs
+from core.runtime.legacy_bridge import register_legacy_bridge
 from core.runtime.tools import register_all as register_claw_tools
 from core.runtime.permissions import PermissionEnforcer, PermissionMode
 from core.approval_callback import make_approval_callback
@@ -239,6 +240,8 @@ def main():
     _rt_registry = ToolRegistry()
     register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
     register_noetic_stubs(_rt_registry, TOOLS)
+    # H-2 A: legacy TOOLS を bridge で全登録 (noetic_stubs / claw と名前衝突は skip)
+    register_legacy_bridge(_rt_registry, TOOLS)
 
     # hook context (state_before snapshot, fire 毎に更新)
     _hook_ctx = {"state_before": {}}
