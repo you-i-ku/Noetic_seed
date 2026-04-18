@@ -276,16 +276,28 @@ def migrate_entity_fields(entity: dict) -> None:
 # ============================================================
 
 def sync_from_memory_entities(wm: Optional[dict], memory_entity_records: list,
-                              limit: int = 20) -> int:
+                              limit: int = 20,
+                              embed_fn=None, cosine_fn=None,
+                              llm_call_fn=None) -> int:
     """memory/entity レコード群から WM entity を片方向ミラー作成/更新。
 
-    entity_name でグループ化 → 各 name の ent_{slug} を ensure →
-    最新 content を description fact として add_or_update。
+    entity_name でグループ化 → Entity Resolver (段階4) で既存解決
+    → 最新 content を description fact として add_or_update。
+
+    Args:
+        wm: world_model
+        memory_entity_records: memory/entity の dict レコード群
+        limit: 処理件数上限
+        embed_fn / cosine_fn: Entity Resolver Tier 2 で使う embedding 関数
+        llm_call_fn: Tier 3 LLM tiebreak (省略時は ambiguous は新規扱い)
 
     戻り値: 新規作成された entity 数。
     """
     if not wm or not memory_entity_records:
         return 0
+    # 循環 import 回避のため関数内 import
+    from core.entity_resolver import resolve_or_create_entity
+
     groups = defaultdict(list)
     for rec in memory_entity_records[:limit]:
         name = rec.get("metadata", {}).get("entity_name", "").strip()
@@ -294,10 +306,15 @@ def sync_from_memory_entities(wm: Optional[dict], memory_entity_records: list,
         groups[name].append(rec)
     created_count = 0
     for name, records in groups.items():
-        entity_id = f"ent_{_slugify(name)}"
-        before = entity_id in wm.get("entities", {})
-        entity = ensure_entity(wm, entity_id, name)
-        if not before:
+        entity, is_new = resolve_or_create_entity(
+            wm, name,
+            embed_fn=embed_fn,
+            cosine_fn=cosine_fn,
+            llm_call_fn=llm_call_fn,
+        )
+        if entity is None:
+            continue
+        if is_new:
             created_count += 1
         latest = max(records,
                      key=lambda r: r.get("updated_at", r.get("created_at", "")))

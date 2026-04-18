@@ -467,6 +467,54 @@ def test_sync_respects_limit():
     return _assert(created == 2, f"2 件作成 (actual: {created})")
 
 
+def test_sync_resolver_merges_similar_names():
+    print("== sync: 段階4 resolver で ゆう と YOU が merge される ==")
+    import math
+
+    def mock_embed(texts):
+        vecs = {"ゆう": [1.0, 0.0, 0.0], "YOU": [0.97, 0.05, 0.0]}
+        return [vecs.get(t, [0.0] * 3) for t in texts]
+
+    def mock_cosine(a, b):
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(x * x for x in b))
+        if na == 0 or nb == 0:
+            return 0.0
+        return sum(x * y for x, y in zip(a, b)) / (na * nb)
+
+    wm = init_world_model()
+    records = [
+        {"id": "m1", "content": "開発者", "metadata": {"entity_name": "ゆう"},
+         "updated_at": "2026-04-10 00:00:00"},
+        {"id": "m2", "content": "同一人物", "metadata": {"entity_name": "YOU"},
+         "updated_at": "2026-04-11 00:00:00"},
+    ]
+    created = sync_from_memory_entities(
+        wm, records, embed_fn=mock_embed, cosine_fn=mock_cosine,
+    )
+    # ゆう と YOU が merge されるので新規は 1 つだけ
+    return all([
+        _assert(created == 1, f"新規 1 件 (actual: {created})"),
+        _assert(
+            any("YOU" in e.get("aliases", []) for e in wm["entities"].values()),
+            "YOU が alias として登録",
+        ),
+    ])
+
+
+def test_sync_without_embed_fn_no_merge():
+    print("== sync: embed_fn なしで ゆう と YOU は別 entity ==")
+    wm = init_world_model()
+    records = [
+        {"id": "m1", "content": "x", "metadata": {"entity_name": "ゆう"},
+         "updated_at": "2026-04-10 00:00:00"},
+        {"id": "m2", "content": "y", "metadata": {"entity_name": "YOU"},
+         "updated_at": "2026-04-11 00:00:00"},
+    ]
+    created = sync_from_memory_entities(wm, records)  # embed_fn=None
+    return _assert(created == 2, f"exact のみなので 2 件 (actual: {created})")
+
+
 # ============================================================
 # 段階3: render で confidence 表示
 # ============================================================
@@ -538,6 +586,8 @@ if __name__ == "__main__":
         ("sync: description fact", test_sync_appends_description_fact),
         ("sync: 空レコード", test_sync_empty_records),
         ("sync: limit 尊重", test_sync_respects_limit),
+        ("sync: resolver で類似名 merge (段階4)", test_sync_resolver_merges_similar_names),
+        ("sync: embed なしは merge しない (段階4)", test_sync_without_embed_fn_no_merge),
         # 段階3: render 拡張
         ("render: confidence 表示", test_render_shows_confidence),
         ("render: frozen skip", test_render_skips_frozen_facts),
