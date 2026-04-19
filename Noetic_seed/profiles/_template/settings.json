@@ -42,10 +42,10 @@
     "max_micro_iter": 3
   },
   "world_model": {
-    "predictor_mode": "light",
+    "predictor_mode": "medium",
     "channel_mismatch_multiplier": 0.5,
-    "predicted_error_multiplier": 0.5,
-    "_comment": "段階5 設定。multiplier は WM.md 推奨 0.3 より弱め (Phase 4 H-1 固着ループ観測への配慮)。実走行で調整"
+    "predicted_e2_floor": 0.05,
+    "_comment": "段階5→9 設定。段階9 で predictor_mode を medium に切替 (MediumPredictor 本実装 + smoke 観察)。predicted_error_multiplier (category 離散) は廃止、predicted_e2_floor に置換。Light fallback は MediumPredictor 内の安全網"
   },
   "mcp_bridge": {
     "enabled": true,

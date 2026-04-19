@@ -256,15 +256,28 @@ def _channel_mismatch_multiplier(candidate: dict, state: dict, cfg: dict) -> flo
 
 def _predicted_outcome_multiplier(prediction: dict, candidate: dict,
                                   cfg: dict) -> float:
-    """predictor の予測が error / no_response なら multiplier (<1.0) を返す。
-    副作用: 減点時に candidate["penalties"] に理由を追記。
+    """predicted_e2 (0-100) を連続値 multiplier に変換 (段階9)。
+
+    段階5 までは category 離散 (error/no_response で 0.5) だったが、段階9 で
+    predicted_e2 直接乗算に置換。Active Inference の pragmatic value of EFE
+    と同型、既存 novelty (epistemic) と同じ max(floor, ratio) 形式。
+
+    - predicted_e2=70 → 0.7 / 50 → 0.5 / 20 → 0.2 / 0 → 0.05 (floor)
+    - ratio < 0.4 の時 candidate["penalties"] に理由追記 (解釈可能性のため)
+    - cfg["predicted_e2_floor"] で下限 (default 0.05) を上書き可能
+    - 不正値/NaN は default 50 (neutral) として扱う
     """
-    cat = prediction.get("category") if isinstance(prediction, dict) else None
-    if cat in ("error", "no_response"):
-        mult = float(cfg.get("predicted_error_multiplier", 0.5))
-        candidate.setdefault("penalties", []).append(f"predicted_{cat}")
-        return mult
-    return 1.0
+    pe2_raw = prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
+    try:
+        pe2 = max(0, min(100, int(pe2_raw)))
+    except (TypeError, ValueError):
+        pe2 = 50
+    ratio = pe2 / 100.0
+    floor = float(cfg.get("predicted_e2_floor", 0.05))
+    mult = max(floor, ratio)
+    if ratio < 0.4:
+        candidate.setdefault("penalties", []).append(f"low_predicted_e2={pe2}")
+    return mult
 
 
 def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
@@ -291,9 +304,14 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         w *= _pending_priority_boost(state, c)
         # 段階5: channel_mismatch 乗算 (PLAN §4-1)
         w *= _channel_mismatch_multiplier(c, state, WORLD_MODEL_CFG)
-        # 段階5: predicted_outcome ペナルティ (PLAN §4-2)
+        # 段階5→9: Predictor による predicted_e2 乗算 (pragmatic value of EFE)。
+        # 段階9 で category 離散から predicted_e2 連続値に置換、既存 novelty
+        # (epistemic value) と同形式 max(floor, x) で統合乗算。
+        # in-context world model (NAACL 2025) の direct instance。
         prediction = _PREDICTOR.predict(c, state, state.get("world_model"))
         c["predicted_outcome"] = prediction
+        # 段階9: 予測誤差計測のため candidate に記録 (main.py で log entry に転写)
+        c["_predicted_e2"] = prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
         w *= _predicted_outcome_multiplier(prediction, c, WORLD_MODEL_CFG)
         if novelty < 0.5:
             try:

@@ -798,6 +798,17 @@ def main():
             entry["e3"] = e3
         if e4:
             entry["e4"] = e4
+        # 段階9: 予測誤差記録 (段階10+ で §9-A 活用、段階9 は記録のみ)。
+        # MediumPredictor の "second half" — これを pressure 加算や
+        # confidence 自己学習に繋げて Active Inference epistemic signal 化する。
+        _pe2 = selected.get("_predicted_e2") if isinstance(selected, dict) else None
+        if isinstance(_pe2, int):
+            entry["predicted_e2"] = _pe2
+            _actual_e2_m = re.search(r'\d+', str(e2)) if e2 else None
+            if _actual_e2_m:
+                _actual_e2 = max(0, min(100, int(_actual_e2_m.group(0))))
+                entry["actual_e2"] = _actual_e2
+                entry["prediction_error"] = abs(_pe2 - _actual_e2)
         _archive_entries([entry])
         state["log"].append(entry)
 

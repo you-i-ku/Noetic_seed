@@ -1,13 +1,15 @@
-"""controller.py の段階5 ペナルティ 2 関数の unit test。
+"""controller.py の段階5→9 ペナルティ関数の unit test。
 
-成功条件 (STAGE5_IMPLEMENTATION_PLAN.md §7-2):
-  - channel_mismatch: 不一致で score × multiplier、penalties に記録
+成功条件 (STAGE5_IMPLEMENTATION_PLAN.md §7-2 + STAGE9 §4-3):
+  - channel_mismatch: 不一致で score × multiplier、penalties に記録 (段階5 仕様維持)
   - channel_mismatch: internal tool (channel=None) は影響なし (1.0)
   - channel_mismatch: pending に channel がなければ 1.0
-  - predicted_outcome: error / no_response で減点、penalties 記録
-  - predicted_outcome: other / positive_reply で減点なし
-  - WORLD_MODEL_CFG の値が乗算 multiplier として反映される
-  - controller_select 実行時に candidate に predicted_outcome が付く (E2E)
+  - predicted_outcome (段階9 置換): predicted_e2 ベース連続値 multiplier
+    · predicted_e2=20 → 0.2 (error 相当) / 30 → 0.3 (no_response 相当)
+    · predicted_e2=50 → 0.5 (other 相当) / 70 → 0.7 (positive_reply 相当)
+    · ratio < 0.4 で penalties に "low_predicted_e2=XX" 記録
+  - WORLD_MODEL_CFG の値が乗算 multiplier として反映される (floor)
+  - controller_select 実行時に candidate に predicted_outcome + _predicted_e2 付与
 
 使い方:
   cd Noetic_seed/profiles/_template
@@ -139,44 +141,70 @@ def test_channel_mismatch_observed_skipped():
 # predicted_outcome
 # ============================================================
 
-def test_predicted_outcome_error_penalizes():
-    print("== predicted_outcome: category=error で減点 + penalties 記録 ==")
+def test_predicted_outcome_low_e2_penalizes():
+    print("== predicted_outcome (段階9): 低 predicted_e2 で減点 + penalties 記録 ==")
     cand = {"tool": "x_post"}
-    pred = {"category": "error", "confidence": 0.6, "detail": "light"}
+    pred = {"category": "error", "confidence": 0.6, "detail": "light",
+            "predicted_e2": 20}
     mult = _predicted_outcome_multiplier(pred, cand, WORLD_MODEL_CFG)
     return all([
-        _assert(abs(mult - 0.5) < 1e-9, f"multiplier=0.5 (actual: {mult})"),
-        _assert("predicted_error" in cand.get("penalties", []),
-                "predicted_error 記録"),
+        _assert(abs(mult - 0.2) < 1e-9, f"multiplier=0.2 (actual: {mult})"),
+        _assert(any("low_predicted_e2" in p for p in cand.get("penalties", [])),
+                "low_predicted_e2 記録"),
     ])
 
 
-def test_predicted_outcome_no_response_penalizes():
-    print("== predicted_outcome: category=no_response で減点 ==")
+def test_predicted_outcome_mid_e2_moderate_penalty():
+    print("== predicted_outcome (段階9): 中 predicted_e2=30 → 0.3 + penalty ==")
     cand = {"tool": "x_post"}
-    pred = {"category": "no_response", "confidence": 0.5}
+    pred = {"category": "no_response", "confidence": 0.5, "predicted_e2": 30}
     mult = _predicted_outcome_multiplier(pred, cand, WORLD_MODEL_CFG)
     return all([
-        _assert(abs(mult - 0.5) < 1e-9, f"multiplier=0.5 (actual: {mult})"),
-        _assert("predicted_no_response" in cand.get("penalties", []),
-                "predicted_no_response 記録"),
+        _assert(abs(mult - 0.3) < 1e-9, f"multiplier=0.3 (actual: {mult})"),
+        _assert(any("low_predicted_e2" in p for p in cand.get("penalties", [])),
+                "low_predicted_e2 記録 (< 0.4)"),
     ])
 
 
-def test_predicted_outcome_other_no_penalty():
-    print("== predicted_outcome: category=other / positive で減点なし ==")
+def test_predicted_outcome_continuous_scaling():
+    print("== predicted_outcome (段階9): pe2=50 → 0.5 / pe2=70 → 0.7、連続値 ==")
     cand1 = {"tool": "x_post"}
     cand2 = {"tool": "x_post"}
+    cand3 = {"tool": "x_post"}
     m1 = _predicted_outcome_multiplier(
-        {"category": "other"}, cand1, WORLD_MODEL_CFG)
+        {"category": "other", "predicted_e2": 50}, cand1, WORLD_MODEL_CFG)
     m2 = _predicted_outcome_multiplier(
-        {"category": "positive_reply"}, cand2, WORLD_MODEL_CFG)
+        {"category": "positive_reply", "predicted_e2": 70}, cand2, WORLD_MODEL_CFG)
+    m3 = _predicted_outcome_multiplier(
+        {"category": "positive_reply", "predicted_e2": 100}, cand3, WORLD_MODEL_CFG)
     return all([
-        _assert(m1 == 1.0, f"other → 1.0 (actual: {m1})"),
-        _assert(m2 == 1.0, f"positive_reply → 1.0 (actual: {m2})"),
-        _assert("penalties" not in cand1 or not cand1["penalties"],
-                "other で penalty 記録なし"),
+        _assert(abs(m1 - 0.5) < 1e-9, f"pe2=50 → 0.5 (actual: {m1})"),
+        _assert(abs(m2 - 0.7) < 1e-9, f"pe2=70 → 0.7 (actual: {m2})"),
+        _assert(abs(m3 - 1.0) < 1e-9, f"pe2=100 → 1.0 (actual: {m3})"),
+        _assert("penalties" not in cand2 or not cand2["penalties"],
+                "pe2=70 (>=0.4) で penalty 記録なし"),
     ])
+
+
+def test_predicted_outcome_zero_floor():
+    print("== predicted_outcome (段階9): pe2=0 → floor 0.05 ==")
+    cand = {"tool": "x_post"}
+    pred = {"predicted_e2": 0}
+    mult = _predicted_outcome_multiplier(pred, cand, WORLD_MODEL_CFG)
+    return all([
+        _assert(abs(mult - 0.05) < 1e-9, f"pe2=0 → floor 0.05 (actual: {mult})"),
+        _assert(any("low_predicted_e2=0" in p for p in cand.get("penalties", [])),
+                "low_predicted_e2=0 記録"),
+    ])
+
+
+def test_predicted_outcome_missing_pe2_defaults_to_50():
+    print("== predicted_outcome (段階9): predicted_e2 欠損 → default 50 = 0.5 ==")
+    cand = {"tool": "x_post"}
+    pred = {"category": "error"}  # 段階5 互換、predicted_e2 なし
+    mult = _predicted_outcome_multiplier(pred, cand, WORLD_MODEL_CFG)
+    return _assert(abs(mult - 0.5) < 1e-9,
+                   f"欠損時 default 50 → 0.5 (actual: {mult})")
 
 
 # ============================================================
@@ -192,16 +220,18 @@ def test_multipliers_read_from_cfg():
                      "observed_content": None}],
     }
     cand = {"tool": "x_post"}
+    # 段階9: predicted_error_multiplier は廃止、predicted_e2_floor に置換
     custom_cfg = {"channel_mismatch_multiplier": 0.2,
-                  "predicted_error_multiplier": 0.1}
+                  "predicted_e2_floor": 0.1}
     m1 = _channel_mismatch_multiplier(cand, state, custom_cfg)
 
     cand2 = {"tool": "x"}
+    # pe2=0 は通常 floor 0.05 だが、custom cfg で floor=0.1 に引き上げられる
     m2 = _predicted_outcome_multiplier(
-        {"category": "error"}, cand2, custom_cfg)
+        {"predicted_e2": 0}, cand2, custom_cfg)
     return all([
         _assert(abs(m1 - 0.2) < 1e-9, f"channel_mismatch=0.2 (actual: {m1})"),
-        _assert(abs(m2 - 0.1) < 1e-9, f"predicted_error=0.1 (actual: {m2})"),
+        _assert(abs(m2 - 0.1) < 1e-9, f"predicted_e2_floor=0.1 (actual: {m2})"),
     ])
 
 
@@ -210,7 +240,7 @@ def test_multipliers_read_from_cfg():
 # ============================================================
 
 def test_controller_select_attaches_predicted_outcome():
-    print("== controller_select E2E: candidate に predicted_outcome 付与 ==")
+    print("== controller_select E2E: candidate に predicted_outcome + _predicted_e2 付与 ==")
     wm = init_world_model()
     state = {
         "energy": 50,
@@ -236,6 +266,11 @@ def test_controller_select_attaches_predicted_outcome():
                 == "positive_reply",
                 f"output_display/応答 → positive_reply "
                 f"(actual: {candidates[0]['predicted_outcome'].get('category')})"),
+        # 段階9: _predicted_e2 が candidate に記録される (main.py が log entry に転写)
+        _assert("_predicted_e2" in candidates[0],
+                "output_display に _predicted_e2 付与 (段階9)"),
+        _assert(candidates[0]["_predicted_e2"] == 70,
+                f"Light → positive_reply → 70 (actual: {candidates[0]['_predicted_e2']})"),
     ])
 
 
@@ -250,11 +285,13 @@ if __name__ == "__main__":
         ("channel_mismatch: internal tool skip", test_channel_mismatch_skipped_for_internal_tool),
         ("channel_mismatch: pending なし 1.0", test_channel_mismatch_no_pending_channels),
         ("channel_mismatch: observed 済 skip", test_channel_mismatch_observed_skipped),
-        ("predicted_outcome: error 減点", test_predicted_outcome_error_penalizes),
-        ("predicted_outcome: no_response 減点", test_predicted_outcome_no_response_penalizes),
-        ("predicted_outcome: other 減点なし", test_predicted_outcome_other_no_penalty),
+        ("predicted_outcome (9): pe2=20 減点", test_predicted_outcome_low_e2_penalizes),
+        ("predicted_outcome (9): pe2=30 減点", test_predicted_outcome_mid_e2_moderate_penalty),
+        ("predicted_outcome (9): 連続値スケール", test_predicted_outcome_continuous_scaling),
+        ("predicted_outcome (9): pe2=0 → floor", test_predicted_outcome_zero_floor),
+        ("predicted_outcome (9): pe2 欠損 → default 50", test_predicted_outcome_missing_pe2_defaults_to_50),
         ("cfg override 反映", test_multipliers_read_from_cfg),
-        ("E2E: controller_select predicted_outcome 付与", test_controller_select_attaches_predicted_outcome),
+        ("E2E: controller_select predicted_outcome + _predicted_e2", test_controller_select_attaches_predicted_outcome),
     ]
     results = []
     for _label, fn in groups:
