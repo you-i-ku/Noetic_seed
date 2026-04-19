@@ -73,7 +73,8 @@ def _build_specs(tools_dict: dict) -> list:
         ToolSpec(
             name="output_display",
             description=(
-                "端末前の協力者 (device channel) に発話を届ける。WebSocket 経由で配信。"
+                "発話を channel 指定で届ける。送信先 channel は WM.channels を観察して決定、"
+                "受信 channel に対応させて返すこと (段階6-C v3: 観察駆動)。"
             ),
             input_schema={
                 "type": "object",
@@ -82,9 +83,16 @@ def _build_specs(tools_dict: dict) -> list:
                         "type": "string",
                         "description": "発話内容",
                     },
+                    "channel": {
+                        "type": "string",
+                        "description": (
+                            "送信先 channel id (必須)。WM.channels を観察して利用可能な "
+                            "channel から選び、受信 channel に対応させて返す。"
+                        ),
+                    },
                     **_approval_props(),
                 },
-                "required": ["content", *_APPROVAL_REQUIRED],
+                "required": ["content", "channel", *_APPROVAL_REQUIRED],
                 "additionalProperties": False,
             },
             required_permission=PermissionMode.WORKSPACE_WRITE,
