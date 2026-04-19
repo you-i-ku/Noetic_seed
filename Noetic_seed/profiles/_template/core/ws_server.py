@@ -268,7 +268,9 @@ async def _send_loop():
         if messages and _ws_clients:
             dead = set()
             for text in messages:
-                for ws in _ws_clients:
+                # snapshot を iterate (race 回避: await ws.send 中に別 coroutine が
+                # _ws_clients から discard する可能性)。段階8 で asyncio.Lock 化予定。
+                for ws in list(_ws_clients):
                     try:
                         await ws.send(text)
                     except Exception:
