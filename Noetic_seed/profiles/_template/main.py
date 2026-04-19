@@ -921,7 +921,9 @@ def main():
                 })
                 save_state(state)
                 pressure += 3.0  # 外部入力はpressureを即座に上げる
-                _chat_line = f"  {_input_tag} {chat_text[:80]}"
+                # 段階9 fix 2-a: channel 値を併記し、LLM が tool.args.channel
+                # に同じ値を渡す推論を繋げやすくする (console/UI 視界も整合)。
+                _chat_line = f"  {_input_tag} (channel={_channel_id}) {chat_text[:80]}"
                 print(_chat_line)
                 broadcast_log(_chat_line)
 
@@ -985,8 +987,9 @@ def main():
                         })
                         save_state(state)
                         pressure += 3.0
+                        # 段階9 fix 2-a: channel 値を併記 (device_input 側と同じ理由)。
                         _line_msg = (
-                            f"  {_input_tag} "
+                            f"  {_input_tag} (channel={_channel_id}) "
                             f"{_rec.get('content','')[:80]}"
                         )
                         print(_line_msg)

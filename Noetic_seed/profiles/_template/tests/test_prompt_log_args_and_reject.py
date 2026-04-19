@@ -148,6 +148,37 @@ def test_build_log_block_contains_entries():
 
 
 # ============================================================
+# 段階9 fix 2-a: channel tag の [channel=X] 形式
+# ============================================================
+
+def test_channel_tag_uses_key_value_format():
+    print("== channel tag: [channel=X] 形式 ==")
+    entry = _base_entry(channel="claude")
+    line = _render_log_entry(entry, result_cap=500, intent_cap=300)
+    return all([
+        _assert("[channel=claude]" in line, "[channel=claude] 表示"),
+        _assert("[claude] " not in line, "旧 [claude] 形式は消えている"),
+    ])
+
+
+def test_channel_tag_omitted_when_empty():
+    print("== channel 空なら channel tag も出ない ==")
+    entry = _base_entry(channel="")
+    line = _render_log_entry(entry, result_cap=500, intent_cap=300)
+    return all([
+        _assert("[channel=" not in line, "channel tag 非表示"),
+        _assert("output_display" in line, "tool 名は表示"),
+    ])
+
+
+def test_channel_tag_device():
+    print("== channel=device でも key=value 形式 ==")
+    entry = _base_entry(channel="device", tool="[device_input]")
+    line = _render_log_entry(entry, result_cap=500, intent_cap=300)
+    return _assert("[channel=device]" in line, "device 側も key=value")
+
+
+# ============================================================
 # 統合: args + rejected の同時表示
 # ============================================================
 
@@ -182,6 +213,9 @@ if __name__ == "__main__":
         ("REJECTED: 3 経路全て [warn]", test_rejected_variants_all_get_warning),
         ("build_log_block: explainer", test_build_log_block_explainer),
         ("build_log_block: entry 含む", test_build_log_block_contains_entries),
+        ("channel tag: [channel=X] 形式", test_channel_tag_uses_key_value_format),
+        ("channel tag: 空で省略", test_channel_tag_omitted_when_empty),
+        ("channel tag: device も key=value", test_channel_tag_device),
         ("統合: args + rejected", test_integration_args_and_rejected),
     ]
     results = []

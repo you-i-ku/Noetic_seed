@@ -33,7 +33,9 @@ def _render_log_entry(entry: dict, result_cap: int, intent_cap: int, with_evals:
 
     prefix = "⚠️ " if is_rejected else "  "
     _ch = entry.get("channel", "")
-    _ch_tag = f"[{_ch}] " if _ch else ""
+    # 段階9 fix 2-a: [channel=X] 形式で明示。LLM が知識 (WM の channels) と
+    # 行動 (tool.args.channel に同じ値を渡す) を繋げやすくする。
+    _ch_tag = f"[channel={_ch}] " if _ch else ""
     line = f"{prefix}{entry.get('id','')} {entry['time']} {_ch_tag}{entry['tool']}"
 
     # 段階8 改善1: args 表示 (intent より前、cap 200)
