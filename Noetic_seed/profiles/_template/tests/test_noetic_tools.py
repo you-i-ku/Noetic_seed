@@ -156,15 +156,16 @@ def test_schema_tool_specific_required():
 
 
 def test_schema_enum_network():
-    print("== memory_store.network が enum 制約を持つ ==")
+    print("== memory_store.network は enum 撤去済 (段階7: 動的タグ対応) ==")
     reg = ToolRegistry()
     register_noetic_tools(reg, _fake_tools_dict())
     spec = reg.get("memory_store")
     props = spec.input_schema.get("properties", {})
-    enum_vals = set(props.get("network", {}).get("enum", []))
-    return _assert(
-        enum_vals == {"world", "experience", "opinion", "entity"},
-        f"network enum 一致: {enum_vals}")
+    network_schema = props.get("network", {})
+    return all([
+        _assert(network_schema.get("type") == "string", "network type=string"),
+        _assert("enum" not in network_schema, "network enum 撤去済 (tag_registry で動的検証)"),
+    ])
 
 
 def test_schema_enum_facing():
@@ -288,7 +289,7 @@ if __name__ == "__main__":
         ("schema: type=object", test_schema_type_object_everywhere),
         ("schema: additionalProperties=False", test_schema_additional_properties_false),
         ("schema: tool 固有 required", test_schema_tool_specific_required),
-        ("schema: network enum", test_schema_enum_network),
+        ("schema: network enum 撤去", test_schema_enum_network),
         ("schema: facing enum", test_schema_enum_facing),
         ("schema: 数値 min/max", test_schema_numeric_constraints),
         ("permission 割当", test_permissions_per_family),

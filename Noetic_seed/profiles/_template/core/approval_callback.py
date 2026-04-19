@@ -66,6 +66,23 @@ def _format_preview(
         f"   {tool_input.get('message') or '(空)'}",
     ]
 
+    # 段階7 Step 5: memory_store で未登録タグ → 新タグ発明フラグ
+    if tool_name == "memory_store":
+        network = str(tool_input.get("network", "")).strip()
+        if network:
+            try:
+                from core.tag_registry import is_tag_registered
+                if not is_tag_registered(network):
+                    lines.append("---")
+                    lines.append(f"⚠️  新タグ発明: '{network}'")
+                    rules = tool_input.get("rules")
+                    if rules:
+                        lines.append(f"   rules: {rules}")
+                    else:
+                        lines.append("   (rules 未指定 → handler で reject)")
+            except Exception:
+                pass
+
     if pre_hook_messages:
         lines.append("---")
         lines.append("[pre_hook]")

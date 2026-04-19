@@ -164,11 +164,26 @@ def main():
     ws_token = start_ws_server()
     set_profile_running(True)
     _init_vector()
+    # 段階7: 標準タグをレジストリに登録 (memory_store の validation で必須)
+    from core.tag_registry import register_standard_tags
+    register_standard_tags()
     print()
 
     state = load_state()
     state["session_id"] = str(uuid.uuid4())[:8]
     save_state(state)
+    # 段階7: memory/wm.jsonl から WM materialized view を再構築
+    try:
+        from core.memory import list_records
+        from core.world_model import rebuild_wm_from_jsonl
+        wm_records = list_records("wm", limit=1000)
+        if wm_records:
+            rebuilt = rebuild_wm_from_jsonl(state["world_model"], wm_records)
+            if rebuilt:
+                print(f"  [WM] materialized view 再構築: {rebuilt} fact 取り込み")
+                save_state(state)
+    except Exception as e:
+        print(f"  [WM] materialized view rebuild スキップ (エラー: {e})")
     print(f"session: {state['session_id']}  cycle_id: {state['cycle_id']}")
     broadcast_state(state)
 

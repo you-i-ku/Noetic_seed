@@ -8,7 +8,7 @@ from core.runtime.registry import ToolRegistry
 from core.runtime.tool_schema import ToolSpec
 
 
-_NETWORKS = ["world", "experience", "opinion", "entity"]
+# 段階7: _NETWORKS 撤去 → tag_registry で動的検証 (schema の enum も削除)
 
 
 def _approval_props() -> dict:
@@ -36,7 +36,7 @@ def _build_specs(tools_dict: dict) -> list:
         ToolSpec(
             name="search_memory",
             description=(
-                "記憶ネットワーク (world / experience / opinion / entity) を "
+                "記憶ネットワーク (標準: wm / experience / opinion / entity、動的拡張可) を "
                 "ベクトル + キーワード検索する。"
             ),
             input_schema={
@@ -63,16 +63,15 @@ def _build_specs(tools_dict: dict) -> list:
         ToolSpec(
             name="memory_store",
             description=(
-                "記憶ネットワークに新エントリを保存する。network で保存先を指定 "
-                "(world / experience / opinion / entity)。"
+                "記憶ネットワークに新エントリを保存する。network で保存先のタグ名を指定 "
+                "(標準: wm / experience / opinion / entity、動的拡張可)。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "network": {
                         "type": "string",
-                        "enum": _NETWORKS,
-                        "description": "保存先のネットワーク種別",
+                        "description": "保存先のタグ名 (標準: wm/experience/opinion/entity、未登録タグは段階7 Step 5 で inline 登録対応)",
                     },
                     "content": {
                         "type": "string",
@@ -91,6 +90,18 @@ def _build_specs(tools_dict: dict) -> list:
                     "relationship": {
                         "type": "string",
                         "description": "関係性ラベル (entity network の場合)",
+                    },
+                    "rules": {
+                        "type": "object",
+                        "description": "(段階7: 新タグ発明時 必須) {beta_plus: bool, bitemporal: bool}",
+                        "properties": {
+                            "beta_plus": {"type": "boolean"},
+                            "bitemporal": {"type": "boolean"},
+                        },
+                    },
+                    "display_format": {
+                        "type": "string",
+                        "description": "(段階7: 新タグ発明時 任意) format_memories_for_prompt 用テンプレート。省略時は [{name}] {content}",
                     },
                     **_approval_props(),
                 },

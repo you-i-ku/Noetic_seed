@@ -7,9 +7,11 @@ from core.config import MEMORY_DIR, LOG_HARD_LIMIT, LOG_KEEP, SUMMARY_HARD_LIMIT
 from core.state import load_pref, save_pref
 from core.llm import call_llm
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+from core.tag_registry import is_tag_registered, list_registered_tags
 
-# === Entity/Opinion Network ===
-_VALID_NETWORKS = {"experience", "opinion", "entity"}
+# === Entity/Opinion Network (段階7: tag_registry で動的管理) ===
+# 段階6-C まで: _VALID_NETWORKS = {"experience", "opinion", "entity"} (ハードコード)
+# 段階7: tag_registry.is_tag_registered で動的検証 (標準タグ含めて register 経由)
 
 
 def _network_file(network: str):
@@ -20,7 +22,7 @@ def _network_file(network: str):
 def memory_store(network: str, content: str, metadata: dict = None,
                  origin: str = "unknown", source_context: str = "") -> dict:
     """記憶を保存。origin=生成きっかけ、source_context=根拠の出処。"""
-    if network not in _VALID_NETWORKS:
+    if not is_tag_registered(network):
         raise ValueError(f"Invalid network: {network}")
     entry = {
         "id": f"mem_{uuid.uuid4().hex[:12]}",
@@ -39,7 +41,7 @@ def memory_store(network: str, content: str, metadata: dict = None,
 
 def memory_update(memory_id: str, content: str = None, metadata: dict = None) -> str:
     """既存記憶を更新。"""
-    for network in _VALID_NETWORKS:
+    for network in list_registered_tags():
         fpath = _network_file(network)
         if not fpath.exists():
             continue
@@ -69,7 +71,7 @@ def memory_update(memory_id: str, content: str = None, metadata: dict = None) ->
 
 def memory_forget(memory_id: str) -> str:
     """記憶を削除。"""
-    for network in _VALID_NETWORKS:
+    for network in list_registered_tags():
         fpath = _network_file(network)
         if not fpath.exists():
             continue
@@ -85,7 +87,7 @@ def list_records(network: str, limit: int = 20) -> list:
     """指定ネットワークの jsonl を新しい順に読んで直近 limit 件を返す。
     WM の C-gradual 同期 (段階3) 等、検索ではなく全件走査系の消費者向け。
     """
-    if network not in _VALID_NETWORKS:
+    if not is_tag_registered(network):
         return []
     fpath = _network_file(network)
     if not fpath.exists():
@@ -110,10 +112,10 @@ def list_records(network: str, limit: int = 20) -> list:
 def memory_network_search(query: str, networks: list = None, limit: int = 5) -> list:
     """Entity/Opinionネットワークをベクトル検索。"""
     if not networks:
-        networks = list(_VALID_NETWORKS)
+        networks = list_registered_tags()
     all_entries = []
     for network in networks:
-        if network not in _VALID_NETWORKS:
+        if not is_tag_registered(network):
             continue
         fpath = _network_file(network)
         if not fpath.exists():
@@ -221,7 +223,8 @@ def _recent_externals_from_archive(limit: int = 3, days_back: int = 7) -> list:
 
 
 def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
-    """記憶をプロンプト用テキストに整形。"""
+    """記憶をプロンプト用テキストに整形 (段階7: display_format 駆動)。"""
+    from core.tag_registry import get_tag_rules
     if not memories:
         return ""
     lines = []
@@ -230,15 +233,26 @@ def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
         network = m.get("network", "?")
         content = m.get("content", "")[:300]
         meta = m.get("metadata", {})
-        if network == "entity" and "entity_name" in meta:
-            line = f"  [entity:{meta['entity_name']}] {content}"
-        elif network == "opinion" and "confidence" in meta:
-            line = f"  [opinion] {content} (確度:{meta['confidence']})"
-        elif network == "external":
+        # external は archive 由来で tag_registry 非登録、特別扱い
+        if network == "external":
             t = meta.get("time", "")
             line = f"  [external voice {t}] {content}"
         else:
-            line = f"  [{network}] {content}"
+            rules = get_tag_rules(network)
+            fmt = (rules or {}).get("display_format", "") or f"[{network}] {{content}}"
+            fmt_kwargs = {
+                "content": content,
+                "tag": network,
+                "entity_name": meta.get("entity_name", "?"),
+                "confidence": meta.get("confidence", "?"),
+            }
+            for k, v in meta.items():
+                if k not in fmt_kwargs:
+                    fmt_kwargs[k] = v
+            try:
+                line = f"  {fmt.format(**fmt_kwargs)}"
+            except (KeyError, IndexError, ValueError):
+                line = f"  [{network}] {content}"
         if total + len(line) > max_chars:
             break
         lines.append(line)

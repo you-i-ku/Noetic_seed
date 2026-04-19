@@ -334,6 +334,86 @@ def sync_from_memory_entities(wm: Optional[dict], memory_entity_records: list,
 # prompt レンダリング (prompt_assembly から呼ばれる)
 # ============================================================
 
+# ============================================================
+# 段階7: Materialized view 化 (memory/wm.jsonl ↔ in-memory WM)
+# ============================================================
+
+def store_wm_fact(wm: dict, entity_name: str, fact_key: str,
+                  fact_value, confidence: float = 0.7,
+                  entity_id: Optional[str] = None) -> dict:
+    """wm タグの記憶を保存 (materialized view 同期の唯一の accessor)。
+
+    段階7 Step 3: memory/wm.jsonl (source of truth) + state["world_model"] (派生) を
+    同時に更新。β+ / bitemporal は既存 add_or_update_fact に委譲。
+
+    Args:
+        wm: state["world_model"] dict
+        entity_name: 対象エンティティ名
+        fact_key: fact キー (e.g. "description", "role")
+        fact_value: fact 値
+        confidence: 確信度 (0.0-1.0、既定 0.7)
+        entity_id: 省略時は _slugify(entity_name) で生成
+
+    Returns:
+        add_or_update_fact の戻り値 (new fact dict)
+    """
+    from core.memory import memory_store  # 循環 import 回避
+
+    if entity_id is None:
+        entity_id = f"ent_{_slugify(entity_name)}"
+    entity = ensure_entity(wm, entity_id, entity_name)
+    new_fact = add_or_update_fact(entity, fact_key, fact_value, confidence)
+
+    content = f"{entity_name}.{fact_key} = {fact_value}"
+    metadata = {
+        "entity_name": entity_name,
+        "entity_id": entity_id,
+        "fact_key": fact_key,
+        "fact_value": fact_value,
+        "confidence": new_fact["confidence"],
+        "valid_from": new_fact["valid_from"],
+        "valid_to": new_fact.get("valid_to"),
+        "observation_count": new_fact["observation_count"],
+    }
+    memory_store("wm", content, metadata,
+                 origin="store_wm_fact",
+                 source_context="wm_materialized")
+    return new_fact
+
+
+def rebuild_wm_from_jsonl(wm: dict, wm_records: list) -> int:
+    """memory/wm.jsonl のレコード群から WM entities を再構築。
+
+    段階7 Step 3: 起動時 / reflect 時に呼ばれる materialized view 再構築。
+    既存 entities は保持 (additive)、同じ fact は β+ 再適用、
+    矛盾 fact は bitemporal で旧 fact valid_to 凍結 + 新 fact 追加。
+
+    Args:
+        wm: state["world_model"]
+        wm_records: memory/wm.jsonl から読み出したレコード群 (古い順推奨)
+
+    Returns:
+        処理に成功した record 数 (不正 record は skip)
+    """
+    count = 0
+    for rec in wm_records:
+        meta = rec.get("metadata", {})
+        entity_name = str(meta.get("entity_name", "")).strip()
+        fact_key = str(meta.get("fact_key", "")).strip()
+        if not entity_name or not fact_key:
+            continue
+        fact_value = meta.get("fact_value")
+        try:
+            confidence = float(meta.get("confidence", 0.7))
+        except (TypeError, ValueError):
+            confidence = 0.7
+        entity_id = meta.get("entity_id") or f"ent_{_slugify(entity_name)}"
+        entity = ensure_entity(wm, entity_id, entity_name)
+        add_or_update_fact(entity, fact_key, fact_value, confidence)
+        count += 1
+    return count
+
+
 def render_for_prompt(wm: Optional[dict], max_entities: int = 10) -> str:
     """[世界モデル] セクションを system_prompt 用にレンダリング。
 

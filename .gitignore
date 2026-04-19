@@ -93,6 +93,12 @@ Noetic_seed/profiles/*/sandbox/secrets/
 Noetic_seed/profiles/_template/secrets.json
 Noetic_seed/profiles/_template/sandbox/secrets/
 
+# MCP bridge (段階6-C) - 個人環境の実設定とランタイムバッファ
+# .mcp.json.example は _template 配下で追跡、実 .mcp.json は個人環境依存なのでどこに置かれても除外
+# (.mcp.json.example はパターンに当たらないので明示除外不要)
+**/.mcp.json
+**/pending_mcp_inputs.jsonl
+
 # IDE
 .vscode/
 .idea/
