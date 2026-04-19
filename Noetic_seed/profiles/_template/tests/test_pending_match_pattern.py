@@ -287,6 +287,77 @@ def test_try_observe_channel_mismatch_skips():
     ])
 
 
+def test_try_observe_no_cross_contamination_same_source_action():
+    """段階8 hotfix 回帰防止: 同 source_action 複数 pending で target が正しく選ばれる。
+
+    バグ再現: smoke 2026-04-20 で観測した現象。
+    - p_..._0023 (response_to_external, expected_channel=device, priority 3.0)
+    - p_..._0011 (response_to_external, expected_channel=claude, priority 1.5)
+    output_display(channel=claude) 実行時、match_pattern 判定では 0011 (claude) のみ
+    候補のはずが、pending_observe 側が match_source_actions だけで絞って priority 順に
+    0023 (device) を誤消化していた。target_id を渡すことで pinpoint 指定可能に。
+    """
+    print("== hotfix: 同 source_action 複数 pending で target ズレなし ==")
+    state = _fresh_state()
+    # 高 priority pending (device channel)
+    device_pending = pending_add(
+        state, source_action="response_to_external",
+        expected_observation="device 応答", lag_kind="minutes",
+        content="device 宛て", cycle_id=0, channel="device",
+        match_pattern={"tool_name_any": ["output_display"], "channel_match": True},
+    )
+    # 低 priority pending (claude channel)
+    claude_pending = pending_add(
+        state, source_action="response_to_external",
+        expected_observation="claude 応答", lag_kind="cycles",
+        content="claude 宛て", cycle_id=0, channel="claude",
+        match_pattern={"tool_name_any": ["output_display"], "channel_match": True},
+    )
+    # tool は claude channel で実行 → claude pending のみ消化されるべき
+    updated = try_observe_all(
+        state=state, tool_name="output_display",
+        tool_args={"channel": "claude"},
+        tool_result="送信完了 (claude): hi onee-tan",
+        channel="claude", cycle_id=1,
+    )
+    return all([
+        _assert(len(updated) == 1, "1 件消化"),
+        _assert(updated[0]["id"] == claude_pending["id"],
+                "claude pending が target (priority 低でも正しく指定)"),
+        _assert(claude_pending["observed_content"] is not None,
+                "claude pending が埋まる"),
+        _assert(device_pending["observed_content"] is None,
+                "device pending は未消化のまま (誤消化されない)"),
+    ])
+
+
+def test_pending_observe_target_id_direct():
+    """pending_observe(target_id=...) 直接指定で特定 pending のみ消化される。"""
+    print("== pending_observe: target_id 指定で特定 pending のみ消化 ==")
+    from core.pending_unified import pending_observe
+    state = _fresh_state()
+    p1 = pending_add(
+        state, source_action="reflect",
+        expected_observation="intent_a", lag_kind="cycles",
+        content="intent A", cycle_id=0, channel="self",
+    )
+    p2 = pending_add(
+        state, source_action="reflect",
+        expected_observation="intent_b", lag_kind="cycles",
+        content="intent B", cycle_id=0, channel="self",
+    )
+    updated = pending_observe(
+        state=state, observed_content="obs",
+        channel="self", cycle_id=1,
+        target_id=p2["id"],
+    )
+    return all([
+        _assert(len(updated) == 1, "1 件消化"),
+        _assert(updated[0]["id"] == p2["id"], "target_id の pending のみ"),
+        _assert(p1["observed_content"] is None, "他 pending (p1) は未消化"),
+    ])
+
+
 # ============================================================
 # 実行
 # ============================================================
@@ -307,6 +378,8 @@ if __name__ == "__main__":
         ("try_observe: priority 最高のみ消化", test_try_observe_priority_wins),
         ("try_observe: 消化済 pending を再消化しない", test_try_observe_already_observed_skipped),
         ("try_observe: channel_match ミスマッチで skip", test_try_observe_channel_mismatch_skips),
+        ("hotfix: 同 source_action 複数 pending で target ズレなし", test_try_observe_no_cross_contamination_same_source_action),
+        ("pending_observe: target_id 直接指定", test_pending_observe_target_id_direct),
     ]
     results = []
     for _label, fn in groups:

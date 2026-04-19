@@ -16,7 +16,7 @@
 """
 from __future__ import annotations
 
-import time
+import uuid
 from datetime import datetime
 from typing import Any, Literal, Optional, TypedDict
 
@@ -130,15 +130,20 @@ def _now_ts() -> str:
 def _new_id(source_action: str, cycle_id: int, session_id: str = "x") -> str:
     """UPS v2 pending ID。
 
-    形式: p_{session_id}_{cycle_id:04d}_{source_action[:8]}_{ms%1000}
-    例:   p_30c4d130_0008_listen_a_123
+    形式: p_{session_id}_{cycle_id:04d}_{source_action[:8]}_{uuid6}
+    例:   p_30c4d130_0008_listen_a_4f2a3b
 
     log entry id ({session_id}_{cycle_id:04d}) と同じ session+cycle prefix
     を含めることで、LLM が log 欄と pending 欄の対応関係を視覚的に追える。
     prefix "p_" で log entry id と明確に区別。
+
+    段階8 hotfix (2026-04-20): 以前は `int(time.time() * 1000) % 1000` の ms 粒度
+    で衝突可能 (同 ms 内に同 source_action で pending_add を連続呼出すと同一 ID)。
+    `try_observe_all` の target_id 精密指定機構が id のユニーク性を前提にするため、
+    uuid.uuid4().hex[:6] (約 1677 万通り) に変更して構造的に衝突を排除。
     """
     sa_short = str(source_action)[:8].replace(" ", "_")
-    return f"p_{session_id}_{cycle_id:04d}_{sa_short}_{int(time.time() * 1000) % 1000}"
+    return f"p_{session_id}_{cycle_id:04d}_{sa_short}_{uuid.uuid4().hex[:6]}"
 
 
 def pending_add(
@@ -223,12 +228,16 @@ def pending_observe(
     match_source_actions: Optional[list[str]] = None,
     limit: int = 1,
     retro_e2_bonus: int = 40,
+    target_id: Optional[str] = None,
 ) -> list[PendingEntry]:
     """observation 到着 → 該当 pending の gap 更新 + 遡及 E2 修正。
 
     observed_content が埋まっていない UPS v2 pending を priority 降順で
     並び替え、上位 limit 件に observation を紐付ける。
     match_source_actions が指定された場合はそれらに限定する。
+    target_id が指定された場合は該当 id の pending のみを対象にする
+    (段階8 hotfix: try_observe_all からの精密指定、同 source_action 複数
+    pending が並立する場合の誤消化を防ぐ)。
 
     §6 "pending_feedback 遅延 E2 遡及" の吸収: observe 対象 pending が
     `retro_log_entry_id` を持つ場合、state.log 中の該当 entry の `e2` を
@@ -243,6 +252,8 @@ def pending_observe(
         limit: 更新する pending 数の上限 (通常 1)。
         retro_e2_bonus: 遡及 E2 修正の bonus 値 (% 単位)。default 40 は
             旧 pending_feedback の既存挙動を継承。0 で無効化。
+        target_id: 特定の pending id のみを消化対象にする (段階8 hotfix)。
+            None なら従来動作 (match_source_actions + priority 降順)。
 
     Returns:
         observation が紐付いた PendingEntry のリスト。
@@ -255,6 +266,8 @@ def pending_observe(
         and (match_source_actions is None
              or p.get("source_action") in match_source_actions)
     ]
+    if target_id is not None:
+        candidates = [p for p in candidates if p.get("id") == target_id]
     candidates.sort(key=lambda p: -float(p.get("priority", 0.0)))
 
     updated: list[PendingEntry] = []
@@ -564,4 +577,5 @@ def try_observe_all(
         cycle_id=cycle_id,
         match_source_actions=[target["source_action"]],
         limit=1,
+        target_id=target["id"],  # 段階8 hotfix: 同 source_action の別 pending 誤消化防止
     )
