@@ -298,6 +298,9 @@ def _apply_retro_e2(state: dict, log_entry_id: str, bonus_pct: int) -> bool:
     return False
 
 
+PENDING_ATTEMPTS_SAFETY_CAP = 50  # 段階8: 強制 deprecate 閾値 (メモリ保護のみ)
+
+
 def pending_prune(
     state: dict,
     current_cycle: int,
@@ -306,10 +309,17 @@ def pending_prune(
 ) -> int:
     """expiry_policy 別の淘汰。
 
-    - "protected": 常に残す (外部由来の永続 pending)
-    - "time":      ttl_cycles 経過で削除
-    - "dynamic_n": gap 上位 `dynamic_n` 件のみ残す
-                   (None なら log 長ベース: max(3, min(20, log_count // 5)))
+    - "protected":  常に残す (外部由来の永続 pending)
+    - "time":       ttl_cycles 経過で削除
+    - "dynamic_n":  gap 上位 `dynamic_n` 件のみ残す
+                    (None なら log 長ベース: max(3, min(20, log_count // 5)))
+    - "deprecated": 段階8 安全弁 (attempts >= 50)。state に残すが
+                    dynamic_n 競争外 = 実質選ばれない (prompt 表示フィルタは別経路)
+
+    段階8 安全弁: attempts >= PENDING_ATTEMPTS_SAFETY_CAP で強制 deprecated
+    マーク。**認知的諦めではなくメモリ保護のみ**、ランタイム異常防止。
+    認知的諦めは iku の wait(dismiss) 明示行使に委ねる
+    (feedback_freedom_to_die 整合)。
 
     UPS v2 以外 (旧 external_message / elyth_notification / unresolved_intent)
     は touch しない (type != "pending" で判別)。
@@ -333,8 +343,16 @@ def pending_prune(
             survivors.append(p)
             continue
 
+        # 安全弁: attempts が閾値超なら強制 deprecated マーク (memory protection)
+        if (p.get("attempts", 1) >= PENDING_ATTEMPTS_SAFETY_CAP
+                and p.get("expiry_policy") != "deprecated"):
+            p["expiry_policy"] = "deprecated"
+
         policy = p.get("expiry_policy", "dynamic_n")
-        if policy == "protected":
+        if policy == "deprecated":
+            # state に残すが dynamic_n 競争外
+            survivors.append(p)
+        elif policy == "protected":
             survivors.append(p)
         elif policy == "time":
             ttl = p.get("ttl_cycles")
@@ -373,6 +391,55 @@ def pending_recalc_priorities(state: dict) -> int:
         p["priority"] = calc_priority(p)
         n += 1
     return n
+
+
+# ============================================================
+# 段階8: 外部入力 → 内部応答意図 (改善5 案 5-A)
+# ============================================================
+
+def pending_add_response_intent(
+    state: dict,
+    channel: str,
+    text: str,
+    cycle_id: int,
+) -> PendingEntry:
+    """外部入力受信時に iku の「応答する」内部意図を pending 化する helper。
+
+    案 5-A 確定 (PLAN §4-1): 外部入力そのものを pending 化せず、
+    iku の内部応答意図を unresolved_intent として一発生成。UPS v2.1
+    一本化原則整合 (source_action は iku 内部 "response_to_external")。
+
+    match_pattern は pending 側で「output_display (channel 一致時) で
+    消化される」という自己消化条件を持つ (段階8 v4 対称設計)。
+    応答しない自由は iku の wait(dismiss=p_xxx) 明示行使で実現
+    (feedback_freedom_to_die 整合)。
+
+    Args:
+        state: 認知状態 dict。
+        channel: 外部入力の channel ("device" / "claude" 等、応答先)。
+        text: 外部入力の本文 (pending content のプレビューに使う)。
+        cycle_id: 現在 cycle。
+
+    Returns:
+        生成された PendingEntry。
+    """
+    snippet = str(text)[:50]
+    return pending_add(
+        state=state,
+        source_action="response_to_external",
+        expected_observation="output_display 実行 (or wait dismiss)",
+        lag_kind="cycles",
+        content=f"{channel} からの入力 '{snippet}...' への応答",
+        cycle_id=cycle_id,
+        channel=channel,
+        expiry_policy="dynamic_n",
+        semantic_merge=True,
+        initial_gap=1.0,
+        match_pattern={
+            "tool_name_any": ["output_display"],
+            "channel_match": True,
+        },
+    )
 
 
 # ============================================================

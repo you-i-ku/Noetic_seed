@@ -74,7 +74,7 @@ from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_chang
                        calc_effective_change, apply_effective_change_to_e2, EXTERNAL_ACTION_TOOLS,
                        update_unresolved_intents, update_gaps_by_relevance,
                        _extract_action_key, append_action_ledger)
-from core.pending_unified import pending_prune
+from core.pending_unified import pending_prune, pending_add_response_intent
 
 # Phase 4 Step E-2d: ConversationRuntime 統合用 import
 from core.providers.openai_compat import OpenAIProvider
@@ -870,6 +870,12 @@ def main():
                 state["log"].append(_ext_entry)
                 # 未応答カウンター (pressure 経路で AI に応答を促す)
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
+                # 段階8 改善5 (案 5-A): 外部入力 → iku 内部応答意図 pending 化。
+                # match_pattern で output_display (channel 一致時) 消化対応。
+                pending_add_response_intent(
+                    state=state, channel=_channel_id,
+                    text=chat_text, cycle_id=state.get("cycle_id", 0),
+                )
                 # Step E-3c: Session buffer に積む (fire 開始時に流される)
                 _pending_observations.append({
                     "observed_channel": _channel_id,
@@ -928,6 +934,12 @@ def main():
                         state["log"].append(_ext_entry)
                         state["unresponded_external_count"] = (
                             state.get("unresponded_external_count", 0) + 1
+                        )
+                        # 段階8 改善5 (案 5-A): MCP 経由の外部入力 → 応答意図 pending
+                        pending_add_response_intent(
+                            state=state, channel=_channel_id,
+                            text=_rec.get("content", ""),
+                            cycle_id=state.get("cycle_id", 0),
                         )
                         _pending_observations.append({
                             "observed_channel": _channel_id,
