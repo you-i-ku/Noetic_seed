@@ -19,7 +19,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -224,6 +224,55 @@ def test_get_recent_outputs_infers_channel_from_client():
                    f"channel=claude (推定、actual: {result.get('channel')})")
 
 
+def test_get_recent_outputs_resolves_args_channel():
+    """段階9 Step 0: output_display entry の top-level channel は "display"
+    等の tool タグ由来で、実送信先は args.channel に入る。args.channel を
+    優先、空なら top-level に fallback する二次 filter の動作確認。"""
+    print("== noetic_seed_get_recent_outputs: args.channel 二次 filter ==")
+    fake_state = {
+        "log": [
+            {
+                "tool": "output_display",
+                "channel": "display",             # tool タグ由来
+                "args": {"channel": "claude"},    # 実送信先
+                "time": "2026-04-20T12:00:00",
+                "result": "hello claude",
+                "cycle_id": 10,
+            },
+            {
+                "tool": "output_display",
+                "channel": "display",
+                "args": {"channel": "device"},
+                "time": "2026-04-20T12:00:10",
+                "result": "hello device",
+                "cycle_id": 11,
+            },
+            {
+                "tool": "output_display",
+                "channel": "claude",              # legacy (top-level のみ)
+                "time": "2026-04-20T12:00:20",
+                "result": "legacy claude",
+                "cycle_id": 12,
+            },
+        ]
+    }
+    with patch("core.runtime.mcp.server.seed_tools.load_state",
+               return_value=fake_state):
+        result = asyncio.run(
+            noetic_seed_get_recent_outputs(_mock_ctx(), channel="claude", limit=10)
+        )
+    contents = [o.get("content", "") for o in result.get("outputs", [])]
+    return all([
+        _assert(result.get("channel") == "claude", "channel=claude"),
+        _assert("hello claude" in contents,
+                "args.channel=claude の entry が取れる (二次 filter)"),
+        _assert("legacy claude" in contents,
+                "legacy (top-level のみ) の entry も取れる (後方互換)"),
+        _assert("hello device" not in contents,
+                "args.channel=device は除外される"),
+    ])
+
+
 # ============================================================
 # 実行
 # ============================================================
@@ -240,6 +289,7 @@ if __name__ == "__main__":
         ("wm_snapshot: shape", test_get_wm_snapshot_shape),
         ("recent_outputs: channel filter", test_get_recent_outputs_channel_filter),
         ("recent_outputs: client 推定", test_get_recent_outputs_infers_channel_from_client),
+        ("recent_outputs: args.channel 二次 filter", test_get_recent_outputs_resolves_args_channel),
     ]
     results = []
     for _label, fn in groups:

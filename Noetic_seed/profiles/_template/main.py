@@ -57,6 +57,7 @@ import random
 import uuid
 import math
 import copy
+import json
 from datetime import datetime
 
 # DualLoggerの設定（printをファイルにも書き出す）
@@ -641,9 +642,25 @@ def main():
                 parse_failed = f"runtime error: {e}"
                 break
 
+            # 段階9 Step 0: LLM② debug log を拡充。
+            # 従来は finish_reason だけ。assistant_messages (LLM② 思考) と
+            # tool_invocations (選択 tool + 完全 args) も記録して、E値の上の
+            # セクションが追跡可能になるようにする。
+            _llm2_text = (summary.assistant_messages[-1].text
+                          if summary.assistant_messages else "")
+            if summary.tool_invocations:
+                _rec = summary.tool_invocations[-1]
+                try:
+                    _tool_call_str = f"{_rec.tool_name}({json.dumps(_rec.tool_input, ensure_ascii=False)})"
+                except (TypeError, ValueError):
+                    _tool_call_str = f"{_rec.tool_name}({_rec.tool_input!r})"
+            else:
+                _tool_call_str = "(no tool invocation)"
             append_debug_log(
                 f"LLM2 via runtime (chain {chain_idx+1}/{len(chain_tools)})",
-                f"finish_reason={summary.finish_reason}",
+                f"finish_reason={summary.finish_reason}\n"
+                f"text={_llm2_text}\n"
+                f"tool_call={_tool_call_str}",
             )
             if summary.assistant_messages:
                 _last_llm_text += (summary.assistant_messages[-1].text or "")

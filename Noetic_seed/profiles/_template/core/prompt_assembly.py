@@ -51,7 +51,10 @@ _APPROVAL_PROTOCOL = (
 
 # system_prompt のソフト上限。超えても動くが警告ログに残す
 # (context_window 全体から completion_reserve / safety_margin を引いた余裕)。
-SYSTEM_PROMPT_SOFT_LIMIT = 8000
+# 段階9 Step 0: 段階8 改善 1+3 (args 表示 / REJECTED prefix) による現実的膨張
+# を反映して 8000 → 16000。tool 定義 (block_budgets.tools=1500) は据え置き、
+# 「AI の能力可視性」を保つ方針 (ゆう 2026-04-20)。
+SYSTEM_PROMPT_SOFT_LIMIT = 16000
 
 
 # ============================================================

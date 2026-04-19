@@ -128,7 +128,11 @@ async def noetic_seed_get_recent_outputs(
     for entry in reversed(log):
         if entry.get("tool") != "output_display":
             continue
-        entry_channel = entry.get("channel", "device")
+        # 段階9 Step 0: output_display の実送信先は args.channel (= "claude" 等)、
+        # top-level entry.channel は "display" 等の tool タグ由来。
+        # args.channel を優先、空なら top-level に fallback (後方互換)。
+        args_channel = (entry.get("args") or {}).get("channel", "")
+        entry_channel = args_channel if args_channel else entry.get("channel", "device")
         if entry_channel != channel:
             continue
         entry_time = entry.get("time", "")
