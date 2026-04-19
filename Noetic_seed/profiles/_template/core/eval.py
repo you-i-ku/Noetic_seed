@@ -404,6 +404,8 @@ def update_unresolved_intents(
             expiry_policy="dynamic_n",
             initial_gap=gap,
             semantic_merge=True,
+            # 段階8 v4: reflection 系は意味類似度で消化 (tool 非依存、content 類似度のみ)
+            match_pattern={"content_similarity_threshold": 0.7},
         )
 
     # 動的容量管理: UPS v2 semantic_merge=True 系のみ対象、gap 上位 N 保持

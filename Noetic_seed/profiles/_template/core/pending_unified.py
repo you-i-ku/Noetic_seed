@@ -22,7 +22,26 @@ from typing import Any, Literal, Optional, TypedDict
 
 
 LagKind = Literal["seconds", "minutes", "hours", "cycles", "unknown"]
-ExpiryPolicy = Literal["protected", "time", "dynamic_n"]
+ExpiryPolicy = Literal["protected", "time", "dynamic_n", "deprecated"]
+
+
+class MatchPattern(TypedDict, total=False):
+    """段階8 v4: pending 側の自己消化条件。
+
+    tool 側に rules を持たせず、pending が「誰が自分を消化できるか」を
+    自己属性として持つ対称設計。全 tool が同じ hook (try_observe_all) で
+    処理され、特別扱いゼロ。Active Inference 対称性:
+    tool = 行動 → observation / pending = 期待 → match の分離。
+
+    全フィールド optional。None or 省略は「その条件は skip」。
+    複数フィールド指定時は AND 判定。
+    """
+    # 候補 tool 名のリスト。None = どの tool でも OK (意味類似度のみで判定)
+    tool_name_any: Optional[list[str]]
+    # tool args.channel と pending.expected_channel を照合するか
+    channel_match: bool
+    # 意味類似度閾値 (tool_result vs pending.content の cosine sim)。None = skip
+    content_similarity_threshold: Optional[float]
 
 
 class PendingEntry(TypedDict, total=False):
@@ -63,6 +82,9 @@ class PendingEntry(TypedDict, total=False):
     origin_cycle: int
     last_cycle: int
     timestamp: str
+
+    # 段階8 v4: pending 側の自己消化条件 (None なら明示 dismiss のみで消える)
+    match_pattern: Optional[MatchPattern]
 
 
 LAG_WEIGHTS: dict[str, float] = {
@@ -133,6 +155,7 @@ def pending_add(
     initial_gap: float = 1.0,
     semantic_merge: bool = False,
     retro_log_entry_id: Optional[str] = None,
+    match_pattern: Optional[MatchPattern] = None,
 ) -> PendingEntry:
     """UPS v2 pending を state['pending'] に追加。
 
@@ -184,6 +207,7 @@ def pending_add(
         "last_cycle": cycle_id,
         "timestamp": now,
         "retro_log_entry_id": retro_log_entry_id,
+        "match_pattern": match_pattern,
     }
     entry["priority"] = calc_priority(entry)
     state.setdefault("pending", []).append(entry)
@@ -349,3 +373,128 @@ def pending_recalc_priorities(state: dict) -> int:
         p["priority"] = calc_priority(p)
         n += 1
     return n
+
+
+# ============================================================
+# 段階8 v4: pending 側 match_pattern 対称消化判定
+# ============================================================
+
+def _matches(
+    mp: dict,
+    tool_name: str,
+    tool_args: dict,
+    tool_result: str,
+    channel: Optional[str],
+    pending: dict,
+) -> bool:
+    """match_pattern の 3 フィールドで判定。全条件 AND (未指定フィールドは skip)。
+
+    Args:
+        mp: pending.match_pattern (dict)。
+        tool_name: 実行された tool 名。
+        tool_args: tool の input args。
+        tool_result: tool の output 文字列。
+        channel: tool args.channel (or fallback "self")。
+        pending: 対象 pending entry。
+
+    Returns:
+        全条件 OK なら True。
+    """
+    # 1. tool_name_any: 指定された tool リストに含まれるか
+    tool_list = mp.get("tool_name_any")
+    if tool_list is not None:
+        if tool_name not in tool_list:
+            return False
+
+    # 2. channel_match: tool の channel と pending.expected_channel 照合
+    if mp.get("channel_match"):
+        if channel != pending.get("expected_channel"):
+            return False
+
+    # 3. content_similarity_threshold: 意味類似度判定
+    threshold = mp.get("content_similarity_threshold")
+    if threshold is not None:
+        if not _sim_check(tool_result, pending.get("content", ""), float(threshold)):
+            return False
+
+    return True
+
+
+def _sim_check(text_a: str, text_b: str, threshold: float) -> bool:
+    """embedding cosine 類似度が threshold 以上なら True。
+
+    embedding 不可 or 空文字列は False (安全側に倒す)。
+    """
+    if not text_a or not text_b:
+        return False
+    try:
+        from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+    except ImportError:
+        return False
+    if not _vector_ready:
+        return False
+    try:
+        vecs = _embed_sync([text_a[:200], text_b[:200]])
+        if not vecs or len(vecs) != 2:
+            return False
+        sim = cosine_similarity(vecs[0], vecs[1])
+        return sim >= threshold
+    except Exception:
+        return False
+
+
+def try_observe_all(
+    state: dict,
+    tool_name: str,
+    tool_args: dict,
+    tool_result: str,
+    channel: Optional[str],
+    cycle_id: int,
+) -> list[PendingEntry]:
+    """全 pending を scan、match_pattern で自己消化判定しマッチすれば pending_observe 発火。
+
+    段階8 v4 の対称設計: tool 側に rules を持たせず、pending 側が match_pattern
+    で「誰が自分を消化できるか」を自己属性として持つ。全 tool が同じ hook で
+    処理され、特別扱いゼロ。PostToolUse hook の Step 8 から呼ばれる。
+
+    1 tool 実行あたり最大 1 pending を消化 (最初に match した pending のみ)。
+    複数 match がある場合は priority 降順で選ぶ。
+
+    Args:
+        state: 認知状態 dict。
+        tool_name: 実行された tool 名。
+        tool_args: tool input args。
+        tool_result: tool output 文字列。
+        channel: tool args.channel or "self" fallback。
+        cycle_id: 現在 cycle。
+
+    Returns:
+        消化された PendingEntry のリスト (通常 0 件 or 1 件)。
+    """
+    pending = state.get("pending", [])
+    candidates = []
+    for p in pending:
+        if p.get("type") != "pending":
+            continue
+        if p.get("observed_content") is not None:
+            continue  # 消化済 skip
+        mp = p.get("match_pattern")
+        if not mp:
+            continue  # match_pattern なし = 明示 dismiss のみで消化
+        if _matches(mp, tool_name, tool_args, tool_result, channel, p):
+            candidates.append(p)
+
+    if not candidates:
+        return []
+
+    # priority 降順で最初の 1 件を消化
+    candidates.sort(key=lambda p: -float(p.get("priority", 0.0)))
+    target = candidates[0]
+    return pending_observe(
+        state=state,
+        observed_content=tool_result,
+        channel=channel or "self",
+        cycle_id=cycle_id,
+        match_source_actions=[target["source_action"]],
+        limit=1,
+    )

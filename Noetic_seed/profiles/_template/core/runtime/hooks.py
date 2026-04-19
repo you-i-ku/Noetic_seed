@@ -330,6 +330,19 @@ def make_post_tool_use_evaluation(
             "eff": round(eff, 4),
         }
 
+        # 8. 段階8 v4: 全 pending の match_pattern で自己消化判定
+        # tool 側に rules を持たせず、pending 側が「誰が自分を消化できるか」を
+        # 自己属性として持つ対称設計。全 tool が同じ hook で処理される。
+        from core.pending_unified import try_observe_all
+        try_observe_all(
+            state=state,
+            tool_name=tool_name,
+            tool_args=tool_input,
+            tool_result=output_str,
+            channel=tool_input.get("channel") or "self",
+            cycle_id=cycle_id,
+        )
+
         return HookRunResult.allow(messages=[
             f"[post_eval] tool={tool_name} "
             f"e2={_pct_str(e2)} e3={e3_str} e4={_pct_str(e4)} "
