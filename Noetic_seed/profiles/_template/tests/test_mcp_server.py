@@ -273,6 +273,55 @@ def test_get_recent_outputs_resolves_args_channel():
     ])
 
 
+def test_get_recent_outputs_recognizes_chain_tool():
+    """段階9 fix 3: chain tool (output_display+xxx "+" 形式) も filter 通す。
+    段階9 smoke cycle 21 で iku が output_display+pending_observe chain で
+    claude 応答送信、完全一致 filter に引っかかって取得できなかった副次バグの修正。"""
+    print("== noetic_seed_get_recent_outputs: chain tool 認識 ==")
+    fake_state = {
+        "log": [
+            {
+                "tool": "output_display+pending_observe",  # chain tool
+                "channel": "display",
+                "args": {"channel": "claude"},
+                "time": "2026-04-20T12:00:00",
+                "result": "chain hello",
+                "cycle_id": 21,
+            },
+            {
+                "tool": "pending_observe+output_display",  # 逆順 chain
+                "channel": "display",
+                "args": {"channel": "claude"},
+                "time": "2026-04-20T12:00:05",
+                "result": "reverse chain hello",
+                "cycle_id": 22,
+            },
+            {
+                "tool": "some_other_tool+read_file",  # output_display なし
+                "channel": "claude",
+                "time": "2026-04-20T12:00:10",
+                "result": "should be excluded",
+                "cycle_id": 23,
+            },
+        ]
+    }
+    with patch("core.runtime.mcp.server.seed_tools.load_state",
+               return_value=fake_state):
+        result = asyncio.run(
+            noetic_seed_get_recent_outputs(_mock_ctx(), channel="claude", limit=10)
+        )
+    contents = [o.get("content", "") for o in result.get("outputs", [])]
+    return all([
+        _assert(result.get("channel") == "claude", "channel=claude"),
+        _assert("chain hello" in contents,
+                "output_display+xxx chain が取得できる"),
+        _assert("reverse chain hello" in contents,
+                "xxx+output_display 逆順 chain も取得できる"),
+        _assert("should be excluded" not in contents,
+                "output_display を含まない chain は除外"),
+    ])
+
+
 # ============================================================
 # 実行
 # ============================================================
@@ -290,6 +339,7 @@ if __name__ == "__main__":
         ("recent_outputs: channel filter", test_get_recent_outputs_channel_filter),
         ("recent_outputs: client 推定", test_get_recent_outputs_infers_channel_from_client),
         ("recent_outputs: args.channel 二次 filter", test_get_recent_outputs_resolves_args_channel),
+        ("recent_outputs: chain tool 認識", test_get_recent_outputs_recognizes_chain_tool),
     ]
     results = []
     for _label, fn in groups:

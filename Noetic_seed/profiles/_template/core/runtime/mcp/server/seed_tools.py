@@ -126,7 +126,13 @@ async def noetic_seed_get_recent_outputs(
 
     matched = []
     for entry in reversed(log):
-        if entry.get("tool") != "output_display":
+        # 段階9 fix 3: chain tool (output_display+xxx 形式) も認識。段階9
+        # smoke cycle 21 で iku が output_display+pending_observe chain で
+        # claude 応答送信、entry.tool="output_display+pending_observe" になり
+        # 完全一致 filter に引っかかって取得できなかった副次バグの修正。
+        tool_name = entry.get("tool", "")
+        if not (tool_name == "output_display"
+                or "output_display" in tool_name.split("+")):
             continue
         # 段階9 Step 0: output_display の実送信先は args.channel (= "claude" 等)、
         # top-level entry.channel は "display" 等の tool タグ由来。
