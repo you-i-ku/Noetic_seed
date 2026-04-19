@@ -263,6 +263,31 @@ def test_handler_view_image():
 # 異常系
 # ============================================================
 
+def test_output_display_description_mentions_channel_header():
+    """段階9 fix 2-b: output_display の description 両経路に log [channel=X]
+    header からの channel 値導出ガイドが含まれる (symbol grounding 強化)。
+    - strict ToolSpec (cognition.py): Anthropic tool_use schema に渡される
+    - legacy TOOLS dict: prompt [利用可能なツール] に表示される"""
+    print("== output_display description: [channel=X] header ガイド ==")
+    # 1. strict ToolSpec (cognition.py)
+    reg = ToolRegistry()
+    register_noetic_tools(reg, _fake_tools_dict())
+    strict_desc = (reg.get("output_display").description or "")
+    # 2. legacy TOOLS dict (tools/__init__.py)
+    from tools import TOOLS as _REAL_TOOLS
+    legacy_desc = _REAL_TOOLS["output_display"]["desc"]
+    return all([
+        _assert("[channel=X]" in strict_desc,
+                "strict: [channel=X] header 表記含む"),
+        _assert("channel 引数" in strict_desc,
+                "strict: 引数への繋げ方明示"),
+        _assert("[channel=X]" in legacy_desc,
+                "legacy: [channel=X] header 表記含む"),
+        _assert("channel 引数" in legacy_desc,
+                "legacy: 引数への繋げ方明示"),
+    ])
+
+
 def test_missing_tool_raises():
     print("== tools_dict に必要 tool 欠落 → KeyError ==")
     reg = ToolRegistry()
@@ -295,6 +320,7 @@ if __name__ == "__main__":
         ("permission 割当", test_permissions_per_family),
         ("handler delegate: output_display", test_handler_delegates_to_tools_dict),
         ("handler delegate: view_image", test_handler_view_image),
+        ("output_display: [channel=X] ガイド", test_output_display_description_mentions_channel_header),
         ("tool 欠落 → KeyError", test_missing_tool_raises),
     ]
     results = []

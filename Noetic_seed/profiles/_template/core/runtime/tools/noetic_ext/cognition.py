@@ -75,6 +75,8 @@ def _build_specs(tools_dict: dict) -> list:
             description=(
                 "発話を channel 指定で届ける。送信先 channel は WM.channels を観察して決定、"
                 "受信 channel に対応させて返すこと (段階6-C v3: 観察駆動)。"
+                "log entry の [channel=X] header の X と同じ値を channel 引数に指定すると、"
+                "その X を送ってきた相手に対応した返信になる。"
             ),
             input_schema={
                 "type": "object",
