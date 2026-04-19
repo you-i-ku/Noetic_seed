@@ -249,8 +249,17 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
     # {session}_{cycle:04d} に対応)。dismiss 時はこの p_ prefix id を渡す。
     pending = state.get("pending", [])
     if pending:
+        # 段階9 fix 1: 未消化と消化済を分離。消化済 (observed_content 埋まり or
+        # gap=0.0) を "未対応事項" に出すと LLM が「まだ応答してない」と誤認する。
+        unresolved = [p for p in pending
+                      if p.get("observed_content") is None
+                      and p.get("gap", 0.0) > 0.0]
+        resolved = [p for p in pending
+                    if p.get("observed_content") is not None
+                    or p.get("gap", 0.0) == 0.0]
+
         pending_lines = []
-        for p in sorted(pending, key=lambda x: -x.get("priority", 0))[:10]:
+        for p in sorted(unresolved, key=lambda x: -x.get("priority", 0))[:10]:
             p_type = p.get("type", "?")
             content = p.get("content", "")[:80]
             p_id = p.get("id", "?")
@@ -271,7 +280,28 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
                 p_ch = p.get("channel", "")
                 ch_tag = f" ch={p_ch}" if p_ch else ""
                 pending_lines.append(f"  [{p_type} dismiss_id={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
-        pending_text = "\n".join(pending_lines)
+
+        # 段階9 fix 1: 副次セクション。直近 3 件の消化済を参考表示し、
+        # LLM に「これは完了したこと」を構造的に認識させる。
+        if resolved:
+            resolved_sorted = sorted(
+                resolved,
+                key=lambda p: p.get("observed_time") or "",
+                reverse=True,
+            )[:3]
+            pending_lines.append("")
+            pending_lines.append("  【最近完了した応答 (参考、既に済)】")
+            for p in resolved_sorted:
+                ch = p.get("observed_channel") or p.get("expected_channel") or ""
+                ch_tag = f" ch={ch}" if ch else ""
+                src = p.get("source_action", "?")
+                obs_time = p.get("observed_time", "") or ""
+                content = p.get("content", "")[:60]
+                pending_lines.append(
+                    f"  [完了 src={src}{ch_tag}] {content} → 観測済 ({obs_time})"
+                )
+
+        pending_text = "\n".join(pending_lines) if pending_lines else "  なし"
     else:
         pending_text = "  なし"
 
