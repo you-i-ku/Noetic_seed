@@ -21,15 +21,32 @@ def _tier_cap(pos_from_end: int, boundaries: list, caps: list) -> int:
 def _render_log_entry(entry: dict, result_cap: int, intent_cap: int, with_evals: bool = False) -> str:
     """1件の log エントリを鮮度勾配 cap 付きで 1 行レンダリングする。
     result が cap を超えた場合は明示的な truncation marker を付けて AI に
-    「表示上の省略であって、ツール実行時は完全に取得済み」と伝える。"""
+    「表示上の省略であって、ツール実行時は完全に取得済み」と伝える。
+
+    段階8 改善1+3:
+    - args フィールドが entry にあれば intent の前に表示 (cap 200、長ければ "..." 省略)
+    - result に "[REJECTED]" が含まれる場合、行頭に "⚠️" prefix を付与して視覚強調
+    """
+    result = entry.get("result", "") or ""
+    result_str = str(result)
+    is_rejected = "[REJECTED]" in result_str
+
+    prefix = "⚠️ " if is_rejected else "  "
     _ch = entry.get("channel", "")
     _ch_tag = f"[{_ch}] " if _ch else ""
-    line = f"  {entry.get('id','')} {entry['time']} {_ch_tag}{entry['tool']}"
+    line = f"{prefix}{entry.get('id','')} {entry['time']} {_ch_tag}{entry['tool']}"
+
+    # 段階8 改善1: args 表示 (intent より前、cap 200)
+    args = entry.get("args")
+    if args:
+        args_str = str(args)
+        if len(args_str) > 200:
+            args_str = args_str[:200] + "..."
+        line += f" args:{args_str}"
+
     if entry.get("intent"):
         line += f" (intent={entry['intent'][:intent_cap]})"
-    result = entry.get("result", "") or ""
     if result:
-        result_str = str(result)
         total_len = len(result_str)
         if total_len > result_cap:
             shown = result_str[:result_cap]

@@ -618,6 +618,7 @@ def main():
         prev_result = ""
         _executed_targets = set()
         _last_llm_text = ""
+        first_args: dict = {}  # 段階8 改善1: 先頭 tool の args を log entry に保存
 
         for chain_idx, chain_tool in enumerate(chain_tools):
             if chain_tool not in ctrl["allowed_tools"]:
@@ -659,6 +660,11 @@ def main():
                 intent = str(ti.get("tool_intent", "") or "")
                 expect = str(ti.get("tool_expected_outcome", "") or "")
                 _chain_action_key = _extract_action_key(rec.tool_name, ti)
+                # 段階8 改善1: 承認 3 層フィールドを除いた tool 固有 args を保存
+                first_args = {
+                    k: v for k, v in ti.items()
+                    if k not in ("tool_intent", "tool_expected_outcome", "message")
+                }
 
             _target_id = (ti.get("reply_to_id") or ti.get("post_id")
                           or ti.get("tweet_url") or ti.get("path") or "")
@@ -765,6 +771,8 @@ def main():
             entry["intent"] = intent
         if expect:
             entry["expect"] = expect
+        if first_args:
+            entry["args"] = first_args
         if e1:
             entry["e1"] = e1
         if e2:

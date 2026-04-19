@@ -218,24 +218,24 @@ class ConversationRuntime:
         current_input = pre.updated_input or tool_input
 
         if pre.denied:
-            self._finalize(rec, "denied by pre hook", is_error=True)
+            self._finalize(rec, "[REJECTED] denied by pre hook", is_error=True)
             return rec
         if pre.failed:
-            self._finalize(rec, "pre hook failed", is_error=True)
+            self._finalize(rec, "[REJECTED] pre hook failed", is_error=True)
             return rec
 
         decision = self.permission_enforcer.check(tool_name, current_input)
         rec.permission_decision = decision.value
 
         if decision == PermissionDecision.DENY:
-            self._finalize(rec, "permission denied", is_error=True)
+            self._finalize(rec, "[REJECTED] permission denied", is_error=True)
             return rec
 
         if decision == PermissionDecision.ASK:
             approved = self._ask_approval(tool_name, current_input,
                                           rec.pre_hook_messages)
             if not approved:
-                self._finalize(rec, "user rejected", is_error=True)
+                self._finalize(rec, "[REJECTED] user denied", is_error=True)
                 return rec
 
         try:

@@ -84,6 +84,9 @@ def build_world_model_section(world_model: Optional[dict] = None) -> str:
 def build_log_block(state: dict, budget_tok: Optional[int] = None) -> str:
     """鮮度勾配 log block。既存 prompt.py::_pack_log_block 流用。
 
+    段階8 改善1+3: log 先頭に表示規約の説明を加える (args 表示 / [REJECTED] の
+    ⚠️ マーク)。LLM に事実を明示するだけで命令はしない (feedback_llm_as_brain 整合)。
+
     Args:
         state: state dict (log list を含む)
         budget_tok: log block に使えるトークン予算。None で _calc_log_budget。
@@ -91,7 +94,12 @@ def build_log_block(state: dict, budget_tok: Optional[int] = None) -> str:
     if budget_tok is None:
         budget_tok = _calc_log_budget()
     log = state.get("log", [])
-    return _pack_log_block(log, budget_tok, with_evals=True)
+    body = _pack_log_block(log, budget_tok, with_evals=True)
+    explainer = (
+        "(表示規約: args:{...} は tool 呼出引数 cap 200、"
+        "行頭 ⚠️ は承認者が拒否した action = 同じ args 再試行は反対される可能性)\n"
+    )
+    return explainer + body
 
 
 def build_tool_block(allowed_tools: Optional[set],
