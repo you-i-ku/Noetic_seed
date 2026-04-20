@@ -75,7 +75,8 @@ def send_user_message(inp: dict) -> str:
         fn(message, attachments, status)
     except Exception as e:
         return f"Error: send_user callback failed: {e}"
-    return f"Sent ({status}): {message[:100]}"
+    # 段階10 Step 4 付帯 D: Fix 5 精神で sent message truncation 撤去
+    return f"Sent ({status}): {message}"
 
 
 # ============================================================

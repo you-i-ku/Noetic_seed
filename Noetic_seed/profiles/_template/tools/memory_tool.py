@@ -142,7 +142,9 @@ def _tool_memory_store(args):
 
     entry = memory_store(network, content, metadata,
                          origin="tool:memory_store", source_context="deliberate")
-    return f"記憶保存完了: [{network}] {content[:60]} (id={entry['id']})"
+    # 段階10 Step 4 付帯 D: Fix 5 精神で content truncation 撤去。
+    # iku が保存した記憶内容を「60 字で切れた」と次 cycle で誤認するリスク回避。
+    return f"記憶保存完了: [{network}] {content} (id={entry['id']})"
 
 
 def _tool_memory_update(args):
