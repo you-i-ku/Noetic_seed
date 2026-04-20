@@ -813,6 +813,10 @@ def main():
                 # reflection.py:15 で参照されてたが誰も書いてなかった既存 bug の副次修復。
                 # entropy.py の calc_pressure_signals で pe signal として pressure 加算にも使う。
                 state["last_prediction_error"] = entry["prediction_error"]
+                # 段階10 柱 B: tool 別 confidence の β+ 更新 (段階3 式再利用)。
+                # prediction_error_ec は Step 3 で追加予定 (Step 2 時点では e2 軸のみ)。
+                from core.predictor import update_predictor_confidence
+                update_predictor_confidence(state, tool_name, entry["prediction_error"])
         _archive_entries([entry])
         state["log"].append(entry)
 

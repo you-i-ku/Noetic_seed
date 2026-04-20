@@ -108,10 +108,12 @@ def test_medium_predictor_reads_prediction_from_candidate():
         },
     }
     r = p.predict(cand, {})
+    # 段階10 柱 B: state.predictor_confidence 未 init → e2_conf default 0.7 で乗算
+    # 期待 confidence = base 0.7 * e2_conf_default 0.7 = 0.49
     return all([
         _assert(r["predicted_e2"] == 72, f"72 (actual: {r['predicted_e2']})"),
         _assert(r["detail"] == "medium", "detail=medium (LLM① 併合由来)"),
-        _assert(abs(r["confidence"] - 0.7) < 1e-9, "confidence=0.7"),
+        _assert(abs(r["confidence"] - 0.49) < 1e-9, f"confidence=0.49 (段階10 e2_conf 乗算後、actual: {r['confidence']})"),
     ])
 
 

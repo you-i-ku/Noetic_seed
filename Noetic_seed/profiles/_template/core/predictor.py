@@ -27,6 +27,77 @@ from typing import Optional
 
 
 # ============================================================
+# 段階10 柱 B: Predictor 自己学習 (β+ 式再利用)
+# ============================================================
+#
+# STAGE10 PLAN v1 §3-B の実装。段階3 update_fact_confidence の β+ 式を
+# そのまま再利用し、tool 別 {e2_conf, ec_conf} を予測誤差で自己学習する。
+#
+# matches 判定 = 案 (a) 自己相対化:
+#   - bootstrap (history < 5): 全 matches 扱い (初期不安定期の救済)
+#   - 以降: abs(error) < median(history) なら matches
+#
+# history は直近 100 件 FIFO (PC メモリの現実的制約)。
+
+HISTORY_CAP = 100
+BOOTSTRAP_N = 5
+
+
+def _is_match(error: float, history: list) -> bool:
+    """案 (a) 自己相対化。history 件数 < BOOTSTRAP_N なら全 matches。"""
+    if len(history) < BOOTSTRAP_N:
+        return True
+    sorted_h = sorted(history)
+    median = sorted_h[len(sorted_h) // 2]
+    return abs(float(error)) < median
+
+
+def _append_history(state: dict, error: float, axis: str = "e2") -> None:
+    """history に abs(error) を FIFO append、cap HISTORY_CAP。"""
+    key = f"prediction_error_history_{axis}"
+    history = state.setdefault(key, [])
+    history.append(abs(float(error)))
+    if len(history) > HISTORY_CAP:
+        del history[0]
+
+
+def update_predictor_confidence(state: dict, tool_name: str,
+                                 prediction_error: float,
+                                 prediction_error_ec: Optional[float] = None) -> None:
+    """段階3 update_fact_confidence の β+ 式を再利用して tool 別 confidence 更新。
+
+    Args:
+        state: state dict
+        tool_name: 実行された tool 名 (空文字なら no-op)
+        prediction_error: E2 軸の予測誤差 (abs 値、0-100 scale)
+        prediction_error_ec: EC 軸の予測誤差 (abs 値、0-1 scale)。Step 3 で有効化
+    """
+    if not tool_name:
+        return
+    from core.world_model import update_fact_confidence
+
+    pc = state.setdefault("predictor_confidence", {})
+    entry = pc.setdefault(tool_name, {"e2_conf": 0.7, "ec_conf": 0.7})
+
+    # E2 軸: 現在の history で matches 判定 → β+ 更新 → history append (順序重要)
+    history_e2 = state.setdefault("prediction_error_history_e2", [])
+    matches_e2 = _is_match(prediction_error, history_e2)
+    fake_fact = {"confidence": entry["e2_conf"]}
+    update_fact_confidence(fake_fact, matches_e2)
+    entry["e2_conf"] = fake_fact["confidence"]
+    _append_history(state, prediction_error, "e2")
+
+    # EC 軸 (Step 3 で有効化、Step 2 時点では prediction_error_ec=None)
+    if prediction_error_ec is not None:
+        history_ec = state.setdefault("prediction_error_history_ec", [])
+        matches_ec = _is_match(prediction_error_ec, history_ec)
+        fake_fact = {"confidence": entry["ec_conf"]}
+        update_fact_confidence(fake_fact, matches_ec)
+        entry["ec_conf"] = fake_fact["confidence"]
+        _append_history(state, prediction_error_ec, "ec")
+
+
+# ============================================================
 # カテゴリ定数 (WORLD_MODEL.md §6 段階5)
 # ============================================================
 
@@ -147,9 +218,17 @@ class MediumPredictor(BasePredictor):
                 world_model: Optional[dict] = None) -> dict:
         prediction = candidate.get("prediction")
         if isinstance(prediction, dict) and prediction.get("source") == "medium":
+            # 段階10 柱 B: tool 別 e2_conf で confidence を調整
+            # (未実行 tool は 0.7 start、β+ 更新で動的分化)
+            tool_name = str(candidate.get("tool", ""))
+            pc_entry = state.get("predictor_confidence", {}).get(
+                tool_name, {"e2_conf": 0.7, "ec_conf": 0.7}
+            )
+            base_confidence = float(prediction.get("confidence", 0.7))
+            adjusted_confidence = base_confidence * float(pc_entry.get("e2_conf", 0.7))
             return make_prediction(
                 category=CATEGORY_OTHER,  # category は補助情報、multiplier は predicted_e2 主
-                confidence=prediction.get("confidence", 0.7),
+                confidence=adjusted_confidence,
                 detail="medium",
                 predicted_e2=prediction.get("predicted_e2", 50),
             )
