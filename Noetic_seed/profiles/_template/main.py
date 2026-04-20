@@ -809,6 +809,10 @@ def main():
                 _actual_e2 = max(0, min(100, int(_actual_e2_m.group(0))))
                 entry["actual_e2"] = _actual_e2
                 entry["prediction_error"] = abs(_pe2 - _actual_e2)
+                # 段階10 柱 A: state 直下にも書き込み。
+                # reflection.py:15 で参照されてたが誰も書いてなかった既存 bug の副次修復。
+                # entropy.py の calc_pressure_signals で pe signal として pressure 加算にも使う。
+                state["last_prediction_error"] = entry["prediction_error"]
         _archive_entries([entry])
         state["log"].append(entry)
 
