@@ -232,8 +232,9 @@ def parse_candidates(text: str, allowed_tools: set) -> list:
             continue
 
         # 段階9: predicted_e2 抽出 (行末尾の「/ predicted_e2: XX」表記)
-        # 抽出できたら candidate に {source: medium, predicted_e2, confidence}
-        # を格納。既存 tool 抽出ロジックに干渉しないよう line から除去。
+        # 段階10 柱 C: predicted_ec (0.0-1.0) も併記形式で抽出。
+        # 抽出できたら candidate に {source: medium, predicted_e2, confidence,
+        # predicted_ec?} を格納。既存 tool 抽出ロジックに干渉しないよう line から除去。
         prediction = None
         pe2_match = re.search(r'predicted_e2\s*[:：]\s*(\d+)', line)
         if pe2_match:
@@ -246,7 +247,17 @@ def parse_candidates(text: str, allowed_tools: set) -> list:
                 }
             except (ValueError, TypeError):
                 pass
-            # 既存 tool 抽出ロジックのノイズを避けるため line から除去
+            # 段階10 柱 C: predicted_ec 抽出 (併記時のみ、欠けても OK = 後方互換)
+            # 負値は LLM 出力エラー想定だが防御的に受け取って clamp 側で 0.0 化
+            pec_match = re.search(r'predicted_ec\s*[:：]\s*(-?[0-9]*\.?[0-9]+)', line)
+            if pec_match and prediction is not None:
+                try:
+                    pec = max(0.0, min(1.0, float(pec_match.group(1))))
+                    prediction["predicted_ec"] = pec
+                except (ValueError, TypeError):
+                    pass
+            # 既存 tool 抽出ロジックのノイズを避けるため line から除去 (ec を先に除去)
+            line = re.sub(r'\s*/?\s*predicted_ec\s*[:：]\s*-?[0-9]*\.?[0-9]+', '', line)
             line = re.sub(r'\s*/?\s*predicted_e2\s*[:：]\s*\d+', '', line).strip()
 
         if "->" in line or "→" in line:

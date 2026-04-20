@@ -146,11 +146,12 @@ def test_predicted_outcome_low_e2_penalizes():
     cand = {"tool": "x_post"}
     pred = {"category": "error", "confidence": 0.6, "detail": "light",
             "predicted_e2": 20}
-    mult = _predicted_outcome_multiplier(pred, cand, WORLD_MODEL_CFG)
+    # 段階10 柱 C: signature に state 追加、penalty ラベル "low_outcome" に変更
+    mult = _predicted_outcome_multiplier(pred, cand, {}, WORLD_MODEL_CFG)
     return all([
         _assert(abs(mult - 0.2) < 1e-9, f"multiplier=0.2 (actual: {mult})"),
-        _assert(any("low_predicted_e2" in p for p in cand.get("penalties", [])),
-                "low_predicted_e2 記録"),
+        _assert(any("low_outcome" in p for p in cand.get("penalties", [])),
+                "low_outcome 記録 (段階10 柱 C で low_predicted_e2 から改名)"),
     ])
 
 
@@ -158,11 +159,11 @@ def test_predicted_outcome_mid_e2_moderate_penalty():
     print("== predicted_outcome (段階9): 中 predicted_e2=30 → 0.3 + penalty ==")
     cand = {"tool": "x_post"}
     pred = {"category": "no_response", "confidence": 0.5, "predicted_e2": 30}
-    mult = _predicted_outcome_multiplier(pred, cand, WORLD_MODEL_CFG)
+    mult = _predicted_outcome_multiplier(pred, cand, {}, WORLD_MODEL_CFG)
     return all([
         _assert(abs(mult - 0.3) < 1e-9, f"multiplier=0.3 (actual: {mult})"),
-        _assert(any("low_predicted_e2" in p for p in cand.get("penalties", [])),
-                "low_predicted_e2 記録 (< 0.4)"),
+        _assert(any("low_outcome" in p for p in cand.get("penalties", [])),
+                "low_outcome 記録 (< 0.4)"),
     ])
 
 
@@ -172,11 +173,11 @@ def test_predicted_outcome_continuous_scaling():
     cand2 = {"tool": "x_post"}
     cand3 = {"tool": "x_post"}
     m1 = _predicted_outcome_multiplier(
-        {"category": "other", "predicted_e2": 50}, cand1, WORLD_MODEL_CFG)
+        {"category": "other", "predicted_e2": 50}, cand1, {}, WORLD_MODEL_CFG)
     m2 = _predicted_outcome_multiplier(
-        {"category": "positive_reply", "predicted_e2": 70}, cand2, WORLD_MODEL_CFG)
+        {"category": "positive_reply", "predicted_e2": 70}, cand2, {}, WORLD_MODEL_CFG)
     m3 = _predicted_outcome_multiplier(
-        {"category": "positive_reply", "predicted_e2": 100}, cand3, WORLD_MODEL_CFG)
+        {"category": "positive_reply", "predicted_e2": 100}, cand3, {}, WORLD_MODEL_CFG)
     return all([
         _assert(abs(m1 - 0.5) < 1e-9, f"pe2=50 → 0.5 (actual: {m1})"),
         _assert(abs(m2 - 0.7) < 1e-9, f"pe2=70 → 0.7 (actual: {m2})"),
@@ -190,11 +191,11 @@ def test_predicted_outcome_zero_floor():
     print("== predicted_outcome (段階9): pe2=0 → floor 0.05 ==")
     cand = {"tool": "x_post"}
     pred = {"predicted_e2": 0}
-    mult = _predicted_outcome_multiplier(pred, cand, WORLD_MODEL_CFG)
+    mult = _predicted_outcome_multiplier(pred, cand, {}, WORLD_MODEL_CFG)
     return all([
         _assert(abs(mult - 0.05) < 1e-9, f"pe2=0 → floor 0.05 (actual: {mult})"),
-        _assert(any("low_predicted_e2=0" in p for p in cand.get("penalties", [])),
-                "low_predicted_e2=0 記録"),
+        _assert(any("low_outcome" in p for p in cand.get("penalties", [])),
+                "low_outcome 記録 (pe2=0 相当)"),
     ])
 
 
@@ -202,7 +203,7 @@ def test_predicted_outcome_missing_pe2_defaults_to_50():
     print("== predicted_outcome (段階9): predicted_e2 欠損 → default 50 = 0.5 ==")
     cand = {"tool": "x_post"}
     pred = {"category": "error"}  # 段階5 互換、predicted_e2 なし
-    mult = _predicted_outcome_multiplier(pred, cand, WORLD_MODEL_CFG)
+    mult = _predicted_outcome_multiplier(pred, cand, {}, WORLD_MODEL_CFG)
     return _assert(abs(mult - 0.5) < 1e-9,
                    f"欠損時 default 50 → 0.5 (actual: {mult})")
 
@@ -228,7 +229,7 @@ def test_multipliers_read_from_cfg():
     cand2 = {"tool": "x"}
     # pe2=0 は通常 floor 0.05 だが、custom cfg で floor=0.1 に引き上げられる
     m2 = _predicted_outcome_multiplier(
-        {"predicted_e2": 0}, cand2, custom_cfg)
+        {"predicted_e2": 0}, cand2, {}, custom_cfg)
     return all([
         _assert(abs(m1 - 0.2) < 1e-9, f"channel_mismatch=0.2 (actual: {m1})"),
         _assert(abs(m2 - 0.1) < 1e-9, f"predicted_e2_floor=0.1 (actual: {m2})"),

@@ -27,7 +27,6 @@ from core.predictor import (
     _append_history,
     HISTORY_CAP,
     BOOTSTRAP_N,
-    MediumPredictor,
 )
 
 
@@ -196,53 +195,11 @@ def test_update_ec_axis_step2():
 
 
 # ============================================================
-# MediumPredictor: e2_conf 適用
-# ============================================================
-
-def test_medium_predictor_uses_e2_conf():
-    print("== MediumPredictor: tool 別 e2_conf で confidence 調整 ==")
-    state = {
-        "predictor_confidence": {
-            "output_display": {"e2_conf": 0.5, "ec_conf": 0.7},
-        }
-    }
-    candidate = {
-        "tool": "output_display",
-        "prediction": {
-            "source": "medium",
-            "confidence": 0.8,
-            "predicted_e2": 80,
-        },
-    }
-    result = MediumPredictor().predict(candidate, state)
-    # adjusted = 0.8 * 0.5 = 0.4
-    return all([
-        _assert(abs(result["confidence"] - 0.4) < 1e-9, f"0.8 * 0.5 = 0.4 (actual: {result['confidence']})"),
-        _assert(result["predicted_e2"] == 80, "predicted_e2 は影響なし (pragmatic 軸は controller で別処理)"),
-    ])
-
-
-def test_medium_predictor_default_e2_conf():
-    print("== MediumPredictor: 未 init tool は e2_conf=0.7 default ==")
-    state = {}
-    candidate = {
-        "tool": "new_tool",
-        "prediction": {
-            "source": "medium",
-            "confidence": 0.9,
-            "predicted_e2": 60,
-        },
-    }
-    result = MediumPredictor().predict(candidate, state)
-    # adjusted = 0.9 * 0.7 = 0.63
-    return _assert(
-        abs(result["confidence"] - 0.63) < 1e-9,
-        f"0.9 * 0.7 = 0.63 (actual: {result['confidence']})",
-    )
-
-
-# ============================================================
 # state.py lazy init
+#
+# 注: Step 2 で入れていた MediumPredictor への e2_conf 乗算は Step 3 (案 イ) で
+# revert 済。selection 接続は controller._predicted_outcome_multiplier に一本化。
+# MediumPredictor の挙動 test は test_medium_predictor.py に集約。
 # ============================================================
 
 def test_state_lazy_init_new_state():
@@ -274,8 +231,6 @@ if __name__ == "__main__":
         test_update_tool_separation,
         test_update_history_appended,
         test_update_ec_axis_step2,
-        test_medium_predictor_uses_e2_conf,
-        test_medium_predictor_default_e2_conf,
         test_state_lazy_init_new_state,
     ]
     results = [t() for t in tests]

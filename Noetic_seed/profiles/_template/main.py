@@ -813,10 +813,20 @@ def main():
                 # reflection.py:15 で参照されてたが誰も書いてなかった既存 bug の副次修復。
                 # entropy.py の calc_pressure_signals で pe signal として pressure 加算にも使う。
                 state["last_prediction_error"] = entry["prediction_error"]
-                # 段階10 柱 B: tool 別 confidence の β+ 更新 (段階3 式再利用)。
-                # prediction_error_ec は Step 3 で追加予定 (Step 2 時点では e2 軸のみ)。
+                # 段階10 柱 C: predicted_ec の実測誤差を計算 (prediction_error_ec)。
+                # eff_change = actual ec (main.py:756 で定義済、0.0-1.0 scale)。
+                # controller.c["_predicted_ec"] は LLM① 応答に predicted_ec 併記が
+                # あった cycle のみ非 None、欠如時は柱 C 更新は走らない。
+                _pec = selected.get("_predicted_ec") if isinstance(selected, dict) else None
+                _pe_ec = None
+                if isinstance(_pec, (int, float)):
+                    entry["predicted_ec"] = float(_pec)
+                    entry["actual_ec"] = float(eff_change)
+                    _pe_ec = abs(float(_pec) - float(eff_change))
+                    entry["prediction_error_ec"] = _pe_ec
+                # 段階10 柱 B/C: tool 別 confidence の β+ 更新 (e2 軸常時、ec 軸あれば追加)。
                 from core.predictor import update_predictor_confidence
-                update_predictor_confidence(state, tool_name, entry["prediction_error"])
+                update_predictor_confidence(state, tool_name, entry["prediction_error"], _pe_ec)
         _archive_entries([entry])
         state["log"].append(entry)
 

@@ -121,11 +121,13 @@ _VALID_CATEGORIES = {
 def make_prediction(category: str = CATEGORY_OTHER,
                     confidence: float = 0.3,
                     detail: str = "",
-                    predicted_e2: int = 50) -> dict:
-    """{category, confidence, detail, predicted_e2} 形式の予測 dict を返す。
+                    predicted_e2: int = 50,
+                    predicted_ec: Optional[float] = None) -> dict:
+    """{category, confidence, detail, predicted_e2, predicted_ec?} 形式の予測 dict。
 
     不正な category は OTHER に fallback、confidence は [0.0, 1.0] にクランプ、
-    predicted_e2 は [0, 100] にクランプ (段階9 追加、デフォルト 50=neutral)。
+    predicted_e2 は [0, 100] にクランプ (段階9)。
+    predicted_ec は [0.0, 1.0] にクランプ (段階10 柱 C、省略時 None)。
     """
     if category not in _VALID_CATEGORIES:
         category = CATEGORY_OTHER
@@ -134,12 +136,18 @@ def make_prediction(category: str = CATEGORY_OTHER,
         pe2 = max(0, min(100, int(predicted_e2)))
     except (TypeError, ValueError):
         pe2 = 50
-    return {
+    result = {
         "category": category,
         "confidence": conf,
         "detail": str(detail),
         "predicted_e2": pe2,
     }
+    if predicted_ec is not None:
+        try:
+            result["predicted_ec"] = max(0.0, min(1.0, float(predicted_ec)))
+        except (TypeError, ValueError):
+            pass  # 不正値は付加しない (None 扱い)
+    return result
 
 
 # category → 暫定 predicted_e2 マップ (LightPredictor 用、段階9)。
@@ -218,19 +226,16 @@ class MediumPredictor(BasePredictor):
                 world_model: Optional[dict] = None) -> dict:
         prediction = candidate.get("prediction")
         if isinstance(prediction, dict) and prediction.get("source") == "medium":
-            # 段階10 柱 B: tool 別 e2_conf で confidence を調整
-            # (未実行 tool は 0.7 start、β+ 更新で動的分化)
-            tool_name = str(candidate.get("tool", ""))
-            pc_entry = state.get("predictor_confidence", {}).get(
-                tool_name, {"e2_conf": 0.7, "ec_conf": 0.7}
-            )
-            base_confidence = float(prediction.get("confidence", 0.7))
-            adjusted_confidence = base_confidence * float(pc_entry.get("e2_conf", 0.7))
+            # 段階10 柱 B/C: 学習した e2_conf/ec_conf による selection 接続は
+            # controller._predicted_outcome_multiplier に一本化 (案 (イ) 役割分離)。
+            # MediumPredictor は LLM① の生予測を返す純粋な役割に徹する。
+            # predicted_ec も candidate.prediction から素通しする (柱 C)。
             return make_prediction(
-                category=CATEGORY_OTHER,  # category は補助情報、multiplier は predicted_e2 主
-                confidence=adjusted_confidence,
+                category=CATEGORY_OTHER,  # category は補助情報、multiplier は predicted_e2/ec 主
+                confidence=prediction.get("confidence", 0.7),
                 detail="medium",
                 predicted_e2=prediction.get("predicted_e2", 50),
+                predicted_ec=prediction.get("predicted_ec"),
             )
         return LightPredictor().predict(candidate, state, world_model)
 
