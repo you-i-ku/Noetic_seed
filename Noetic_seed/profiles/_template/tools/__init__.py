@@ -1,6 +1,5 @@
 """ツール定義・段階解放テーブル"""
-from tools.builtin import _list_files, _read_file, _write_file, _update_self, _wait_or_dismiss, _view_image, _listen_audio
-from tools.web import _web_search, _fetch_url
+from tools.builtin import _update_self, _wait_or_dismiss, _view_image, _listen_audio
 from tools.x_tools import _x_timeline, _x_search, _x_get_notifications, _x_post, _x_reply, _x_quote, _x_like
 from tools.elyth_tools import _elyth_post, _elyth_reply, _elyth_like, _elyth_follow, _elyth_info, _elyth_get, _elyth_mark_read
 from tools.memory_tool import _search_memory, _tool_memory_store, _tool_memory_update, _tool_memory_forget, _tool_search_memory
@@ -12,13 +11,8 @@ from tools.secret_tools import secret_read, secret_write
 from tools.auth_tools import auth_profile_info
 
 TOOLS = {
-    "list_files":   {"desc": "ディレクトリの一覧を取得。引数: path=相対パス", "func": lambda args: _list_files(args.get("path", "."))},
-    "read_file":    {"desc": "ファイルの内容を読み取る。引数: path=ファイルパス [offset=行番号 limit=行数]", "func": lambda args: _read_file(args.get("path", ""), int(args.get("offset", "0") or "0"), int(args.get("limit", "0") or "0") or None)},
-    "write_file":   {"desc": "ファイルに書き込む（sandbox/以下のみ）。引数: path=ファイルパス content=内容", "func": lambda args: _write_file(args.get("path", ""), args.get("content", ""))},
     "update_self":  {"desc": "自己モデルを更新する。引数: key=キー名 value=値", "func": lambda args: _update_self(args.get("key", ""), args.get("value", ""))},
     "wait":         {"desc": "待機。dismiss=pending_idで未対応事項を明示的に却下できる", "func": _wait_or_dismiss},
-    "web_search":   {"desc": "Brave APIでWeb検索。引数: query=検索キーワード [max_results=件数]", "func": _web_search},
-    "fetch_url":    {"desc": "URLの本文を取得（Jina経由）。引数: url=URL", "func": _fetch_url},
     "x_timeline":   {"desc": "Xのタイムライン取得。引数: [count=件数] [tab=following/recommend デフォルトfollowing]", "func": _x_timeline},
     "x_search":     {"desc": "Xでキーワード検索。引数: query=キーワード [count=件数]", "func": _x_search},
     "x_get_notifications": {"desc": "Xの通知一覧取得", "func": _x_get_notifications},
@@ -41,7 +35,7 @@ TOOLS = {
     "create_tool":  {"desc": "AI製ツールを登録（Human-in-the-loop）。引数: name=ツール名 code=Pythonコード（またはfile=sandbox/tools/xxx.py）", "func": _create_tool},
     "exec_code":    {"desc": "sandbox/内のPythonファイルを実行（Human-in-the-loop）。引数: file=sandbox/xxx.py（またはcode=インラインコード）intent=実行目的 [message=外部への説明]", "func": _exec_code},
     "self_modify":  {"desc": "自分自身のファイルを変更する（Human-in-the-loop）。引数: path=対象ファイル(pref.json/main.py) [全文置換: content=新しい内容全文] [部分置換: old=変更前の文字列 new=変更後の文字列] intent=変更目的 [message=外部への説明]", "func": lambda args: _self_modify(args)},
-    "output_display":    {"desc": "端末の所有者に言葉を届ける（device チャネル）。ログに [device_input] で話しかけてきた相手にはこれで返す。Elyth/X への投稿とは別経路。引数: content=メッセージ", "func": _output_display},
+    "output_display":    {"desc": "発話を channel 指定で届ける。送信先 channel は WM.channels を観察して決定、受信 channel に対応させて返す (log entry の [channel=X] header の X と同じ値を channel 引数に指定すると対応した相手に返る)。引数: content=メッセージ channel=送信先 channel id (必須)", "func": _output_display},
     "camera_stream":     {"desc": "端末のカメラ経由で連続撮影を非同期に開始する。最初のフレームは実行時に視覚入力（描写付きで返る）。後続フレームはローリング最新5枚として次サイクル以降の視覚入力に到着。観察中も他ツールを並行実行可能（read_file/reflect/memory_store等）。引数: [facing=back/front] [frames=枚数 0=無制限/1-30 default=5] [interval_sec=間隔 0.3-5.0 default=1.0] [message=外部への撮影依頼理由]。frames=0 は camera_stream_stop で明示終了（Android側絶対上限10分）、frames=1 は単発。承認必須。", "func": _camera_stream},
     "camera_stream_stop": {"desc": "アクティブな camera_stream / screen_peek を停止する。観察対象を把握した後、リソース節約のために呼ぶ。引数なし", "func": _camera_stream_stop},
     "screen_peek":       {"desc": "端末のスクリーンを非同期にキャプチャする（camera_streamの画面版）。最初のフレームは実行時に視覚入力、後続は次サイクル以降の視覚入力に到着（ローリング最新5枚）。観察中も他ツールを並行実行可能。引数: [frames=枚数 0=無制限/1-30 default=5] [interval_sec=間隔 0.3-5.0 default=1.0] [message=外部への画面キャプチャ依頼理由]。frames=0 は camera_stream_stop で明示終了（Android側絶対上限10分）。毎セッション MediaProjection 許可ダイアログが出る。承認必須。", "func": _screen_peek},
@@ -55,13 +49,21 @@ TOOLS = {
 }
 
 # === ツール段階解放テーブル ===
-_LV3_TOOLS = set(TOOLS.keys()) - {"create_tool", "exec_code", "self_modify"}
+# H-2 C.1 (2026-04-18): web_search/fetch_url は claw の WebSearch/WebFetch に移行。
+# H-2 C.4 Session A (2026-04-18): list_files/read_file/write_file は claw ネイティブ
+# (glob_search / read_file / write_file) に移行。Noetic ガードは file_access_guard
+# hook で再現。legacy handler は bridge から削除。
+_CLAW_FILE_OPS = {"read_file", "write_file", "glob_search", "WebSearch", "WebFetch"}
+_LV3_TOOLS = (
+    set(TOOLS.keys()) - {"create_tool", "exec_code", "self_modify"}
+    | _CLAW_FILE_OPS
+)
 LEVEL_TOOLS = {
-    0: {"list_files", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio"},
-    1: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio"},
-    2: {"list_files", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "web_search", "fetch_url", "output_display", "view_image", "listen_audio"},
-    3: _LV3_TOOLS,
-    4: _LV3_TOOLS | {"create_tool"},
-    5: set(TOOLS.keys()) - {"self_modify"},
-    6: set(TOOLS.keys()),
+    0: {"glob_search", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio", "bash"},
+    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio", "bash"},
+    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio", "bash"},
+    3: _LV3_TOOLS | {"bash"},
+    4: _LV3_TOOLS | {"create_tool", "bash"},
+    5: set(TOOLS.keys()) - {"self_modify"} | _CLAW_FILE_OPS | {"bash"},
+    6: set(TOOLS.keys()) | _CLAW_FILE_OPS | {"bash"},
 }

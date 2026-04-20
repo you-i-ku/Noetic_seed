@@ -110,3 +110,15 @@ with open(LLM_SETTINGS, encoding="utf-8") as f:
 
 # === Prompt budget 読み込み（settings.json の prompt_budget を DEFAULT にマージ）===
 prompt_budget = _deep_merge(DEFAULT_PROMPT_BUDGET, llm_cfg.get("prompt_budget", {}))
+
+# === 段階5→9: world_model 設定 ===
+# PLAN §5: multiplier は WM.md 推奨 0.3 より弱め (Phase 4 H-1 固着ループ観測配慮)
+# 段階9: predictor_mode を "medium" に切替 (MediumPredictor 本実装 + smoke 観察)。
+#        predicted_error_multiplier (category 離散) 廃止、predicted_e2_floor に置換。
+#        Light fallback は MediumPredictor 内に組み込み済 (parse 失敗時の安全網)。
+DEFAULT_WORLD_MODEL_CFG = {
+    "predictor_mode": "medium",
+    "channel_mismatch_multiplier": 0.5,
+    "predicted_e2_floor": 0.05,
+}
+WORLD_MODEL_CFG = _deep_merge(DEFAULT_WORLD_MODEL_CFG, llm_cfg.get("world_model", {}))

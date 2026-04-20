@@ -68,7 +68,7 @@ OPINIONS:
 
 ENTITIES:
 - name: エンティティ名, content: その存在について新たに学んだこと
-（自分自身についての気づきも「name: 自分」で記録可。既に知っていることの繰り返しは不要）
+（既に知っていることの繰り返しは不要）
 
 DISPOSITION:
 - curiosity_delta: -0.1~+0.1の変化量
@@ -158,5 +158,27 @@ def _parse_reflection(text: str, state: dict) -> dict:
             disp[key] = max(0.1, min(0.9, disp[key] + delta))
     if disposition_delta:
         print(f"  [reflection] disposition delta: {disposition_delta}")
+
+    # WM 段階3-4: C-gradual 同期 (memory/entity → state["world_model"].entities)
+    # 段階4: Entity Resolver で "ゆう" と "YOU" 等を embedding 経由で merge。
+    # LLM tiebreak は off (コスト優先、ambiguous は新規扱いで安全側)。
+    # 失敗しても reflect 継続 (WM は特権化しない方針)。
+    try:
+        from core.memory import list_records, _embed_sync, cosine_similarity, _vector_ready
+        from core.world_model import sync_from_memory_entities
+        wm = state.get("world_model")
+        if wm:
+            records = list_records("entity", limit=20)
+            _embed = _embed_sync if _vector_ready else None
+            _cosine = cosine_similarity if _vector_ready else None
+            created = sync_from_memory_entities(
+                wm, records, limit=20,
+                embed_fn=_embed, cosine_fn=_cosine,
+                llm_call_fn=None,
+            )
+            if created:
+                print(f"  [reflection] WM C-gradual: {created} 件新規取込")
+    except Exception as e:
+        print(f"  [reflection] WM C-gradual スキップ (エラー: {e})")
 
     return {"opinions": opinions, "entities": entities, "disposition_delta": disposition_delta}

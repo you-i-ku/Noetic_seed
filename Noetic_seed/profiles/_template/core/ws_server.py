@@ -29,6 +29,17 @@ def is_paused() -> bool:
     return _paused
 
 
+def set_paused(value: bool) -> None:
+    """pause フラグを外部から設定する。
+
+    承認 callback 等が `pause_on_await=True` で is_paused 発動させる経路。
+    既存の WebSocket server_command (pause/resume) 経由とは別に、Noetic
+    runtime 内部から直接呼び出せる API。
+    """
+    global _paused
+    _paused = bool(value)
+
+
 def set_profile_running(running: bool = True):
     """main.py 起動時に呼ぶ。接続時に state を常に送るようになる。"""
     global _profile_running
@@ -257,7 +268,9 @@ async def _send_loop():
         if messages and _ws_clients:
             dead = set()
             for text in messages:
-                for ws in _ws_clients:
+                # snapshot を iterate (race 回避: await ws.send 中に別 coroutine が
+                # _ws_clients から discard する可能性)。段階8 で asyncio.Lock 化予定。
+                for ws in list(_ws_clients):
                     try:
                         await ws.send(text)
                     except Exception:

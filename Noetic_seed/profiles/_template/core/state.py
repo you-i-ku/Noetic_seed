@@ -76,10 +76,19 @@ def load_state() -> dict:
                 data["entropy"] = 0.65
             if "drives_state" not in data:
                 data["drives_state"] = {}
+            if "world_model" not in data:
+                from core.world_model import init_world_model
+                data["world_model"] = init_world_model()
+            else:
+                # 段階2 entity に段階3 追加 field (aliases/channels/last_seen) を補完
+                from core.world_model import migrate_entity_fields
+                for _ent in data["world_model"].get("entities", {}).values():
+                    migrate_entity_fields(_ent)
             return data
         except json.JSONDecodeError:
             pass
-    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}}
+    from core.world_model import init_world_model
+    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model()}
 
 
 def save_state(state: dict):

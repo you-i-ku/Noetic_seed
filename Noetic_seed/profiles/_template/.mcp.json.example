@@ -1,0 +1,11 @@
+{
+  "_comment": "Noetic_seed MCP server 接続サンプル (段階6-C v3)。このファイルを Claude Code 起動ディレクトリ (通常は iku プロジェクトルート) に .mcp.json としてコピーし、使用するプロファイルに合わせて args のパスを書き換える。Windows ではフォワードスラッシュで記述。実 .mcp.json は個人環境設定なので gitignore 対象推奨。",
+  "mcpServers": {
+    "noetic-seed": {
+      "command": "<NOETIC_VENV>/Scripts/python.exe",
+      "args": [
+        "<PROFILE_ROOT>/mcp_server_main.py"
+      ]
+    }
+  }
+}

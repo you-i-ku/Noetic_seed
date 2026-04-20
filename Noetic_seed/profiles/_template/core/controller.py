@@ -1,10 +1,14 @@
 """Controller（制御層）+ controller_select + intent-conditioned scoring"""
 import re
 import random
-from core.config import SANDBOX_TOOLS_DIR
+from core.config import SANDBOX_TOOLS_DIR, WORLD_MODEL_CFG
 from core.state import load_pref
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
 from core.eval import predict_result_novelty
+from core.predictor import get_predictor
+
+# 段階5: Predictor インスタンス (WM 設定に従って初期化、モジュールシングルトン)
+_PREDICTOR = get_predictor(WORLD_MODEL_CFG.get("predictor_mode", "light"))
 
 
 def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tools: dict, dangerous_patterns: list, run_ai_tool_fn) -> dict:
@@ -171,8 +175,113 @@ def _intent_conditioned_scores(candidates: list, state: dict) -> list:
     return scores
 
 
+def _pending_priority_boost(state: dict, candidate: dict) -> float:
+    """candidate が未消化 UPS v2 pending を解消しそうなら boost 倍率を返す。
+
+    UPS v2 (Phase 4 Step E-1): 未 observed な pending のうち、
+      - source_action == candidate_tool (直接対応)
+      - または output_display × device channel (対等協力者への応答)
+    にマッチするものの priority 最大値から倍率を算出。
+
+    Returns:
+        1.0 〜 3.0 の倍率。該当 pending なしなら 1.0。
+    """
+    pending = state.get("pending", [])
+    candidate_tool = candidate.get("tool", "")
+    if not candidate_tool:
+        return 1.0
+
+    max_pri = 0.0
+    for p in pending:
+        if p.get("type") != "pending":
+            continue
+        if p.get("observed_content") is not None:
+            continue
+        source = p.get("source_action", "")
+        direct_match = source == candidate_tool
+        device_response_match = (
+            candidate_tool == "output_display"
+            and (p.get("observed_channel") == "device"
+                 or p.get("expected_channel") == "device")
+        )
+        if direct_match or device_response_match:
+            pri = float(p.get("priority", 0.0))
+            if pri > max_pri:
+                max_pri = pri
+
+    if max_pri <= 0.0:
+        return 1.0
+    # priority 想定最大 ≈ 12.0 → [1.0, 3.0] に正規化
+    return 1.0 + min(2.0, max_pri / 6.0)
+
+
+# ============================================================
+# 段階5: channel_mismatch + predicted_outcome ペナルティ
+# (STAGE5_IMPLEMENTATION_PLAN.md §4)
+# ============================================================
+
+def _channel_mismatch_multiplier(candidate: dict, state: dict, cfg: dict) -> float:
+    """候補 tool の channel が pending の channel と一致しないなら
+    multiplier (<1.0) を返す。internal tool (channel=None) は影響なし (1.0)。
+    pending が channel を持たなければ 1.0。
+    副作用: 減点時に candidate["penalties"] に理由を追記。
+    """
+    # 循環 import 回避 (world_model は controller を import する経路がないため
+    # 実害はないが、他の controller 拡張との対称性のため関数内 import)
+    from core.world_model import get_tool_channel
+
+    wm = state.get("world_model")
+    tool_name = candidate.get("tool", "")
+    tool_channel = get_tool_channel(wm, tool_name)
+    if tool_channel is None:
+        return 1.0
+    pending_channels = set()
+    for p in state.get("pending", []):
+        if p.get("type") != "pending":
+            continue
+        if p.get("observed_content") is not None:
+            continue
+        for field in ("observed_channel", "expected_channel"):
+            v = p.get(field)
+            if v:
+                pending_channels.add(v)
+    if not pending_channels or tool_channel in pending_channels:
+        return 1.0
+    mult = float(cfg.get("channel_mismatch_multiplier", 0.5))
+    candidate.setdefault("penalties", []).append(
+        f"channel_mismatch: {tool_channel} not in {sorted(pending_channels)}"
+    )
+    return mult
+
+
+def _predicted_outcome_multiplier(prediction: dict, candidate: dict,
+                                  cfg: dict) -> float:
+    """predicted_e2 (0-100) を連続値 multiplier に変換 (段階9)。
+
+    段階5 までは category 離散 (error/no_response で 0.5) だったが、段階9 で
+    predicted_e2 直接乗算に置換。Active Inference の pragmatic value of EFE
+    と同型、既存 novelty (epistemic) と同じ max(floor, ratio) 形式。
+
+    - predicted_e2=70 → 0.7 / 50 → 0.5 / 20 → 0.2 / 0 → 0.05 (floor)
+    - ratio < 0.4 の時 candidate["penalties"] に理由追記 (解釈可能性のため)
+    - cfg["predicted_e2_floor"] で下限 (default 0.05) を上書き可能
+    - 不正値/NaN は default 50 (neutral) として扱う
+    """
+    pe2_raw = prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
+    try:
+        pe2 = max(0, min(100, int(pe2_raw)))
+    except (TypeError, ValueError):
+        pe2 = 50
+    ratio = pe2 / 100.0
+    floor = float(cfg.get("predicted_e2_floor", 0.05))
+    mult = max(floor, ratio)
+    if ratio < 0.4:
+        candidate.setdefault("penalties", []).append(f"low_predicted_e2={pe2}")
+    return mult
+
+
 def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
-    """D-4設計 + intent-conditioned scoring + entropy認知品質"""
+    """D-4設計 + intent-conditioned scoring + entropy認知品質 + UPS v2 priority"""
     energy = state.get("energy", 50) / 100.0
     entropy = state.get("entropy", 0.65)
     tool_rank = ctrl.get("tool_rank", {})
@@ -191,6 +300,19 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         # 事前シミュレーション（報酬予測誤差）: 予測結果新規性が低い → 動機が生まれない
         novelty = predict_result_novelty(state, c["tool"], c.get("reason", ""))
         w *= max(0.05, novelty)
+        # UPS v2 priority boost: 未消化 pending を解消する候補を優先
+        w *= _pending_priority_boost(state, c)
+        # 段階5: channel_mismatch 乗算 (PLAN §4-1)
+        w *= _channel_mismatch_multiplier(c, state, WORLD_MODEL_CFG)
+        # 段階5→9: Predictor による predicted_e2 乗算 (pragmatic value of EFE)。
+        # 段階9 で category 離散から predicted_e2 連続値に置換、既存 novelty
+        # (epistemic value) と同形式 max(floor, x) で統合乗算。
+        # in-context world model (NAACL 2025) の direct instance。
+        prediction = _PREDICTOR.predict(c, state, state.get("world_model"))
+        c["predicted_outcome"] = prediction
+        # 段階9: 予測誤差計測のため candidate に記録 (main.py で log entry に転写)
+        c["_predicted_e2"] = prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
+        w *= _predicted_outcome_multiplier(prediction, c, WORLD_MODEL_CFG)
         if novelty < 0.5:
             try:
                 from core.config import RESOLUTION_LOG

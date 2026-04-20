@@ -18,6 +18,7 @@ ENTROPY_PARAMS = {
     "w_novelty": 0.2,
     "w_stagnation": 0.3,
     "w_unresolved_ext": 0.2,
+    "w_pending_burden": 0.3,  # 段階8 改善6-D: 未消化 pending 総 priority → pressure
     "tunnel_prob": 0.001,
     "measured_feedback_rate": 0.1,
     "entropy_floor_base": 0.15,
@@ -108,6 +109,24 @@ def calc_pressure_signals(state: dict, spiral: dict | None = None) -> dict:
     # 未応答の外部入力による持続的圧力
     unresolved_ext = min(0.5, state.get("unresolved_external", 0.0))
     signals["unresolved_ext"] = unresolved_ext * ep["w_unresolved_ext"]
+
+    # 段階8 改善6-D: 未消化 pending の総 priority を burden として加算。
+    # ジレンマ成立 (pending 溜まる → pressure 上 → wait(dismiss) 誘発)。
+    # feedback_cognitive_load_via_pressure 整合 (情報理論的負荷、擬似感情化せず)。
+    pending_list = state.get("pending", [])
+    burden = 0.0
+    for p in pending_list:
+        if p.get("type") != "pending":
+            continue
+        if p.get("semantic_merge") is not True:
+            continue
+        if p.get("observed_content") is not None:
+            continue  # 消化済 skip
+        if p.get("expiry_policy") == "deprecated":
+            continue  # 安全弁で deprecate 済は除外
+        burden += float(p.get("priority", 0.0))
+    # cap して過剰 pressure を防ぐ (他 signal と同レンジ 0-0.5)
+    signals["pending_burden"] = min(0.5, burden * 0.1) * ep["w_pending_burden"]
 
     if spiral:
         signals["stagnation"] = max(0, 0.3 - spiral.get("magnitude", 0)) * ep["w_stagnation"]

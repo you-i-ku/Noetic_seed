@@ -218,12 +218,36 @@ def parse_tool_calls(text: str, tool_names: set) -> list:
 
 
 def parse_candidates(text: str, allowed_tools: set) -> list:
-    """LLM①のリストから候補を抽出。「1. [理由] -> ツール名」形式に対応。"""
+    """LLM①のリストから候補を抽出。「1. [理由] -> ツール名」形式に対応。
+
+    段階9: 行末尾の「/ predicted_e2: XX」表記があれば抽出して
+    candidate['prediction'] に格納する (MediumPredictor が参照)。
+    抽出できなかった candidate は prediction フィールドを持たず、
+    MediumPredictor は LightPredictor に fallback する (安全網)。
+    """
     candidates = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not line:
             continue
+
+        # 段階9: predicted_e2 抽出 (行末尾の「/ predicted_e2: XX」表記)
+        # 抽出できたら candidate に {source: medium, predicted_e2, confidence}
+        # を格納。既存 tool 抽出ロジックに干渉しないよう line から除去。
+        prediction = None
+        pe2_match = re.search(r'predicted_e2\s*[:：]\s*(\d+)', line)
+        if pe2_match:
+            try:
+                pe2 = max(0, min(100, int(pe2_match.group(1))))
+                prediction = {
+                    "predicted_e2": pe2,
+                    "confidence": 0.7,  # 段階9 固定、段階10+ で信頼度推定検討
+                    "source": "medium",
+                }
+            except (ValueError, TypeError):
+                pass
+            # 既存 tool 抽出ロジックのノイズを避けるため line から除去
+            line = re.sub(r'\s*/?\s*predicted_e2\s*[:：]\s*\d+', '', line).strip()
 
         if "->" in line or "→" in line:
             parts = re.split(r'->|→', line)
@@ -258,7 +282,10 @@ def parse_candidates(text: str, allowed_tools: set) -> list:
 
         chain_key = "+".join(valid_tools)
         if valid_tools and chain_key not in ["+".join(c["tools"]) for c in candidates]:
-            candidates.append({"tool": valid_tools[0], "tools": valid_tools, "reason": reason})
+            cand_dict = {"tool": valid_tools[0], "tools": valid_tools, "reason": reason}
+            if prediction is not None:
+                cand_dict["prediction"] = prediction
+            candidates.append(cand_dict)
 
     if not candidates:
         for t in allowed_tools:

@@ -4,8 +4,10 @@ import re
 from core.config import MEMORY_DIR
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
 from core.memory import memory_store, memory_update, memory_forget, memory_network_search
+from core.tag_registry import is_tag_registered, list_registered_tags
 
-_VALID_NETWORKS = {"world", "experience", "opinion", "entity"}
+# 段階7: _VALID_NETWORKS 撤去 → tag_registry で動的検証
+_WORLD_DEPRECATION_WARNED = False
 
 
 def _search_memory(args):
@@ -92,13 +94,36 @@ def _search_memory(args):
 
 
 def _tool_memory_store(args):
-    """記憶を保存する。"""
+    """記憶を保存する。段階7: 未登録タグは rules 付きで inline 登録。"""
+    global _WORLD_DEPRECATION_WARNED
     network = args.get("network", "").strip()
     content = args.get("content", "").strip()
     if not network or not content:
         return "エラー: networkとcontentを指定してください"
-    if network not in _VALID_NETWORKS:
-        return f"エラー: networkは {'/'.join(_VALID_NETWORKS)} のいずれか"
+    # 段階7 Step 6: world → wm リダイレクト (back-compat、段階8 で削除)
+    if network == "world":
+        if not _WORLD_DEPRECATION_WARNED:
+            print("  [memory_store] 'world' は段階7 で 'wm' に統合済。リダイレクトします。")
+            _WORLD_DEPRECATION_WARNED = True
+        network = "wm"
+    # 段階7 Step 5: 未登録タグは rules 必須で inline 登録
+    if not is_tag_registered(network):
+        rules = args.get("rules")
+        if not isinstance(rules, dict):
+            return (f"エラー: 未登録タグ '{network}' には rules 必須 "
+                    "({\"beta_plus\": bool, \"bitemporal\": bool})")
+        display_format = args.get("display_format", "") or ""
+        from core.tag_registry import register_tag
+        try:
+            register_tag(
+                network,
+                learning_rules=rules,
+                display_format=display_format,
+                origin="dynamic",
+                intent=args.get("tool_intent"),
+            )
+        except ValueError as e:
+            return f"エラー: タグ登録失敗 ({e})"
 
     metadata = {}
     if network == "opinion":
@@ -152,13 +177,14 @@ def _tool_search_memory(args):
     networks = None
     net_str = args.get("networks", "")
     if net_str:
-        networks = [n.strip() for n in net_str.split(",") if n.strip() in _VALID_NETWORKS]
+        networks = [n.strip() for n in net_str.split(",") if is_tag_registered(n.strip())]
     limit = min(int(args.get("max_results", "") or "5"), 20)
 
     results = memory_network_search(query, networks=networks, limit=limit)
     if not results:
         return f"'{query}' に一致する記憶なし"
 
+    from core.tag_registry import get_tag_rules
     lines = []
     for r in results:
         score = round(r.get("score", 0) * 100)
@@ -166,10 +192,20 @@ def _tool_search_memory(args):
         content = r.get("content", "")[:150]
         mid = r.get("id", "")
         meta = r.get("metadata", {})
-        line = f"[{score}%] [{network}] {content} (id={mid})"
-        if network == "opinion" and "confidence" in meta:
-            line += f" 確度={meta['confidence']}"
-        if network == "entity" and "entity_name" in meta:
-            line = f"[{score}%] [entity:{meta['entity_name']}] {content} (id={mid})"
-        lines.append(line)
+        rules = get_tag_rules(network)
+        fmt = (rules or {}).get("display_format", "") or f"[{network}] {{content}}"
+        fmt_kwargs = {
+            "content": content,
+            "tag": network,
+            "entity_name": meta.get("entity_name", "?"),
+            "confidence": meta.get("confidence", "?"),
+        }
+        for k, v in meta.items():
+            if k not in fmt_kwargs:
+                fmt_kwargs[k] = v
+        try:
+            body = fmt.format(**fmt_kwargs)
+        except (KeyError, IndexError, ValueError):
+            body = f"[{network}] {content}"
+        lines.append(f"[{score}%] {body} (id={mid})")
     return "\n".join(lines)
