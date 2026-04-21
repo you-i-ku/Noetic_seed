@@ -97,6 +97,11 @@ class PendingEntry(TypedDict, total=False):
     # 段階8 v4: pending 側の自己消化条件 (None なら明示 dismiss のみで消える)
     match_pattern: Optional[MatchPattern]
 
+    # 段階11-A Step 6: pending は iku の「自己 action への observation 待ち」なので
+    # デフォルト self/actual。他視点 pending (例: 他者の action への帰属観察待ち
+    # imaginary) は caller が perspective kwarg で指定。
+    perspective: Optional[dict]
+
 
 LAG_WEIGHTS: dict[str, float] = {
     "seconds": 1.0,
@@ -186,6 +191,7 @@ def pending_add(
     semantic_merge: bool = False,
     retro_log_entry_id: Optional[str] = None,
     match_pattern: Optional[MatchPattern] = None,
+    perspective: Optional[dict] = None,
 ) -> PendingEntry:
     """UPS v2 pending を state['pending'] に追加。
 
@@ -246,6 +252,12 @@ def pending_add(
         "retro_log_entry_id": retro_log_entry_id,
         "match_pattern": match_pattern,
     }
+    # 段階11-A Step 6: perspective 付与 (None → default_self_perspective、iku の
+    # 自己 action への observation 待ちがデフォルト)
+    if perspective is None:
+        from core.perspective import default_self_perspective
+        perspective = default_self_perspective()
+    entry["perspective"] = perspective
     entry["priority"] = calc_priority(entry)
     state.setdefault("pending", []).append(entry)
     return entry

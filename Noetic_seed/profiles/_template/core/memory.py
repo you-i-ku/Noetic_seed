@@ -121,8 +121,17 @@ def list_records(network: str, limit: int = 20) -> list:
     return records
 
 
-def memory_network_search(query: str, networks: list = None, limit: int = 5) -> list:
-    """Entity/Opinionネットワークをベクトル検索。"""
+def memory_network_search(query: str, networks: list = None, limit: int = 5,
+                           view_filter: Optional[dict] = None) -> list:
+    """Entity/Opinionネットワークをベクトル検索。
+
+    段階11-A Step 6: view_filter kwarg 追加 (perspective filter)。
+      None → 全視点 (既存挙動、デフォルト)
+      {"viewer": "self"} → self 視点の entry のみ
+      {"viewer_type": "actual"} → 仮想視点除外
+    perspective 欠落 entry (旧形式) は default_self_perspective 相当で判定、
+    view_filter={"viewer":"self"} 等で拾われる (backward compat)。
+    """
     if not networks:
         networks = list_registered_tags()
     all_entries = []
@@ -141,6 +150,18 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5) -> 
                 pass
     if not all_entries:
         return []
+
+    # 段階11-A Step 6: view_filter 適用 (embedding search 前に候補絞り込み)
+    if view_filter is not None:
+        def _match(e: dict) -> bool:
+            p = e.get("perspective") or default_self_perspective()
+            for k, v in view_filter.items():
+                if p.get(k) != v:
+                    return False
+            return True
+        all_entries = [e for e in all_entries if _match(e)]
+        if not all_entries:
+            return []
     if _vector_ready:
         try:
             texts = [e.get("content", "")[:400] for e in all_entries]

@@ -855,6 +855,15 @@ def main():
             entry["expect"] = expect
         if first_args:
             entry["args"] = first_args
+        # 段階11-A Step 7: output_display の to_perspective を log entry に刻む。
+        # from は entry["perspective"] (self/actual、Step 2 で付与済)、
+        # to は args.channel を viewer にした perspective。
+        if tool_name == "output_display" and isinstance(first_args, dict):
+            _ch = first_args.get("channel")
+            if isinstance(_ch, str) and _ch.strip():
+                entry["to_perspective"] = make_perspective(
+                    viewer=_ch.strip(), viewer_type="actual",
+                )
         if e1:
             entry["e1"] = e1
         if e2:
