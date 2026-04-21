@@ -36,7 +36,7 @@ def test_w_prediction_error_in_params():
     print("== ENTROPY_PARAMS: w_prediction_error 追加 ==")
     return all([
         _assert("w_prediction_error" in ENTROPY_PARAMS, "w_prediction_error key 存在"),
-        _assert(ENTROPY_PARAMS["w_prediction_error"] == 1.0, "初期値 1.0 (中立 start)"),
+        _assert(ENTROPY_PARAMS["w_prediction_error"] == 0.3, "Tune 1 後の値 0.3 (段階10.5、smoke で pe fire 90% 占有判定)"),
     ])
 
 

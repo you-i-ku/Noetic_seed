@@ -19,7 +19,7 @@ ENTROPY_PARAMS = {
     "w_stagnation": 0.3,
     "w_unresolved_ext": 0.2,
     "w_pending_burden": 0.3,  # 段階8 改善6-D: 未消化 pending 総 priority → pressure
-    "w_prediction_error": 1.0,  # 段階10 柱 A: 予測誤差 → surprise-driven internal drive (初期中立、smoke で tune)
+    "w_prediction_error": 0.3,  # 段階10.5 Tune 1 (smoke 20 cycle): pe fire 90% 占有で 1.0 → 0.3 下方修正 (PLAN §7-1 の > 50% 該当)
     "tunnel_prob": 0.001,
     "measured_feedback_rate": 0.1,
     "entropy_floor_base": 0.15,

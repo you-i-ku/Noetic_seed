@@ -235,7 +235,7 @@ class ConversationRuntime:
             approved = self._ask_approval(tool_name, current_input,
                                           rec.pre_hook_messages)
             if not approved:
-                self._finalize(rec, "[REJECTED] user denied", is_error=True)
+                self._finalize(rec, "[REJECTED] approval denied", is_error=True)
                 return rec
 
         try:

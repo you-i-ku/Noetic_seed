@@ -80,7 +80,7 @@ WARN_MARK = "\u26a0\ufe0f"  # Unicode エスケープで cp932 print を回避 (
 def test_rejected_prefix_warning():
     print("== REJECTED: 行頭 warn prefix ==")
     entry = _base_entry(
-        result="[REJECTED] user denied",
+        result="[REJECTED] approval denied",
     )
     line = _render_log_entry(entry, result_cap=500, intent_cap=300)
     return all([
@@ -102,7 +102,7 @@ def test_normal_result_no_warning():
 def test_rejected_variants_all_get_warning():
     print("== REJECTED: 3 つの reject 経路すべて warn ==")
     variants = [
-        "[REJECTED] user denied",
+        "[REJECTED] approval denied",
         "[REJECTED] denied by pre hook",
         "[REJECTED] permission denied",
     ]
@@ -186,7 +186,7 @@ def test_integration_args_and_rejected():
     print("== 統合: args + [REJECTED] 同時 ==")
     entry = _base_entry(
         args={"channel": "claude", "content": "もう一度言うね"},
-        result="[REJECTED] user denied",
+        result="[REJECTED] approval denied",
         intent="おねーたんに再度伝える",
     )
     line = _render_log_entry(entry, result_cap=500, intent_cap=300)
