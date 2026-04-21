@@ -513,7 +513,9 @@ def _matches(
 ) -> bool:
     """段階10.5 Fix 2 (案 P、PLAN §4-2): match_pattern 新構造 3 フィールドで判定。
 
-    全条件 AND (未指定フィールドは skip)。
+    全条件 AND (未指定フィールドは skip)。ただし段階11-A hotfix で tool 特定
+    field (source_action / expected_channel) が 1 つも指定されていない場合は
+    自動消化対象外 (embedding 類似度だけでの tool 無関係 match を防止)。
 
     Args:
         mp: pending.match_pattern (dict)。
@@ -526,6 +528,14 @@ def _matches(
     Returns:
         全条件 OK なら True。
     """
+    # 段階11-A hotfix (2026-04-22): tool 特定 field 必須
+    # source_action / expected_channel の両方が未指定だと、observable_similarity_threshold
+    # のみで任意 tool の output と embedding 一致判定 → tool 無関係 pending の誤消化 bug。
+    # 「自動消化される pending は tool 特定 field を持つ」構造契約を enforce、
+    # unresolved_intent 系は明示 dismiss / prune でのみ消化されるべき。
+    if mp.get("source_action") is None and mp.get("expected_channel") is None:
+        return False
+
     # 1. source_action: 消化できる tool 名 (単一) と一致するか
     required_source = mp.get("source_action")
     if required_source is not None:

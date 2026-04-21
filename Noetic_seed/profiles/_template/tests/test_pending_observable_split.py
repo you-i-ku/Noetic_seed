@@ -196,12 +196,15 @@ _assert(ok is True, "3-3 expected_channel 一致で True")
 ok = _matches(mp_ch, "output_display", {}, "result", "device", pending_s)
 _assert(ok is False, "3-4 expected_channel 不一致で False")
 
-# 3-5: observable_similarity_threshold で類似度判定
+# 3-5: observable_similarity_threshold で類似度判定 (source_action 併用時のみ有効)
+# 段階11-A hotfix (2026-04-22): tool 特定 field なしで類似度のみの match は
+# 誤消化の温床のため拒否される。source_action と併用時に類似度機能が働く
 original = _install_sim_mock(lambda a, b, t: True)
 try:
-    mp_sim = {"observable_similarity_threshold": 0.7}
+    mp_sim = {"source_action": "output_display",
+              "observable_similarity_threshold": 0.7}
     ok = _matches(mp_sim, "output_display", {}, "result text", "self", pending_s)
-    _assert(ok is True, "3-5 observable_similarity True")
+    _assert(ok is True, "3-5 observable_similarity True (source_action 併用)")
 finally:
     pending_unified._sim_check = original
 

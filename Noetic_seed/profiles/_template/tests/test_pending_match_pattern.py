@@ -68,12 +68,33 @@ def test_matches_source_action_miss():
     return _assert(ok is False, "bash は source_action と不一致で False")
 
 
-def test_matches_source_action_none_means_any():
-    print("== _matches: source_action=None はどの tool でも OK ==")
+def test_matches_hotfix_no_tool_specifier_rejected():
+    """段階11-A hotfix (2026-04-22): source_action と expected_channel の
+    両方が未指定の match_pattern は、embedding 類似度だけで tool 無関係に
+    match する誤消化の温床になるため自動消化対象外とする。
+    """
+    print("== _matches: tool 特定 field 未指定は False (段階11-A hotfix) ==")
+    # source_action=None、expected_channel も未指定
     mp = {"source_action": None}
     pending = {"expected_channel": "device"}
     ok = _matches(mp, "random_tool", {}, "r", "device", pending)
-    return _assert(ok is True, "None は skip 扱い (全 tool 許可)")
+    return _assert(ok is False, "tool 特定 field 未指定は自動消化対象外")
+
+
+def test_matches_hotfix_similarity_only_rejected():
+    """段階11-A hotfix: observable_similarity_threshold だけでは自動消化しない
+    (明示 dismiss / prune でのみ消化されるべき)。類似度マッチ機能は
+    source_action 等と併用時のみ有効 (test_matches_similarity_hit 参照)。
+    """
+    print("== _matches: similarity only は False (段階11-A hotfix) ==")
+    original = _install_sim_mock(lambda a, b, t: True)  # 類似度満たしても
+    try:
+        mp = {"observable_similarity_threshold": 0.7}
+        pending = {"content_observable": "foo"}
+        ok = _matches(mp, "any_tool", {}, "any result", None, pending)
+        return _assert(ok is False, "類似度のみは tool 特定なしで自動消化対象外")
+    finally:
+        pending_unified._sim_check = original
 
 
 def test_matches_expected_channel_hit():
@@ -93,13 +114,17 @@ def test_matches_expected_channel_mismatch():
 
 
 def test_matches_similarity_hit():
-    print("== _matches: observable_similarity_threshold >= 閾値で True ==")
+    # 段階11-A hotfix: source_action 併用時のみ similarity が有効。
+    # tool 特定 field なしで類似度のみの match は拒否される
+    # (test_matches_hotfix_similarity_only_rejected を参照)
+    print("== _matches: source_action+similarity 一致で True ==")
     original = _install_sim_mock(lambda a, b, t: True)  # 常に類似度 OK
     try:
-        mp = {"observable_similarity_threshold": 0.7}
+        mp = {"source_action": "search_memory",
+              "observable_similarity_threshold": 0.7}
         pending = {"content_observable": "foo bar"}
         ok = _matches(mp, "search_memory", {}, "result bar foo", None, pending)
-        return _assert(ok is True, "類似度 >= 閾値で True")
+        return _assert(ok is True, "tool 一致 + 類似度 >= 閾値で True")
     finally:
         pending_unified._sim_check = original
 
@@ -366,10 +391,13 @@ if __name__ == "__main__":
     groups = [
         ("_matches: source_action hit", test_matches_source_action_hit),
         ("_matches: source_action miss", test_matches_source_action_miss),
-        ("_matches: source_action None = any", test_matches_source_action_none_means_any),
+        ("_matches: hotfix tool 特定 field 未指定で False",
+         test_matches_hotfix_no_tool_specifier_rejected),
+        ("_matches: hotfix similarity only は False",
+         test_matches_hotfix_similarity_only_rejected),
         ("_matches: expected_channel hit", test_matches_expected_channel_hit),
         ("_matches: expected_channel mismatch", test_matches_expected_channel_mismatch),
-        ("_matches: similarity hit", test_matches_similarity_hit),
+        ("_matches: source_action+similarity hit", test_matches_similarity_hit),
         ("_matches: similarity miss", test_matches_similarity_miss),
         ("_matches: 複数 AND", test_matches_all_fields_and),
         ("try_observe: tool_name 一致で消化", test_try_observe_tool_name_match),
