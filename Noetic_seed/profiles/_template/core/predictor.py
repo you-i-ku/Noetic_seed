@@ -277,3 +277,40 @@ def get_predictor(mode: str = "light") -> BasePredictor:
     """
     cls = _PREDICTOR_REGISTRY.get(mode, LightPredictor)
     return cls()
+
+
+# ============================================================
+# 段階10.5 Fix 1: chain 粒度 migration + ec clamp helper
+# ============================================================
+
+
+def migrate_chain_keys(state: dict) -> int:
+    """state["predictor_confidence"] の "+" 含むキー (chain 連結キー) を drop。
+
+    段階10 Step 3 smoke で tool 連結文字列をキーに chain 単位学習していた
+    15 種 entry を新 smoke 起点で破棄。tool 単位 entry のみ残し、Fix 1 で
+    tool 別自己学習重みが本来意図通りに動作するよう正規化。
+
+    Returns:
+        drop した entry 数 (0 なら migration 不要)
+    """
+    pc = state.get("predictor_confidence")
+    if not isinstance(pc, dict):
+        return 0
+    drop_keys = [k for k in pc if "+" in k]
+    for k in drop_keys:
+        pc.pop(k, None)
+    return len(drop_keys)
+
+
+def clamp_ec(value) -> float:
+    """effective_change (ec) を 0.0-1.0 に clamp。
+
+    段階10 Step 3 smoke で actual_ec=1.5 等の記録が 2 件発生、eff_change が
+    稀に 1.0 を超えるケースで学習値が壊れる防止。不正値 (None/str 等) は
+    0.0 に fallback (neutral/安全側)。
+    """
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0

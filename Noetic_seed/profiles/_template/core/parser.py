@@ -220,10 +220,23 @@ def parse_tool_calls(text: str, tool_names: set) -> list:
 def parse_candidates(text: str, allowed_tools: set) -> list:
     """LLM①のリストから候補を抽出。「1. [理由] -> ツール名」形式に対応。
 
-    段階9: 行末尾の「/ predicted_e2: XX」表記があれば抽出して
-    candidate['prediction'] に格納する (MediumPredictor が参照)。
-    抽出できなかった candidate は prediction フィールドを持たず、
-    MediumPredictor は LightPredictor に fallback する (安全網)。
+    段階9: 行末尾の「/ predicted_e2: XX」表記で chain 全体 1 組抽出。
+    段階10 柱 C: 「/ predicted_ec: 0.YY」併記 (旧形式) にも対応。
+    段階10.5 Fix 1: 新形式 tool 直後の「(pe2=XX, pec=0.YY)」で tool 単位の
+    個別 predicted_e2/predicted_ec 抽出。旧形式は chain 全体 1 組を chain 内
+    各 tool に複製 (後方互換)。
+
+    candidate dict 構造:
+        {
+            "tool": 先頭 tool 名 (後方互換),
+            "tools": [tool 名 list],
+            "reason": ...,
+            "chain": [
+                {"tool": 名, "predicted_e2": int|None, "predicted_ec": float|None},
+                ...
+            ],
+            "prediction": {..., chain[0] 由来}  # chain[0].pe2 が None なら欠落
+        }
     """
     candidates = []
     for line in text.strip().splitlines():
@@ -231,35 +244,31 @@ def parse_candidates(text: str, allowed_tools: set) -> list:
         if not line:
             continue
 
-        # 段階9: predicted_e2 抽出 (行末尾の「/ predicted_e2: XX」表記)
-        # 段階10 柱 C: predicted_ec (0.0-1.0) も併記形式で抽出。
-        # 抽出できたら candidate に {source: medium, predicted_e2, confidence,
-        # predicted_ec?} を格納。既存 tool 抽出ロジックに干渉しないよう line から除去。
-        prediction = None
-        pe2_match = re.search(r'predicted_e2\s*[:：]\s*(\d+)', line)
-        if pe2_match:
+        # --- 旧形式 (chain 全体 1 組) 抽出 + line から除去 ---
+        legacy_pe2 = None
+        legacy_pec = None
+        legacy_pe2_match = re.search(r'predicted_e2\s*[:：]\s*(-?\d+)', line)
+        if legacy_pe2_match:
             try:
-                pe2 = max(0, min(100, int(pe2_match.group(1))))
-                prediction = {
-                    "predicted_e2": pe2,
-                    "confidence": 0.7,  # 段階9 固定、段階10+ で信頼度推定検討
-                    "source": "medium",
-                }
+                legacy_pe2 = max(0, min(100, int(legacy_pe2_match.group(1))))
             except (ValueError, TypeError):
                 pass
-            # 段階10 柱 C: predicted_ec 抽出 (併記時のみ、欠けても OK = 後方互換)
-            # 負値は LLM 出力エラー想定だが防御的に受け取って clamp 側で 0.0 化
-            pec_match = re.search(r'predicted_ec\s*[:：]\s*(-?[0-9]*\.?[0-9]+)', line)
-            if pec_match and prediction is not None:
+            legacy_pec_match = re.search(
+                r'predicted_ec\s*[:：]\s*(-?[0-9]*\.?[0-9]+)', line
+            )
+            if legacy_pec_match:
                 try:
-                    pec = max(0.0, min(1.0, float(pec_match.group(1))))
-                    prediction["predicted_ec"] = pec
+                    legacy_pec = max(0.0, min(1.0, float(legacy_pec_match.group(1))))
                 except (ValueError, TypeError):
                     pass
-            # 既存 tool 抽出ロジックのノイズを避けるため line から除去 (ec を先に除去)
-            line = re.sub(r'\s*/?\s*predicted_ec\s*[:：]\s*-?[0-9]*\.?[0-9]+', '', line)
-            line = re.sub(r'\s*/?\s*predicted_e2\s*[:：]\s*\d+', '', line).strip()
+            line = re.sub(
+                r'\s*/?\s*predicted_ec\s*[:：]\s*-?[0-9]*\.?[0-9]+', '', line
+            )
+            line = re.sub(
+                r'\s*/?\s*predicted_e2\s*[:：]\s*-?\d+', '', line
+            ).strip()
 
+        # --- tool_part / reason_part 分離 ---
         if "->" in line or "→" in line:
             parts = re.split(r'->|→', line)
             tool_part = parts[-1].strip()
@@ -271,19 +280,65 @@ def parse_candidates(text: str, allowed_tools: set) -> list:
             tool_part = parts[0] if parts else ""
             reason_part = cleaned
 
-        # +で分割してから各ツール名の丸括弧以降を除去、ASCII英数字+_のみに制限
+        # --- chain の各 tool + 新形式 (pe2=X, pec=Y) 個別抽出 ---
         raw_tools = []
-        for t in tool_part.split('+'):
-            t_clean = re.split(r'[（(]', t.strip())[0].strip()
-            t_clean = re.sub(r'[^a-zA-Z0-9_]', '', t_clean)
-            if t_clean:
-                raw_tools.append(t_clean)
-        valid_tools = [t for t in raw_tools if t in allowed_tools]
+        raw_chain = []
+        for t_frag in tool_part.split('+'):
+            t_frag = t_frag.strip()
+            name_match = re.match(r'([a-zA-Z_][a-zA-Z0-9_]*)', t_frag)
+            if not name_match:
+                continue
+            t_name = name_match.group(1)
 
+            tool_pe2 = None
+            tool_pec = None
+            paren_match = re.search(r'\(([^)]*)\)', t_frag)
+            if paren_match:
+                inside = paren_match.group(1)
+                pe2_m = re.search(r'pe2\s*=\s*(-?\d+)', inside)
+                if pe2_m:
+                    try:
+                        tool_pe2 = max(0, min(100, int(pe2_m.group(1))))
+                    except (ValueError, TypeError):
+                        pass
+                pec_m = re.search(r'pec\s*=\s*(-?[0-9]*\.?[0-9]+)', inside)
+                if pec_m:
+                    try:
+                        tool_pec = max(0.0, min(1.0, float(pec_m.group(1))))
+                    except (ValueError, TypeError):
+                        pass
+            raw_tools.append(t_name)
+            raw_chain.append({
+                "tool": t_name,
+                "predicted_e2": tool_pe2,
+                "predicted_ec": tool_pec,
+            })
+
+        # --- allowed_tools フィルタ (chain も同期除去) ---
+        valid_tools = []
+        valid_chain = []
+        for t_name, item in zip(raw_tools, raw_chain):
+            if t_name in allowed_tools:
+                valid_tools.append(t_name)
+                valid_chain.append(item)
+
+        # --- 旧形式 pe2/pec を chain 内で None の tool に複製 (後方互換) ---
+        for item in valid_chain:
+            if item["predicted_e2"] is None and legacy_pe2 is not None:
+                item["predicted_e2"] = legacy_pe2
+            if item["predicted_ec"] is None and legacy_pec is not None:
+                item["predicted_ec"] = legacy_pec
+
+        # --- フォールバック (行内 tool 名検索) ---
         if not valid_tools:
             for t in allowed_tools:
                 if t in line:
                     valid_tools = [t]
+                    valid_chain = [{
+                        "tool": t,
+                        "predicted_e2": legacy_pe2,
+                        "predicted_ec": legacy_pec,
+                    }]
                     break
 
         reason = re.sub(r'^[\d]+[.:)\s]+', '', reason_part).strip()
@@ -293,12 +348,30 @@ def parse_candidates(text: str, allowed_tools: set) -> list:
 
         chain_key = "+".join(valid_tools)
         if valid_tools and chain_key not in ["+".join(c["tools"]) for c in candidates]:
-            cand_dict = {"tool": valid_tools[0], "tools": valid_tools, "reason": reason}
-            if prediction is not None:
+            cand_dict = {
+                "tool": valid_tools[0],
+                "tools": valid_tools,
+                "reason": reason,
+                "chain": valid_chain,
+            }
+            head = valid_chain[0]
+            if head["predicted_e2"] is not None:
+                prediction = {
+                    "predicted_e2": head["predicted_e2"],
+                    "confidence": 0.7,
+                    "source": "medium",
+                }
+                if head["predicted_ec"] is not None:
+                    prediction["predicted_ec"] = head["predicted_ec"]
                 cand_dict["prediction"] = prediction
             candidates.append(cand_dict)
 
     if not candidates:
         for t in allowed_tools:
-            candidates.append({"tool": t, "reason": "（フォールバック）"})
+            candidates.append({
+                "tool": t,
+                "tools": [t],
+                "reason": "（フォールバック）",
+                "chain": [{"tool": t, "predicted_e2": None, "predicted_ec": None}],
+            })
     return candidates

@@ -172,6 +172,12 @@ def main():
 
     state = load_state()
     state["session_id"] = str(uuid.uuid4())[:8]
+    # 段階10.5 Fix 1: chain 連結キー entry (tool_A+tool_B 形式) を drop し、
+    # tool 単位 entry のみ残す。新 smoke 起点で predictor_confidence をリセット。
+    from core.predictor import migrate_chain_keys
+    _dropped = migrate_chain_keys(state)
+    if _dropped:
+        print(f"  [migration] 段階10.5: predictor_confidence から {_dropped} 個の chain 連結 entry を drop")
     save_state(state)
     # 段階7: memory/wm.jsonl から WM materialized view を再構築
     try:
@@ -620,6 +626,10 @@ def main():
         _executed_targets = set()
         _last_llm_text = ""
         first_args: dict = {}  # 段階8 改善1: 先頭 tool の args を log entry に保存
+        # 段階10.5 Fix 1: chain 内の各 tool 実行直後に state["e_values"] snapshot +
+        # selected["chain"][chain_idx] の個別 pe2/pec を紐付けて per_tool metadata を蓄積。
+        # 1 cycle = 1 log entry + entry["per_tool"] に tool 単位 metadata (Y 方式)。
+        per_tool_entries: list = []
 
         for chain_idx, chain_tool in enumerate(chain_tools):
             if chain_tool not in ctrl["allowed_tools"]:
@@ -725,6 +735,52 @@ def main():
             if _tool_ch:
                 observe_channel_activity(state.get("world_model"), _tool_ch)
 
+            # 段階10.5 Fix 1 追補: approval reject された tool は post hook が走らず
+            # state["e_values"] が前 tool の値のまま残るため、per_tool に記録すると
+            # 学習が bias する。該当 entry を skip して chain ループの次 iter へ。
+            if str(rec.output).startswith("[REJECTED]"):
+                continue
+
+            # --- 段階10.5 Fix 1: per_tool snapshot ---
+            # post tool hook (hooks.py:231) が state["e_values"] を書き込んだ直後。
+            # ここで snapshot を取らないと chain 次 tool の hook で上書きされて消える。
+            # selected["chain"][chain_idx] から tool 単位 predicted_e2/predicted_ec を引く。
+            _tool_ev = dict(state.get("e_values", {}))
+            _chain_list = selected.get("chain") if isinstance(selected, dict) else None
+            _tool_pe2 = None
+            _tool_pec = None
+            if isinstance(_chain_list, list) and chain_idx < len(_chain_list):
+                _chain_item = _chain_list[chain_idx]
+                if isinstance(_chain_item, dict):
+                    _tool_pe2 = _chain_item.get("predicted_e2")
+                    _tool_pec = _chain_item.get("predicted_ec")
+            pt_entry = {
+                "tool": rec.tool_name,
+                "chain_position": chain_idx,
+                "e1": _tool_ev.get("e1", ""),
+                "e2": _tool_ev.get("e2", ""),
+                "e2_raw": _tool_ev.get("e2_raw", ""),
+                "e3": _tool_ev.get("e3", ""),
+                "e4": _tool_ev.get("e4", ""),
+                "eff": float(_tool_ev.get("eff", 0.0) or 0.0),
+            }
+            if isinstance(_tool_pe2, int):
+                pt_entry["predicted_e2"] = _tool_pe2
+                _pt_e2_m = re.search(r'\d+', str(_tool_ev.get("e2", "")))
+                if _pt_e2_m:
+                    _pt_actual_e2 = max(0, min(100, int(_pt_e2_m.group(0))))
+                    pt_entry["actual_e2"] = _pt_actual_e2
+                    pt_entry["prediction_error"] = abs(_tool_pe2 - _pt_actual_e2)
+            if isinstance(_tool_pec, (int, float)):
+                from core.predictor import clamp_ec as _clamp_ec
+                pt_entry["predicted_ec"] = float(_tool_pec)
+                pt_entry["actual_ec"] = _clamp_ec(_tool_ev.get("eff", 0.0))
+                if "prediction_error" in pt_entry:
+                    pt_entry["prediction_error_ec"] = abs(
+                        float(_tool_pec) - pt_entry["actual_ec"]
+                    )
+            per_tool_entries.append(pt_entry)
+
         if not all_tool_names:
             return None
 
@@ -798,9 +854,9 @@ def main():
             entry["e3"] = e3
         if e4:
             entry["e4"] = e4
-        # 段階9: 予測誤差記録 (段階10+ で §9-A 活用、段階9 は記録のみ)。
-        # MediumPredictor の "second half" — これを pressure 加算や
-        # confidence 自己学習に繋げて Active Inference epistemic signal 化する。
+        # 段階9: 予測誤差記録 (chain 全体 = chain[0] 由来、後方互換)。
+        # MediumPredictor の "second half" — pressure 加算 + confidence 自己学習に
+        # 繋げて Active Inference epistemic signal 化する。
         _pe2 = selected.get("_predicted_e2") if isinstance(selected, dict) else None
         if isinstance(_pe2, int):
             entry["predicted_e2"] = _pe2
@@ -813,20 +869,29 @@ def main():
                 # reflection.py:15 で参照されてたが誰も書いてなかった既存 bug の副次修復。
                 # entropy.py の calc_pressure_signals で pe signal として pressure 加算にも使う。
                 state["last_prediction_error"] = entry["prediction_error"]
-                # 段階10 柱 C: predicted_ec の実測誤差を計算 (prediction_error_ec)。
-                # eff_change = actual ec (main.py:756 で定義済、0.0-1.0 scale)。
-                # controller.c["_predicted_ec"] は LLM① 応答に predicted_ec 併記が
-                # あった cycle のみ非 None、欠如時は柱 C 更新は走らない。
+                # 段階10 柱 C: predicted_ec の実測誤差 (chain 全体、後方互換)。
                 _pec = selected.get("_predicted_ec") if isinstance(selected, dict) else None
-                _pe_ec = None
                 if isinstance(_pec, (int, float)):
+                    from core.predictor import clamp_ec
                     entry["predicted_ec"] = float(_pec)
-                    entry["actual_ec"] = float(eff_change)
-                    _pe_ec = abs(float(_pec) - float(eff_change))
-                    entry["prediction_error_ec"] = _pe_ec
-                # 段階10 柱 B/C: tool 別 confidence の β+ 更新 (e2 軸常時、ec 軸あれば追加)。
-                from core.predictor import update_predictor_confidence
-                update_predictor_confidence(state, tool_name, entry["prediction_error"], _pe_ec)
+                    # 段階10.5 Bug fix: actual_ec を 0.0-1.0 に clamp (従来は生値)
+                    entry["actual_ec"] = clamp_ec(eff_change)
+                    entry["prediction_error_ec"] = abs(float(_pec) - entry["actual_ec"])
+
+        # 段階10.5 Fix 1: 1 cycle = 1 entry + per_tool に tool 単位 metadata (Y 方式)。
+        # update_predictor_confidence を chain ループ後の per_tool loop で tool 単位 call。
+        # chain 連結文字列 "tool_A+tool_B" ではなく個別 tool 名で β+ 更新される。
+        if per_tool_entries:
+            entry["per_tool"] = per_tool_entries
+            from core.predictor import update_predictor_confidence
+            for pt in per_tool_entries:
+                if pt.get("prediction_error") is not None:
+                    update_predictor_confidence(
+                        state, pt["tool"],
+                        pt["prediction_error"],
+                        pt.get("prediction_error_ec"),
+                    )
+
         _archive_entries([entry])
         state["log"].append(entry)
 
