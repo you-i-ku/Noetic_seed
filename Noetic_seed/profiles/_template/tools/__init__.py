@@ -5,6 +5,7 @@ from tools.elyth_tools import _elyth_post, _elyth_reply, _elyth_like, _elyth_fol
 from tools.memory_tool import _search_memory, _tool_memory_store, _tool_memory_update, _tool_memory_forget, _tool_search_memory
 from tools.sandbox import _create_tool, _exec_code, _self_modify, _run_ai_tool, AI_CREATED_TOOLS, _DANGEROUS_PATTERNS
 from tools.ui_tools import _output_display
+from tools.perspective_tools import _inspect_wm_view
 from tools.device_tools import _camera_stream, _camera_stream_stop, _screen_peek, _mic_record
 from tools.http_tool import http_request
 from tools.secret_tools import secret_read, secret_write
@@ -46,6 +47,7 @@ TOOLS = {
     "secret_read":  {"desc": "sandbox/secrets/ に保存された秘密情報を読む（承認不要）。引数: name=secret名【name= を使う。read_file の path= と混同しないこと】", "func": secret_read},
     "secret_write": {"desc": "sandbox/secrets/ に秘密情報を書き込む（承認必要）。引数: name=secret名 content=内容 intent=目的 [message=外部への説明]", "func": secret_write},
     "auth_profile_info": {"desc": "認証プロファイルのメタ情報を取得。name未指定で一覧、name指定で詳細（機密フィールドtoken/key/secret等は隠される）。引数: [name=プロファイル名]", "func": auth_profile_info},
+    "inspect_wm_view": {"desc": "指定視点（viewer / viewer_type）で WM をフィルタ表示する read-only メタ認知ツール。自己視点に囚われたくない時や、他者 entity から見た自己を覗きたい時に能動起動する。引数: [viewer=self/entity_id default=self] [viewer_type=actual/imagined/past_self/future_self default=actual]。副作用なし、承認不要。", "func": _inspect_wm_view},
 }
 
 # === ツール段階解放テーブル ===
@@ -59,9 +61,10 @@ _LV3_TOOLS = (
     | _CLAW_FILE_OPS
 )
 LEVEL_TOOLS = {
-    0: {"glob_search", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio", "bash"},
-    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio", "bash"},
-    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio", "bash"},
+    # 段階11-A: inspect_wm_view は read-only メタ認知、全 level で使用可 (P2 affordance)。
+    0: {"glob_search", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio", "bash", "inspect_wm_view"},
+    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio", "bash", "inspect_wm_view"},
+    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio", "bash", "inspect_wm_view"},
     3: _LV3_TOOLS | {"bash"},
     4: _LV3_TOOLS | {"create_tool", "bash"},
     5: set(TOOLS.keys()) - {"self_modify"} | _CLAW_FILE_OPS | {"bash"},

@@ -95,9 +95,17 @@ def list_channels(wm: Optional[dict]) -> list:
 # 段階3: Fact schema + β+ 更新
 # ============================================================
 
-def make_fact(key: str, value, confidence: float = 0.7) -> dict:
-    """新規 Fact 構造を返す。"""
+def make_fact(key: str, value, confidence: float = 0.7,
+              perspective: Optional[dict] = None) -> dict:
+    """新規 Fact 構造を返す。
+
+    段階11-A: perspective 属性を追加 (fact が誰の視点由来かを記録)。
+    None なら default_self_perspective (self/actual) で補完。
+    """
+    from core.perspective import default_self_perspective
     now = _now()
+    if perspective is None:
+        perspective = default_self_perspective()
     return {
         "key": key,
         "value": value,
@@ -107,6 +115,7 @@ def make_fact(key: str, value, confidence: float = 0.7) -> dict:
         "learned_at": now,
         "observation_count": 1,
         "last_observed_at": now,
+        "perspective": perspective,
     }
 
 
@@ -135,15 +144,19 @@ def find_fact(entity: Optional[dict], key: str) -> Optional[dict]:
 
 
 def add_or_update_fact(entity: dict, key: str,
-                       value, confidence: float = 0.7) -> dict:
+                       value, confidence: float = 0.7,
+                       perspective: Optional[dict] = None) -> dict:
     """既存 fact があれば β+、なければ新規追加。
     既存 value と異なる場合は bitemporal: 旧 fact の valid_to=now で凍結 +
     信頼度削減、新 fact を追加。
+
+    段階11-A: perspective 属性を新規 fact に付与 (既存 fact の perspective は
+    不変維持、bitemporal 哲学整合)。
     """
     existing = find_fact(entity, key)
     entity.setdefault("facts", [])
     if existing is None:
-        new_fact = make_fact(key, value, confidence)
+        new_fact = make_fact(key, value, confidence, perspective=perspective)
         entity["facts"].append(new_fact)
         entity["updated_at"] = _now()
         return new_fact
@@ -154,7 +167,7 @@ def add_or_update_fact(entity: dict, key: str,
     # 値が違う: bitemporal 更新
     existing["valid_to"] = _now()
     update_fact_confidence(existing, False)
-    new_fact = make_fact(key, value, confidence)
+    new_fact = make_fact(key, value, confidence, perspective=perspective)
     entity["facts"].append(new_fact)
     entity["updated_at"] = _now()
     return new_fact
@@ -340,11 +353,15 @@ def sync_from_memory_entities(wm: Optional[dict], memory_entity_records: list,
 
 def store_wm_fact(wm: dict, entity_name: str, fact_key: str,
                   fact_value, confidence: float = 0.7,
-                  entity_id: Optional[str] = None) -> dict:
+                  entity_id: Optional[str] = None,
+                  perspective: Optional[dict] = None) -> dict:
     """wm タグの記憶を保存 (materialized view 同期の唯一の accessor)。
 
     段階7 Step 3: memory/wm.jsonl (source of truth) + state["world_model"] (派生) を
     同時に更新。β+ / bitemporal は既存 add_or_update_fact に委譲。
+
+    段階11-A: perspective を add_or_update_fact と memory_store 両方に伝播。
+    None なら default_self_perspective (memory_store 側で補完)。
 
     Args:
         wm: state["world_model"] dict
@@ -353,6 +370,8 @@ def store_wm_fact(wm: dict, entity_name: str, fact_key: str,
         fact_value: fact 値
         confidence: 確信度 (0.0-1.0、既定 0.7)
         entity_id: 省略時は _slugify(entity_name) で生成
+        perspective: 段階11-A — fact がどの視点由来かの metadata。
+            None なら default_self_perspective (self/actual) で補完。
 
     Returns:
         add_or_update_fact の戻り値 (new fact dict)
@@ -362,7 +381,8 @@ def store_wm_fact(wm: dict, entity_name: str, fact_key: str,
     if entity_id is None:
         entity_id = f"ent_{_slugify(entity_name)}"
     entity = ensure_entity(wm, entity_id, entity_name)
-    new_fact = add_or_update_fact(entity, fact_key, fact_value, confidence)
+    new_fact = add_or_update_fact(entity, fact_key, fact_value, confidence,
+                                  perspective=perspective)
 
     content = f"{entity_name}.{fact_key} = {fact_value}"
     metadata = {
@@ -377,7 +397,8 @@ def store_wm_fact(wm: dict, entity_name: str, fact_key: str,
     }
     memory_store("wm", content, metadata,
                  origin="store_wm_fact",
-                 source_context="wm_materialized")
+                 source_context="wm_materialized",
+                 perspective=perspective)
     return new_fact
 
 
@@ -395,6 +416,7 @@ def rebuild_wm_from_jsonl(wm: dict, wm_records: list) -> int:
     Returns:
         処理に成功した record 数 (不正 record は skip)
     """
+    from core.perspective import default_self_perspective
     count = 0
     for rec in wm_records:
         meta = rec.get("metadata", {})
@@ -408,15 +430,73 @@ def rebuild_wm_from_jsonl(wm: dict, wm_records: list) -> int:
         except (TypeError, ValueError):
             confidence = 0.7
         entity_id = meta.get("entity_id") or f"ent_{_slugify(entity_name)}"
+        # 段階11-A: 専用キー perspective 優先、欠落時は default (backward compat)
+        perspective = rec.get("perspective") or default_self_perspective()
         entity = ensure_entity(wm, entity_id, entity_name)
-        add_or_update_fact(entity, fact_key, fact_value, confidence)
+        add_or_update_fact(entity, fact_key, fact_value, confidence,
+                           perspective=perspective)
         count += 1
     return count
 
 
+def _pkey_matches_filter(perspective: Optional[dict],
+                         view_filter: Optional[dict]) -> bool:
+    """perspective dict が view_filter 条件を満たすか。
+
+    段階11-A: fact / entry の perspective を filter にかける helper。
+    view_filter=None → 常に True (全視点表示)
+    view_filter={"viewer": "self"} → viewer=self のみ
+    view_filter={"viewer_type": "actual"} → 仮想除外
+    view_filter={"viewer": "X", "viewer_type": "Y"} → AND
+    perspective 欠落 (旧 entry) は default_self_perspective 相当で判定。
+    """
+    if view_filter is None:
+        return True
+    from core.perspective import default_self_perspective
+    p = perspective or default_self_perspective()
+    for key, expected in view_filter.items():
+        if p.get(key) != expected:
+            return False
+    return True
+
+
+def _pkey_str_to_perspective(pkey: str) -> dict:
+    """state["dispositions"] の key str → perspective dict 逆変換。
+
+    段階11-A: dispositions の view_filter 判定で _pkey_matches_filter を
+    使い回すための helper。
+      "self" → {"viewer": "self", "viewer_type": "actual"}
+      "attributed:X" → {"viewer": "X", "viewer_type": "actual"}
+      "imagined:X" / "past_self:X" / "future_self:X" → 対応する type に
+    """
+    if pkey == "self":
+        return {"viewer": "self", "viewer_type": "actual"}
+    if ":" in pkey:
+        prefix, viewer = pkey.split(":", 1)
+        if prefix == "attributed":
+            return {"viewer": viewer, "viewer_type": "actual"}
+        return {"viewer": viewer, "viewer_type": prefix}
+    return {"viewer": pkey, "viewer_type": "actual"}
+
+
+def _is_perspective_keyed_dispositions(dispositions: dict) -> bool:
+    """dispositions dict が perspective-keyed 形式か判定 (dual support)。
+
+    段階11-A: Step 5 までの過渡期、既存 flat dict (段階10.5 Fix 4 δ')
+    と新 perspective-keyed dict の両方を受け取って綺麗に動くため。
+      flat: {"curiosity": 0.8}  → 値が数値
+      perspective-keyed: {"self": {"curiosity": {"value": 0.8,...}}} → 値が dict
+    """
+    if not dispositions:
+        return False
+    first_val = next(iter(dispositions.values()), None)
+    return isinstance(first_val, dict)
+
+
 def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
                       *, opinions: Optional[list] = None,
-                      dispositions: Optional[dict] = None) -> str:
+                      dispositions: Optional[dict] = None,
+                      view_filter: Optional[dict] = None) -> str:
     """[世界モデル] セクションを system_prompt 用にレンダリング。
 
     wm=None または空の場合は空文字を返す (prompt_assembly 側で
@@ -424,14 +504,22 @@ def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
     段階3: 各 fact に confidence 値を括弧で付与。
     段階10.5 Fix 4 δ' (PLAN §6-2 準拠): opinions / dispositions を追加
     セクションで表示して「構造化自己認識」を完成させる。
-    iku が自分の意見 / 傾向を自覚して行動多様化する自然圧を prompt に付与。
+
+    段階11-A:
+      - view_filter kwarg 追加 (perspective filter)
+        None → 全視点表示 (debug / inspect_wm_view の default/free case)
+        {"viewer": "self"} → self 視点のみ (system_prompt での default)
+        {"viewer_type": "actual"} → 仮想視点除外
+      - dispositions の dual support: flat dict (段階10.5 既存) と
+        perspective-keyed dict (Step 5 以降) 両方を受けられる
+      - fact の valid_to 凍結フィルタと view_filter の 2 段フィルタ
     """
     if not wm:
         return ""
 
     lines = ["## 世界モデル"]
 
-    # channels サマリ
+    # channels サマリ (view_filter 非適用 — channel は物理的結合、視点分離対象外)
     channels = list_channels(wm)
     if channels:
         lines.append("### チャネル")
@@ -442,12 +530,16 @@ def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
     entities = list_entities(wm)
     entities_with_facts = [e for e in entities if e.get("facts")]
     lines.append("### 観測された存在")
+    rendered_any_entity = False
     if entities_with_facts:
         for e in entities_with_facts[:max_entities]:
             fact_summaries = []
             for f in e.get("facts", [])[:3]:
                 # 凍結済 fact (valid_to 設定済) はスキップ
                 if f.get("valid_to") is not None:
+                    continue
+                # 段階11-A: view_filter 適用
+                if not _pkey_matches_filter(f.get("perspective"), view_filter):
                     continue
                 key = f.get("key", "?")
                 val = f.get("value", "?")
@@ -458,30 +550,70 @@ def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
                     fact_summaries.append(f"{key}={val}")
             if fact_summaries:
                 lines.append(f"- {e.get('name', e['id'])}: {', '.join(fact_summaries)}")
-        # フィルタ後 fact が全件 frozen/空だった場合の処理
-        if all(not any(f.get("valid_to") is None for f in e.get("facts", []))
-               for e in entities_with_facts):
-            # 可能性としてほぼ起きないけど念のため
-            pass
+                rendered_any_entity = True
+        if not rendered_any_entity:
+            # view_filter 適用で fact が全部落ちた場合の明示 (debug 視認性)
+            lines.append("(この視点では観測された存在なし)")
     else:
         lines.append("(まだ観測されていない — 段階3 で自動登録される)")
 
-    # 段階10.5 Fix 4 δ': dispositions (iku の傾向、state["disposition"] から)
+    # 段階10.5 Fix 4 δ' + 段階11-A: dispositions dual support (flat / perspective-keyed)
     if dispositions:
-        lines.append("### 傾向 (dispositions)")
-        for key, val in sorted(dispositions.items()):
-            try:
-                lines.append(f"- {key}: {float(val):.2f}")
-            except (TypeError, ValueError):
-                continue
+        is_pkeyed = _is_perspective_keyed_dispositions(dispositions)
+        if is_pkeyed:
+            # perspective-keyed 形式 (Step 5 以降)
+            # outer key: "self" / "attributed:X" / "imagined:X" 等
+            # inner: {trait_key: {"value": 0.8, "confidence": None, ...}}
+            rendered_disp_header = False
+            for pkey in sorted(dispositions.keys()):
+                traits = dispositions[pkey]
+                if not isinstance(traits, dict) or not traits:
+                    continue
+                # view_filter 適用 (pkey → perspective 逆変換で判定)
+                if not _pkey_matches_filter(
+                        _pkey_str_to_perspective(pkey), view_filter):
+                    continue
+                if not rendered_disp_header:
+                    lines.append("### 傾向 (dispositions)")
+                    rendered_disp_header = True
+                # sub-header
+                if pkey == "self":
+                    lines.append("#### 自己視点")
+                elif pkey.startswith("attributed:"):
+                    lines.append(f"#### {pkey[len('attributed:'):]} 視点 (attributed)")
+                else:
+                    lines.append(f"#### {pkey}")
+                for trait in sorted(traits.keys()):
+                    info = traits[trait]
+                    val = info.get("value") if isinstance(info, dict) else info
+                    try:
+                        lines.append(f"- {trait}: {float(val):.2f}")
+                    except (TypeError, ValueError):
+                        continue
+        else:
+            # flat 形式 (段階10.5 Fix 4 δ'、backward compat)
+            lines.append("### 傾向 (dispositions)")
+            for key, val in sorted(dispositions.items()):
+                try:
+                    lines.append(f"- {key}: {float(val):.2f}")
+                except (TypeError, ValueError):
+                    continue
 
     # 段階10.5 Fix 4 δ': opinions (iku の意見、memory tag="opinion" から上位 N 件)
+    # 段階11-A: opinion 側の view_filter は Step 6 で search_memory 層に追加予定。
+    # ここでは opinion entry の perspective を見て個別 filter する最小対応のみ。
     if opinions:
-        lines.append("### 意見 (opinions)")
+        rendered_op_header = False
         for op in opinions[:5]:
             content = str(op.get("content", ""))[:120]
             if not content:
                 continue
+            # 段階11-A: opinion 自体が持つ perspective を filter にかける
+            if not _pkey_matches_filter(op.get("perspective"), view_filter):
+                continue
+            if not rendered_op_header:
+                lines.append("### 意見 (opinions)")
+                rendered_op_header = True
             conf = op.get("metadata", {}).get("confidence")
             if conf is not None:
                 try:

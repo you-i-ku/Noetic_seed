@@ -82,17 +82,28 @@ def build_world_model_section(world_model: Optional[dict] = None,
 
     段階10.5 Fix 4 δ' (PLAN §6-2 準拠): state 引数経由で opinions / dispositions
     を取得して render_for_prompt に渡し、構造化自己認識を完成させる。
-      - dispositions: state["disposition"] dict (単数キー、reflection が更新)
+      - dispositions: state["dispositions"] (Step 5+) or state["disposition"]
+        (段階10.5 までの flat dict) を dual support
       - opinions: memory tag="opinion" の最新 5 件 (list_records 経由)
     state=None なら既存挙動 (entities/channels のみ) を維持。
+
+    段階11-A: system_prompt 用は view_filter={"viewer": "self"} を指定して
+    self 視点のみをデフォルトで表示 (attributed/imagined は prompt に混入させない、
+    ゆう persona 吸収抑制の要)。
+    iku 能動切替は inspect_wm_view tool 経由 (P2 affordance)、prompt 側では強制。
     """
     from core.world_model import render_for_prompt
     opinions = None
     dispositions = None
     if state:
-        disp = state.get("disposition")
-        if isinstance(disp, dict) and disp:
-            dispositions = disp
+        # 段階11-A: perspective-keyed dispositions を優先、なければ flat
+        # (Step 5 で state["disposition"] → state["dispositions"] に移行)
+        disp_pkeyed = state.get("dispositions")
+        disp_flat = state.get("disposition")
+        if isinstance(disp_pkeyed, dict) and disp_pkeyed:
+            dispositions = disp_pkeyed
+        elif isinstance(disp_flat, dict) and disp_flat:
+            dispositions = disp_flat
         try:
             from core.memory import list_records
             records = list_records("opinion", limit=5)
@@ -100,7 +111,12 @@ def build_world_model_section(world_model: Optional[dict] = None,
                 opinions = records
         except Exception:
             opinions = None
-    return render_for_prompt(world_model, opinions=opinions, dispositions=dispositions)
+    return render_for_prompt(
+        world_model,
+        opinions=opinions,
+        dispositions=dispositions,
+        view_filter={"viewer": "self"},  # 段階11-A: prompt デフォルト = self 視点
+    )
 
 
 def build_log_block(state: dict, budget_tok: Optional[int] = None) -> str:
