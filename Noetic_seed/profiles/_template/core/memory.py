@@ -3,11 +3,13 @@ import json
 import re
 import uuid
 from datetime import datetime
+from typing import Optional
 from core.config import MEMORY_DIR, LOG_HARD_LIMIT, LOG_KEEP, SUMMARY_HARD_LIMIT, META_SUMMARY_RAW
 from core.state import load_pref, save_pref
 from core.llm import call_llm
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
 from core.tag_registry import is_tag_registered, list_registered_tags
+from core.perspective import Perspective, default_self_perspective
 
 # === Entity/Opinion Network (段階7: tag_registry で動的管理) ===
 # 段階6-C まで: _VALID_NETWORKS = {"experience", "opinion", "entity"} (ハードコード)
@@ -20,10 +22,19 @@ def _network_file(network: str):
 
 
 def memory_store(network: str, content: str, metadata: dict = None,
-                 origin: str = "unknown", source_context: str = "") -> dict:
-    """記憶を保存。origin=生成きっかけ、source_context=根拠の出処。"""
+                 origin: str = "unknown", source_context: str = "",
+                 perspective: Optional[Perspective] = None) -> dict:
+    """記憶を保存。origin=生成きっかけ、source_context=根拠の出処。
+
+    段階11-A: perspective kwarg を専用キーとして entry に昇格 (metadata と並列、
+    型安全優先)。None なら default_self_perspective() (self/actual) で補完、
+    呼び出し側は意識不要で後方互換。既存 jsonl entry (perspective 欠落) は
+    読み出し側 (rebuild_wm / list_records) が default で解釈する。
+    """
     if not is_tag_registered(network):
         raise ValueError(f"Invalid network: {network}")
+    if perspective is None:
+        perspective = default_self_perspective()
     entry = {
         "id": f"mem_{uuid.uuid4().hex[:12]}",
         "network": network,
@@ -31,6 +42,7 @@ def memory_store(network: str, content: str, metadata: dict = None,
         "origin": origin,
         "source_context": source_context,
         "metadata": metadata or {},
+        "perspective": perspective,
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }

@@ -102,6 +102,7 @@ from core.entropy import (
     calc_pressure_signals, apply_negentropy
 )
 from core.memory import _archive_entries, maybe_compress_log, get_relevant_memories, format_memories_for_prompt
+from core.perspective import make_perspective
 from core.reflection import should_reflect, reflect
 from core.prompt import build_prompt_propose
 from core.controller import controller, controller_select, _intent_conditioned_scores
@@ -534,6 +535,7 @@ def main():
                     f"frames={_ended_params.get('frames','?')} "
                     f"interval={_ended_params.get('interval_sec','?')}s"
                 ),
+                "perspective": make_perspective(),  # 段階11-A: system 処理は self/actual
             }
             _archive_entries([_sys_end_entry])
             state["log"].append(_sys_end_entry)
@@ -843,6 +845,7 @@ def main():
             "tool": tool_name,
             "channel": _get_channel(tool_name),
             "result": result_str,
+            "perspective": make_perspective(),  # 段階11-A: iku 自身の tool 行動 → self/actual
         }
         if parse_failed:
             entry["parse_error"] = str(parse_failed)[:150]
@@ -990,6 +993,9 @@ def main():
                     "type": "external",
                     "channel": _channel_id,
                     "result": chat_text,
+                    # 段階11-A G3: 外部入力の viewer は channel_id (channel_registry が
+                    # Noetic 主体で決定済の中立 id、feedback_no_user_assistant_frame 整合)
+                    "perspective": make_perspective(viewer=_channel_id, viewer_type="actual"),
                 }
                 _archive_entries([_ext_entry])
                 state["log"].append(_ext_entry)
@@ -1056,6 +1062,9 @@ def main():
                             "type": "external",
                             "channel": _channel_id,
                             "result": _rec.get("content", ""),
+                            # 段階11-A G3: MCP 経由の外部入力も channel_id を viewer に。
+                            # device_input 側と同じ方針で対称性維持。
+                            "perspective": make_perspective(viewer=_channel_id, viewer_type="actual"),
                         }
                         _archive_entries([_ext_entry])
                         state["log"].append(_ext_entry)
@@ -1117,6 +1126,7 @@ def main():
                         "type": "test",
                         "intent": f"[test] {_test_intent}" if _test_intent else "[test] テストタブからの実行",
                         "result": str(_tres),
+                        "perspective": make_perspective(),  # 段階11-A: test タブ実行も Noetic 内部扱いで self/actual
                     }
                     _archive_entries([_test_entry])
                     state["log"].append(_test_entry)

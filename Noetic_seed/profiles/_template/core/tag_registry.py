@@ -37,10 +37,22 @@ STANDARD_TAGS: dict = {
     "opinion": {
         "learning_rules": {"beta_plus": True, "bitemporal": False},
         "display_format": "[opinion] {content} (確度:{confidence})",
+        # 段階11-A G1: reflect prompt に opinion セクションを注入するための受け皿。
+        # 段階11-B で AI が tag を自由発明する時も同構造で reflect_section を付けられる。
+        "reflect_section": {
+            "header": "OPINIONS",
+            "template": "- 主張内容 (確度: 0.0-1.0)",
+            "enabled_in_reflect": True,
+        },
     },
     "entity": {
         "learning_rules": {"beta_plus": True, "bitemporal": True},
         "display_format": "[entity:{entity_name}] {content}",
+        "reflect_section": {
+            "header": "ENTITIES",
+            "template": "- 対象名: 属性記述",
+            "enabled_in_reflect": True,
+        },
     },
 }
 
@@ -82,7 +94,8 @@ def register_tag(name: str,
                  display_format: str = "",
                  origin: str = "dynamic",
                  intent: Optional[str] = None,
-                 file_path: Optional[str] = None) -> dict:
+                 file_path: Optional[str] = None,
+                 reflect_section: Optional[dict] = None) -> dict:
     """タグを登録。
 
     - 未登録 → 新規登録
@@ -96,6 +109,10 @@ def register_tag(name: str,
         origin: "standard" (起動時) / "dynamic" (AI 発明)
         intent: AI 発明時の tool_intent 記録
         file_path: 保存先 jsonl 相対パス (None なら memory/{name}.jsonl)
+        reflect_section: 段階11-A G1 — reflect prompt の動的組立に使う定義 dict。
+            {"header": str, "template": str, "enabled_in_reflect": bool}。
+            None なら reflect prompt に現れない (opt-in)。段階11-B で AI が tag
+            を自由発明する時も同 kwarg で付けられる (抽象化拡張点)。
     """
     _load_from_disk()
     if not isinstance(name, str) or not name.strip():
@@ -113,6 +130,8 @@ def register_tag(name: str,
             existing["learning_rules"] = rules_norm
             if display_format:
                 existing["display_format"] = display_format
+            if reflect_section is not None:
+                existing["reflect_section"] = reflect_section
             _save_to_disk()
             return existing
         raise ValueError(
@@ -127,6 +146,8 @@ def register_tag(name: str,
         "created_at": _now(),
         "intent": intent,
     }
+    if reflect_section is not None:
+        entry["reflect_section"] = reflect_section
     _REGISTERED[name] = entry
     _save_to_disk()
     return entry
@@ -151,7 +172,11 @@ def is_tag_registered(name: str) -> bool:
 
 
 def register_standard_tags() -> None:
-    """起動時呼出用: 標準 4 タグを登録 (idempotent)。main.py init で呼ぶ。"""
+    """起動時呼出用: 標準 4 タグを登録 (idempotent)。main.py init で呼ぶ。
+
+    段階11-A: STANDARD_TAGS に `reflect_section` があれば register_tag kwarg
+    経由で伝播。standard も dynamic も同じ登録経路 (config=function 哲学整合)。
+    """
     _load_from_disk()
     for name, cfg in STANDARD_TAGS.items():
         try:
@@ -160,6 +185,7 @@ def register_standard_tags() -> None:
                 learning_rules=cfg["learning_rules"],
                 display_format=cfg["display_format"],
                 origin="standard",
+                reflect_section=cfg.get("reflect_section"),
             )
         except ValueError:
             pass
