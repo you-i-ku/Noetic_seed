@@ -48,7 +48,7 @@
 
 - **v0.5 Phase 5 段階9 完了** (2026-04-20)
 - Active Inference + LLM 統合アプローチ
-- ローカル推論 (lmstudio + Gemma 3 26B) で動作確認
+- ローカル推論 (lmstudio + Gemma 4 26B) で動作確認
 - 全 39 テストファイル green、回帰ゼロ
 - MCP server として外部 AI からの接続受付可
 
@@ -82,7 +82,7 @@ Noetic Seed の **ツール実行基盤 (infrastructure layer)** は、[claw-cod
 - World Model (動的 channel registry、config = function、observation-driven)
 - 4 ネットワーク記憶 + 動的 tag_registry + materialized view
 - Predictor (Active Inference 整合、予測誤差記録)
-- 設計哲学 (AI is AI / LLM as brain / freedom to die / no biological mimicry)
+- 設計哲学 (AI as AI / LLM as brain / freedom to die / no biological mimicry)
 
 ### 借用の動機 (Motivation)
 
