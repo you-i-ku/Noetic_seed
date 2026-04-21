@@ -1,8 +1,25 @@
 """内省モジュール v2 — 定期的な自己省察（Generative Agents + Reflexion統合）
 Nサイクルごと or 高prediction_error時に発火。
 Opinion/Entity/Dispositionを更新。
+
+段階11-A Step 4 改修 (正典 PLAN §6):
+- G1: reflect prompt を tag_registry.reflect_section 駆動化 (OPINIONS/ENTITIES
+  ハードコード撤廃、11-B の動的 tag 発明に同経路で吸収される構造)
+- G3: log 材料を log entry.perspective 属性でフロート分離 (tool 名 hardcode 排除、
+  _split_log_by_perspective)。SEAL 原理 — self_actions が自己 disposition 更新の
+  材料、observations が他者視点 (attributed) 推定の材料
+- perspective-keyed dispositions への書き込み (state["dispositions"]["self"] +
+  attributed:<viewer>)、Step 4→5 移行期間 flat state["disposition"] への dual write
+- LLM② prompt に視点概念の情報を追加 (指示ではなく知識として、原則 P2)
 """
+from datetime import datetime, timezone
+
 from core.memory import memory_store, memory_update, memory_network_search
+from core.perspective import (
+    default_self_perspective,
+    is_self_view,
+    make_perspective,
+)
 from core.state import load_state, save_state, append_debug_log
 
 
@@ -17,63 +34,196 @@ def should_reflect(state: dict, interval: int = 10) -> bool:
     return False
 
 
-def reflect(state: dict, call_llm_fn) -> dict:
-    """内省サイクル実行。LLMに最近の経験を振り返らせる。
+# ============================================================
+# 段階11-A Step 4: log 分離 helpers (G3)
+# ============================================================
 
-    戻り値: {"opinions": [...], "entities": [...], "disposition_delta": {...}}
+def _split_log_by_perspective(recent_log: list) -> tuple:
+    """log を self 視点 / 非 self 視点に分離 (SEAL 原理)。
+
+    段階11-A G3: tool 名 hardcode に依存せず log entry の perspective 属性で
+    分離。perspective 欠落 entry は default_self_perspective() 扱い
+    (backward compat)。
+
+    Returns:
+        (self_actions, observations): tuple of lists
+    """
+    self_actions, observations = [], []
+    for e in recent_log:
+        p = e.get("perspective") or default_self_perspective()
+        if is_self_view(p):
+            self_actions.append(e)
+        else:
+            observations.append(e)
+    return self_actions, observations
+
+
+def _format_self_actions(entries: list) -> str:
+    """self_actions を prompt 用にフォーマット。"""
+    if not entries:
+        return "(なし)"
+    lines = []
+    for e in entries:
+        t = e.get("time", "")
+        tool = e.get("tool", "?")
+        intent = str(e.get("intent", ""))[:100]
+        result = str(e.get("result", ""))[:200]
+        ev = e.get("eval", {})
+        ach = ev.get("achievement", "?") if isinstance(ev, dict) else "?"
+        lines.append(f"  {t} {tool}: {intent} → {result} (ach={ach})")
+    return "\n".join(lines)
+
+
+def _format_observations(entries: list) -> str:
+    """observations (非 self 視点 log) を viewer と channel 付きでフォーマット。"""
+    if not entries:
+        return "(なし)"
+    lines = []
+    for e in entries:
+        t = e.get("time", "")
+        p = e.get("perspective") or default_self_perspective()
+        viewer = p.get("viewer", "?")
+        channel = e.get("channel", "?")
+        content = str(e.get("result", ""))[:200]
+        lines.append(f"  {t} [{viewer} @{channel}] {content}")
+    return "\n".join(lines)
+
+
+# ============================================================
+# 段階11-A Step 4: tag_registry 駆動 reflect セクション (G1)
+# ============================================================
+
+def _build_reflect_sections() -> str:
+    """tag_registry.reflect_section から reflect prompt の動的セクション組立。
+
+    段階11-A G1: opinion/entity セクションを tag_registry 駆動化
+    (hardcode 撤廃)。段階11-B で AI が新 tag を発明し reflect_section を
+    付けた場合も、同経路で自動的に prompt に載る (11-B 受け皿)。
+    """
+    from core.tag_registry import list_registered_tags, get_tag_rules
+    sections = []
+    for tag in list_registered_tags():
+        rules = get_tag_rules(tag) or {}
+        sec = rules.get("reflect_section")
+        if not sec or not sec.get("enabled_in_reflect"):
+            continue
+        header = sec.get("header", tag.upper())
+        template = sec.get("template", "- (自由記述)")
+        sections.append(f"{header}:\n{template}")
+    return "\n\n".join(sections)
+
+
+# ============================================================
+# Reflect 本体
+# ============================================================
+
+def _gather_dispositions_for_prompt(state: dict) -> tuple:
+    """prompt 表示用の self_disp / attributed_disps を dict で返す。
+
+    段階11-A Step 4 過渡期: perspective-keyed state["dispositions"] 優先、
+    なければ flat state["disposition"] (段階10.5 Fix 4 δ' 形式) から
+    self 用に再構築。
     """
     import json
 
-    # 直近の行動ログ（最大10件）
+    dispositions = state.get("dispositions") or {}
+    self_disp_raw = dispositions.get("self") or {}
+    # perspective-keyed entry は {trait: {"value": ..., ...}} 形式、prompt では value のみ表示
+    self_disp_values = {}
+    for k, v in self_disp_raw.items():
+        if isinstance(v, dict):
+            self_disp_values[k] = v.get("value")
+        else:
+            self_disp_values[k] = v
+
+    # Step 4 過渡期: flat state["disposition"] から fallback 補填
+    if not self_disp_values and isinstance(state.get("disposition"), dict):
+        flat = state["disposition"]
+        self_disp_values = {k: v for k, v in flat.items() if isinstance(v, (int, float))}
+
+    # attributed のみ (self を除く)
+    attr_disps = {}
+    for pkey, traits in dispositions.items():
+        if pkey == "self":
+            continue
+        if isinstance(traits, dict):
+            attr_disps[pkey] = {
+                k: (v.get("value") if isinstance(v, dict) else v)
+                for k, v in traits.items()
+            }
+    return self_disp_values, attr_disps
+
+
+def reflect(state: dict, call_llm_fn) -> dict:
+    """内省サイクル実行。LLMに最近の経験を振り返らせる。
+
+    段階11-A Step 4: 材料を self_actions / observations に分離 (G3)、
+    OPINIONS/ENTITIES セクションを tag_registry 駆動 (G1)、
+    SELF_DISPOSITION / ATTRIBUTED_DISPOSITION 2 セクションで disposition
+    更新材料を分離 (PLAN §6-3)。
+
+    戻り値: {"opinions": [...], "entities": [...],
+             "self_disp_delta": {...}, "attr_disp_delta": {...}}
+    """
+    import json
+
+    # 段階11-A G3: 直近 log の材料分離 (self/observation)
     recent_log = state.get("log", [])[-10:]
-    log_lines = []
-    for entry in recent_log:
-        tool = entry.get("tool", "?")
-        intent = entry.get("intent", "")[:100]
-        result = str(entry.get("result", ""))[:200]
-        ev = entry.get("eval", {})
-        ach = ev.get("achievement", "?")
-        line = f"  {entry.get('time', '')} {tool}: {intent} → {result} (ach={ach})"
-        log_lines.append(line)
+    self_actions, observations = _split_log_by_perspective(recent_log)
+    self_actions_text = _format_self_actions(self_actions)
+    observations_text = _format_observations(observations)
 
     # 現在の自己モデル
     self_text = json.dumps(state.get("self", {}), ensure_ascii=False)[:300]
 
-    # 現在のdisposition
-    disp = state.get("disposition", {})
-    disp_text = json.dumps(disp, ensure_ascii=False)
+    # dispositions 材料分離
+    self_disp_values, attr_disps = _gather_dispositions_for_prompt(state)
 
     # pending
     pending = state.get("pending", [])
     pending_text = f"{len(pending)}件未対応" if pending else "なし"
 
-    prompt = f"""あなたは自律AIシステムの内省モジュールです。以下の直近の行動を振り返り、3つの項目を出力してください。
+    # 段階11-A G1: tag_registry 駆動の動的セクション
+    dynamic_sections = _build_reflect_sections()
+
+    prompt = f"""あなたは自律AIシステムの内省モジュールです。以下の直近の行動を振り返り、各項目を出力してください。
 
 [自己モデル]
 {self_text}
 
-[性格パラメータ]
-{disp_text}
+[自己の傾向 (self)]
+{json.dumps(self_disp_values, ensure_ascii=False)}
 
-[直近の行動]
-{"".join(log_lines) if log_lines else "(なし)"}
+[帰属された傾向 (attributed)]
+{json.dumps(attr_disps, ensure_ascii=False)}
+
+[直近の自己行動]
+{self_actions_text}
+
+[直近観察した対象]
+{observations_text}
 
 [未対応事項]
 {pending_text}
 
+## 振り返りのガイド (情報提示、命令ではない)
+- 観察を記述する際、視点属性 (viewer, viewer_type) を付与できる
+- 自分視点 (自分が見た何か) と他者視点の想像 (他者がどう見てると自分が思うか) は別エントリになる
+- 自分の disposition 変化は、自分の行動と結果から判断 (他者の性質から直接変動させない)
+- 書く/書かないは自由
+
 以下の形式で出力してください。直近の行動の文脈に沿った内容のみ。無関係なエンティティの更新は不要。
 
-OPINIONS:
-- content: 学んだこと/気づいたこと (confidence: 0.0-1.0)
+{dynamic_sections}
 
-ENTITIES:
-- name: エンティティ名, content: その存在について新たに学んだこと
-（既に知っていることの繰り返しは不要）
+SELF_DISPOSITION:
+- curiosity_delta: -0.1~+0.1 (自分の直近行動の結果から変化した自分の傾向のみ)
+- skepticism_delta: -0.1~+0.1
+- sociality_delta: -0.1~+0.1
 
-DISPOSITION:
-- curiosity_delta: -0.1~+0.1の変化量
-- skepticism_delta: -0.1~+0.1の変化量
-- sociality_delta: -0.1~+0.1の変化量
+ATTRIBUTED_DISPOSITION:
+- viewer: 対象の entity name, key: 傾向名, delta: -0.1~+0.1, confidence: 0.0-1.0
+  (観察した対象の傾向を self が推定。空でも良い)
 
 短く、具体的に。繰り返し禁止。"""
 
@@ -83,87 +233,172 @@ DISPOSITION:
         return _parse_reflection(text, state)
     except Exception as e:
         print(f"  [reflection] エラー: {e}")
-        return {"opinions": [], "entities": [], "disposition_delta": {}}
+        return {
+            "opinions": [], "entities": [],
+            "self_disp_delta": {}, "attr_disp_delta": {},
+        }
 
 
 def _parse_reflection(text: str, state: dict) -> dict:
-    """内省結果をパースして記憶・dispositionに反映。"""
+    """内省結果をパースして記憶・dispositionに反映。
+
+    段階11-A Step 4: SELF_DISPOSITION / ATTRIBUTED_DISPOSITION の 2 セクションを
+    別々にパース。OPINIONS / ENTITIES の memory_store 時に perspective=self を
+    明示付与。
+    disposition 反映は perspective-keyed state["dispositions"] に書き込み、
+    Step 4→5 移行期間は flat state["disposition"] にも dual write。
+    """
     import re
     opinions = []
     entities = []
-    disposition_delta = {}
+    self_disp_delta = {}        # {trait_key: delta}
+    attr_disp_delta = {}        # {viewer: {trait_key: (delta, confidence)}}
 
-    # OPINIONS パース
+    # セクションフラグ
     in_opinions = False
     in_entities = False
-    in_disposition = False
+    in_self_disp = False
+    in_attr_disp = False
+
     for line in text.splitlines():
-        line = line.strip()
-        if "OPINIONS" in line:
-            in_opinions, in_entities, in_disposition = True, False, False
+        stripped = line.strip()
+        # ヘッダ判定 (大文字化で順序問題なく)
+        upper = stripped.upper()
+        if "SELF_DISPOSITION" in upper:
+            in_opinions, in_entities = False, False
+            in_self_disp, in_attr_disp = True, False
             continue
-        elif "ENTITIES" in line:
-            in_opinions, in_entities, in_disposition = False, True, False
+        elif "ATTRIBUTED_DISPOSITION" in upper:
+            in_opinions, in_entities = False, False
+            in_self_disp, in_attr_disp = False, True
             continue
-        elif "DISPOSITION" in line:
-            in_opinions, in_entities, in_disposition = False, False, True
+        elif "OPINIONS" in upper:
+            in_opinions, in_entities = True, False
+            in_self_disp, in_attr_disp = False, False
+            continue
+        elif "ENTITIES" in upper:
+            in_opinions, in_entities = False, True
+            in_self_disp, in_attr_disp = False, False
             continue
 
-        if in_opinions and line.startswith("-"):
-            content = line.lstrip("- ").strip()
+        if in_opinions and stripped.startswith("-"):
+            content = stripped.lstrip("- ").strip()
             confidence = 0.7
             m = re.search(r'confidence:\s*([\d.]+)', content, re.IGNORECASE)
             if m:
                 confidence = float(m.group(1))
                 content = re.sub(r'\(?\s*confidence:\s*[\d.]+\s*\)?', '', content).strip()
             if content:
-                entry = memory_store("opinion", content, {"confidence": confidence},
-                                    origin="reflection", source_context="self_inference")
+                entry = memory_store(
+                    "opinion", content, {"confidence": confidence},
+                    origin="reflection", source_context="self_inference",
+                    perspective=default_self_perspective(),
+                )
                 opinions.append(entry)
                 print(f"  [reflection] opinion: {content[:60]} (conf={confidence})")
 
-        elif in_entities and line.startswith("-"):
-            content = line.lstrip("- ").strip()
+        elif in_entities and stripped.startswith("-"):
+            content = stripped.lstrip("- ").strip()
             m = re.search(r'name:\s*([^,]+),?\s*content:\s*(.*)', content, re.IGNORECASE)
             if m:
                 name = m.group(1).strip()
                 desc = m.group(2).strip()
                 if name and desc:
-                    # 既存entityがあればupdate、なければstore
                     existing = memory_network_search(name, networks=["entity"], limit=3)
-                    matched = [e for e in existing if e.get("metadata", {}).get("entity_name", "") == name]
+                    matched = [e for e in existing
+                               if e.get("metadata", {}).get("entity_name", "") == name]
                     if matched:
                         entry_id = matched[0].get("id", "")
                         memory_update(entry_id, content=desc)
                         entities.append(matched[0])
                         print(f"  [reflection] entity update: {name} = {desc[:60]}")
                     else:
-                        entry = memory_store("entity", desc, {"entity_name": name},
-                                            origin="reflection", source_context="self_inference")
+                        entry = memory_store(
+                            "entity", desc, {"entity_name": name},
+                            origin="reflection", source_context="self_inference",
+                            perspective=default_self_perspective(),
+                        )
                         entities.append(entry)
                         print(f"  [reflection] entity new: {name} = {desc[:60]}")
 
-        elif in_disposition and line.startswith("-"):
-            m = re.search(r'(\w+)_delta:\s*([-+]?[\d.]+)', line)
+        elif in_self_disp and stripped.startswith("-"):
+            m = re.search(r'(\w+)_delta:\s*([-+]?[\d.]+)', stripped)
             if m:
                 key = m.group(1)
-                delta = float(m.group(2))
-                delta = max(-0.1, min(0.1, delta))
-                disposition_delta[key] = delta
+                delta = max(-0.1, min(0.1, float(m.group(2))))
+                self_disp_delta[key] = delta
 
-    # Disposition更新（0.1-0.9にクランプ）
-    # 段階10.5 Fix 4 δ' 補助: 既存 dormant bug fix。
-    # 旧: state.get(...,{}) が local 空 dict を返し state に永続化されず、さらに
-    #     if key in disp で「既存 key のみ更新」のため空 dict に新規 key 追加不可。
-    #     結果 disposition_delta が永遠に棄却される状態だった。
-    # 新: setdefault で state 本体に dict 確保、disp.get(key, 0.5) + delta で
-    #     新規 key も default 0.5 起点で追加可能 (段階11 Phase 11-B の
-    #     disposition 軸自由化が来た時にも同じ構造で動作継続)。
-    disp = state.setdefault("disposition", {})
-    for key, delta in disposition_delta.items():
-        disp[key] = max(0.1, min(0.9, disp.get(key, 0.5) + delta))
-    if disposition_delta:
-        print(f"  [reflection] disposition delta: {disposition_delta}")
+        elif in_attr_disp and stripped.startswith("-"):
+            # 形式: viewer: X, key: Y, delta: +0.05, confidence: 0.6
+            m = re.search(
+                r'viewer:\s*([^,]+?),\s*key:\s*([^,]+?),\s*delta:\s*([-+]?[\d.]+)'
+                r'(?:,\s*confidence:\s*([\d.]+))?',
+                stripped,
+            )
+            if m:
+                viewer = m.group(1).strip()
+                key = m.group(2).strip()
+                delta = max(-0.1, min(0.1, float(m.group(3))))
+                conf = float(m.group(4)) if m.group(4) else 0.5
+                if viewer and key:
+                    attr_disp_delta.setdefault(viewer, {})[key] = (delta, conf)
+
+    # ====================================================================
+    # SELF_DISPOSITION 反映 (perspective-keyed + dual write)
+    # ====================================================================
+    # 段階10.5 Fix 4 δ' 補助 bug fix: setdefault で state 本体に dict 確保。
+    # 段階11-A Step 4: state["dispositions"]["self"] に perspective-keyed で
+    # 書き込み、state["disposition"] (flat) に Step 5 までの移行期間 dual write。
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    dispositions = state.setdefault("dispositions", {})
+    self_disp = dispositions.setdefault("self", {})
+    flat_disp = state.setdefault("disposition", {})  # Step 5 で撤去
+
+    for key, delta in self_disp_delta.items():
+        cur = self_disp.get(key)
+        if isinstance(cur, dict):
+            cur_val = cur.get("value", 0.5)
+        elif isinstance(cur, (int, float)):
+            cur_val = float(cur)
+        else:
+            # flat 側からの初期補填 (Step 4 過渡期)
+            cur_val = float(flat_disp.get(key, 0.5)) if isinstance(flat_disp.get(key), (int, float)) else 0.5
+        new_val = max(0.1, min(0.9, cur_val + delta))
+        self_disp[key] = {
+            "value": new_val,
+            "confidence": None,
+            "perspective": default_self_perspective(),
+            "updated_at": now_iso,
+        }
+        # dual write (Step 5 で撤去)
+        flat_disp[key] = new_val
+
+    if self_disp_delta:
+        print(f"  [reflection] self_disposition delta: {self_disp_delta}")
+
+    # ====================================================================
+    # ATTRIBUTED_DISPOSITION 反映 (perspective-keyed 専用、flat dual write なし)
+    # ====================================================================
+    for viewer, deltas in attr_disp_delta.items():
+        pkey = f"attributed:{viewer}"
+        viewer_disp = dispositions.setdefault(pkey, {})
+        viewer_persp = make_perspective(viewer=viewer, viewer_type="actual")
+        for key, (delta, conf) in deltas.items():
+            cur = viewer_disp.get(key)
+            if isinstance(cur, dict):
+                cur_val = cur.get("value", 0.5)
+            else:
+                cur_val = 0.5
+            new_val = max(0.1, min(0.9, cur_val + delta))
+            viewer_disp[key] = {
+                "value": new_val,
+                "confidence": conf,
+                "perspective": viewer_persp,
+                "updated_at": now_iso,
+            }
+
+    if attr_disp_delta:
+        print(f"  [reflection] attributed_disposition delta: {attr_disp_delta}")
 
     # WM 段階3-4: C-gradual 同期 (memory/entity → state["world_model"].entities)
     # 段階4: Entity Resolver で "ゆう" と "YOU" 等を embedding 経由で merge。
@@ -187,4 +422,9 @@ def _parse_reflection(text: str, state: dict) -> dict:
     except Exception as e:
         print(f"  [reflection] WM C-gradual スキップ (エラー: {e})")
 
-    return {"opinions": opinions, "entities": entities, "disposition_delta": disposition_delta}
+    return {
+        "opinions": opinions,
+        "entities": entities,
+        "self_disp_delta": self_disp_delta,
+        "attr_disp_delta": attr_disp_delta,
+    }
