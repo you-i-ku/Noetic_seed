@@ -72,15 +72,35 @@ def build_fire_cause_section(fire_cause: str) -> str:
     return f"[発火原因: {fire_cause}]"
 
 
-def build_world_model_section(world_model: Optional[dict] = None) -> str:
+def build_world_model_section(world_model: Optional[dict] = None,
+                              state: Optional[dict] = None) -> str:
     """世界モデルセクション。
 
     段階2: world_model dict を core.world_model.render_for_prompt に
     委譲してレンダリング。world_model=None や空の場合は空文字を返し、
     assemble_system_prompt 側でセクションごと省略される。
+
+    段階10.5 Fix 4 δ' (PLAN §6-2 準拠): state 引数経由で opinions / dispositions
+    を取得して render_for_prompt に渡し、構造化自己認識を完成させる。
+      - dispositions: state["disposition"] dict (単数キー、reflection が更新)
+      - opinions: memory tag="opinion" の最新 5 件 (list_records 経由)
+    state=None なら既存挙動 (entities/channels のみ) を維持。
     """
     from core.world_model import render_for_prompt
-    return render_for_prompt(world_model)
+    opinions = None
+    dispositions = None
+    if state:
+        disp = state.get("disposition")
+        if isinstance(disp, dict) and disp:
+            dispositions = disp
+        try:
+            from core.memory import list_records
+            records = list_records("opinion", limit=5)
+            if records:
+                opinions = records
+        except Exception:
+            opinions = None
+    return render_for_prompt(world_model, opinions=opinions, dispositions=dispositions)
 
 
 def build_log_block(state: dict, budget_tok: Optional[int] = None) -> str:
@@ -156,7 +176,8 @@ def assemble_system_prompt(
     sections = [
         build_approval_protocol(),
         build_fire_cause_section(fire_cause),
-        build_world_model_section(world_model),
+        # 段階10.5 Fix 4 δ': state 経由で opinions / dispositions を渡し構造化自己認識を完成
+        build_world_model_section(world_model, state=state),
         "[STM — log]\n" + build_log_block(state, log_budget_tok),
         "[利用可能なツール]\n" + build_tool_block(allowed_tools, tools_dict, registry=registry),
     ]
