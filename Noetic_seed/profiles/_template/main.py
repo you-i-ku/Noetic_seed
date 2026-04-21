@@ -178,6 +178,12 @@ def main():
     _dropped = migrate_chain_keys(state)
     if _dropped:
         print(f"  [migration] 段階10.5: predictor_confidence から {_dropped} 個の chain 連結 entry を drop")
+    # 段階10.5 Fix 2: 旧 pending 形式 (content_observable 欠落) を drop。
+    # 案 P 確定、新 smoke 起点で content_observable/content_intent 二層化 pending のみ残す。
+    from core.pending_unified import migrate_pending_observable_split
+    _p_dropped = migrate_pending_observable_split(state)
+    if _p_dropped:
+        print(f"  [migration] 段階10.5 Fix 2: 旧形式 pending {_p_dropped} 個を drop (content_observable 欠落)")
     save_state(state)
     # 段階7: memory/wm.jsonl から WM materialized view を再構築
     try:

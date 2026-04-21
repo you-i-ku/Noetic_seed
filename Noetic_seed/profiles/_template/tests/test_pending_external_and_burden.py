@@ -78,11 +78,13 @@ def test_response_intent_match_pattern():
     )
     mp = p.get("match_pattern") or {}
     return all([
-        _assert(mp.get("tool_name_any") == ["output_display"],
-                "tool_name_any=[output_display]"),
-        _assert(mp.get("channel_match") is True, "channel_match=True"),
-        _assert(mp.get("content_similarity_threshold") is None,
-                "content_similarity_threshold=未指定 (skip)"),
+        # 段階10.5 Fix 2: match_pattern 新構造 (source_action / expected_channel / observable_similarity_threshold)
+        _assert(mp.get("source_action") == "output_display",
+                "source_action=output_display"),
+        _assert(mp.get("expected_channel") == "claude",
+                "expected_channel=claude (受信 channel と一致)"),
+        _assert(mp.get("observable_similarity_threshold") is None,
+                "observable_similarity_threshold=未指定 (skip)"),
     ])
 
 
@@ -93,7 +95,8 @@ def test_response_intent_content_preview():
     p = pending_add_response_intent(
         state=state, channel="device", text=long_text, cycle_id=0,
     )
-    content = p.get("content", "")
+    # 段階10.5 Fix 2: content → content_intent (LLM 生成、表示用) に rename
+    content = p.get("content_intent", "")
     return all([
         _assert("device" in content, "channel 名が含まれる"),
         _assert("..." in content, "text 切詰め marker あり"),
@@ -175,7 +178,7 @@ def test_safety_cap_triggers_deprecated():
     p = pending_add(
         state, source_action="test",
         expected_observation="x", lag_kind="cycles",
-        content="c", cycle_id=0,
+        content_intent="c", cycle_id=0,
     )
     p["attempts"] = 50
     pending_prune(state, current_cycle=1)
@@ -191,7 +194,7 @@ def test_safety_cap_below_threshold_no_op():
     p = pending_add(
         state, source_action="test",
         expected_observation="x", lag_kind="cycles",
-        content="c", cycle_id=0,
+        content_intent="c", cycle_id=0,
         expiry_policy="dynamic_n",
     )
     p["attempts"] = 49
@@ -209,7 +212,7 @@ def test_deprecated_survives_prune():
         p = pending_add(
             state, source_action="test",
             expected_observation=f"x{i}", lag_kind="cycles",
-            content=f"c{i}", cycle_id=0,
+            content_intent=f"c{i}", cycle_id=0,
             expiry_policy="dynamic_n",
         )
     # 最初の 1 件を attempts=55 に、deprecated 化狙い

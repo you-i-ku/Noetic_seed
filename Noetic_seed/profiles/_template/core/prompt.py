@@ -263,7 +263,8 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
         pending_lines = []
         for p in sorted(unresolved, key=lambda x: -x.get("priority", 0))[:10]:
             p_type = p.get("type", "?")
-            content = p.get("content", "")[:80]
+            # 段階10.5 Fix 2: content_intent 表示 (LLM 生成 why、表示用)
+            content = (p.get("content_intent") or p.get("content", ""))[:80]
             p_id = p.get("id", "?")
             if p_type == "pending":
                 # UPS v2: source_action + lag_kind + gap + attempts + channel
@@ -298,7 +299,8 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
                 ch_tag = f" ch={ch}" if ch else ""
                 src = p.get("source_action", "?")
                 obs_time = p.get("observed_time", "") or ""
-                content = p.get("content", "")[:60]
+                # 段階10.5 Fix 2: content_intent 表示 (LLM 生成 why)
+                content = (p.get("content_intent") or p.get("content", ""))[:60]
                 pending_lines.append(
                     f"  [完了 src={src}{ch_tag}] {content} → 観測済 ({obs_time})"
                 )

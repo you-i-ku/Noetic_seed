@@ -1,7 +1,7 @@
-"""段階8 v4 — pending 側 match_pattern 対称消化判定テスト。
+"""段階8 v4 + 段階10.5 Fix 2 — pending 側 match_pattern 対称消化判定テスト。
 
-WORLD_MODEL_DESIGN/STAGE8_REPETITION_AND_PREDICTOR_PLAN.md §4-2 の仕様を網羅:
-  - _matches: tool_name_any / channel_match / content_similarity_threshold
+段階10.5 Fix 2 (案 P 確定、PLAN §4-2 新スキーマ):
+  - _matches: source_action / expected_channel / observable_similarity_threshold
   - try_observe_all: match_pattern 駆動の自動消化、priority 降順、1 消化/1 実行
 
 設計哲学:
@@ -52,52 +52,52 @@ def _install_sim_mock(fn):
 # _matches: 個別フィールドの判定
 # ============================================================
 
-def test_matches_tool_name_any_hit():
-    print("== _matches: tool_name_any リスト内で True ==")
-    mp = {"tool_name_any": ["output_display", "elyth_post"]}
+def test_matches_source_action_hit():
+    print("== _matches: source_action 一致で True ==")
+    mp = {"source_action": "output_display"}
     pending = {"expected_channel": "device"}
     ok = _matches(mp, "output_display", {}, "result", "device", pending)
-    return _assert(ok is True, "output_display が候補にあるので True")
+    return _assert(ok is True, "source_action 一致で True")
 
 
-def test_matches_tool_name_any_miss():
-    print("== _matches: tool_name_any 外で False ==")
-    mp = {"tool_name_any": ["output_display"]}
+def test_matches_source_action_miss():
+    print("== _matches: source_action 不一致で False ==")
+    mp = {"source_action": "output_display"}
     pending = {"expected_channel": "device"}
     ok = _matches(mp, "bash", {}, "result", "device", pending)
-    return _assert(ok is False, "bash は候補にないので False")
+    return _assert(ok is False, "bash は source_action と不一致で False")
 
 
-def test_matches_tool_name_any_none_means_any():
-    print("== _matches: tool_name_any=None はどの tool でも OK ==")
-    mp = {"tool_name_any": None}
+def test_matches_source_action_none_means_any():
+    print("== _matches: source_action=None はどの tool でも OK ==")
+    mp = {"source_action": None}
     pending = {"expected_channel": "device"}
     ok = _matches(mp, "random_tool", {}, "r", "device", pending)
     return _assert(ok is True, "None は skip 扱い (全 tool 許可)")
 
 
-def test_matches_channel_match_hit():
-    print("== _matches: channel_match で channel 一致なら True ==")
-    mp = {"channel_match": True}
+def test_matches_expected_channel_hit():
+    print("== _matches: expected_channel 一致で True ==")
+    mp = {"expected_channel": "device"}
     pending = {"expected_channel": "device"}
     ok = _matches(mp, "output_display", {}, "r", "device", pending)
     return _assert(ok is True, "channel 一致")
 
 
-def test_matches_channel_match_mismatch():
-    print("== _matches: channel_match ミスマッチで False ==")
-    mp = {"channel_match": True}
+def test_matches_expected_channel_mismatch():
+    print("== _matches: expected_channel 不一致で False ==")
+    mp = {"expected_channel": "device"}
     pending = {"expected_channel": "device"}
     ok = _matches(mp, "output_display", {}, "r", "claude", pending)
-    return _assert(ok is False, "device pending だが claude 実行 → False")
+    return _assert(ok is False, "device 期待だが claude 実行 → False")
 
 
 def test_matches_similarity_hit():
-    print("== _matches: content_similarity_threshold >= 閾値で True ==")
+    print("== _matches: observable_similarity_threshold >= 閾値で True ==")
     original = _install_sim_mock(lambda a, b, t: True)  # 常に類似度 OK
     try:
-        mp = {"content_similarity_threshold": 0.7}
-        pending = {"content": "foo bar"}
+        mp = {"observable_similarity_threshold": 0.7}
+        pending = {"content_observable": "foo bar"}
         ok = _matches(mp, "search_memory", {}, "result bar foo", None, pending)
         return _assert(ok is True, "類似度 >= 閾値で True")
     finally:
@@ -105,11 +105,11 @@ def test_matches_similarity_hit():
 
 
 def test_matches_similarity_miss():
-    print("== _matches: content_similarity_threshold < 閾値で False ==")
+    print("== _matches: observable_similarity_threshold < 閾値で False ==")
     original = _install_sim_mock(lambda a, b, t: False)
     try:
-        mp = {"content_similarity_threshold": 0.9}
-        pending = {"content": "foo"}
+        mp = {"observable_similarity_threshold": 0.9}
+        pending = {"content_observable": "foo"}
         ok = _matches(mp, "search_memory", {}, "totally unrelated", None, pending)
         return _assert(ok is False, "類似度 < 閾値で False")
     finally:
@@ -121,22 +121,22 @@ def test_matches_all_fields_and():
     original = _install_sim_mock(lambda a, b, t: True)
     try:
         mp = {
-            "tool_name_any": ["output_display"],
-            "channel_match": True,
-            "content_similarity_threshold": 0.5,
+            "source_action": "output_display",
+            "expected_channel": "device",
+            "observable_similarity_threshold": 0.5,
         }
-        pending = {"expected_channel": "device", "content": "reply"}
+        pending = {"expected_channel": "device", "content_observable": "reply"}
         # 全条件 OK
         ok_all = _matches(mp, "output_display", {}, "reply", "device", pending)
-        # tool_name だけ外れる
+        # source_action だけ外れる
         pending_unified._sim_check = lambda a, b, t: True
         fail_tool = _matches(mp, "bash", {}, "reply", "device", pending)
         # channel だけ外れる
         fail_ch = _matches(mp, "output_display", {}, "reply", "claude", pending)
         return all([
             _assert(ok_all is True, "全条件 OK で True"),
-            _assert(fail_tool is False, "tool_name 外れ で False"),
-            _assert(fail_ch is False, "channel 外れ で False"),
+            _assert(fail_tool is False, "source_action 外れで False"),
+            _assert(fail_ch is False, "channel 外れで False"),
         ])
     finally:
         pending_unified._sim_check = original
@@ -152,8 +152,8 @@ def test_try_observe_tool_name_match():
     p = pending_add(
         state, source_action="response_to_external",
         expected_observation="返信", lag_kind="cycles",
-        content="おねーたんへの返事", cycle_id=0, channel="claude",
-        match_pattern={"tool_name_any": ["output_display"], "channel_match": True},
+        content_intent="おねーたんへの返事", cycle_id=0, channel="claude",
+        match_pattern={"source_action": "output_display", "expected_channel": "claude"},
     )
     updated = try_observe_all(
         state=state, tool_name="output_display",
@@ -175,8 +175,8 @@ def test_try_observe_tool_name_miss_skips():
     p = pending_add(
         state, source_action="response_to_external",
         expected_observation="返信", lag_kind="cycles",
-        content="返事", cycle_id=0, channel="device",
-        match_pattern={"tool_name_any": ["output_display"]},
+        content_intent="返事", cycle_id=0, channel="device",
+        match_pattern={"source_action": "output_display"},
     )
     updated = try_observe_all(
         state=state, tool_name="bash",
@@ -196,7 +196,7 @@ def test_try_observe_no_match_pattern_skips():
     p = pending_add(
         state, source_action="reflection",
         expected_observation="reflection", lag_kind="cycles",
-        content="何かの intent", cycle_id=0, channel="self",
+        content_intent="何かの intent", cycle_id=0, channel="self",
         # match_pattern は default None
     )
     updated = try_observe_all(
@@ -217,15 +217,15 @@ def test_try_observe_priority_wins():
     low = pending_add(
         state, source_action="response_to_external",
         expected_observation="低", lag_kind="seconds",
-        content="低 priority", cycle_id=0, channel=None,
-        match_pattern={"tool_name_any": ["output_display"]},
+        content_intent="低 priority", cycle_id=0, channel=None,
+        match_pattern={"source_action": "output_display"},
     )
     # 高 priority (channel="device" で multiplier 2.0, lag="minutes" で 3.0)
     high = pending_add(
         state, source_action="response_to_external",
         expected_observation="高", lag_kind="minutes",
-        content="高 priority", cycle_id=0, channel="device",
-        match_pattern={"tool_name_any": ["output_display"]},
+        content_intent="高 priority", cycle_id=0, channel="device",
+        match_pattern={"source_action": "output_display"},
     )
     updated = try_observe_all(
         state=state, tool_name="output_display",
@@ -245,8 +245,8 @@ def test_try_observe_already_observed_skipped():
     p = pending_add(
         state, source_action="response_to_external",
         expected_observation="返信", lag_kind="cycles",
-        content="response", cycle_id=0, channel="device",
-        match_pattern={"tool_name_any": ["output_display"]},
+        content_intent="response", cycle_id=0, channel="device",
+        match_pattern={"source_action": "output_display"},
     )
     # 最初の消化
     first = try_observe_all(
@@ -272,8 +272,8 @@ def test_try_observe_channel_mismatch_skips():
     p = pending_add(
         state, source_action="response_to_external",
         expected_observation="返信", lag_kind="cycles",
-        content="reply", cycle_id=0, channel="device",
-        match_pattern={"tool_name_any": ["output_display"], "channel_match": True},
+        content_intent="reply", cycle_id=0, channel="device",
+        match_pattern={"source_action": "output_display", "expected_channel": "device"},
     )
     # tool は claude channel で実行
     updated = try_observe_all(
@@ -303,15 +303,15 @@ def test_try_observe_no_cross_contamination_same_source_action():
     device_pending = pending_add(
         state, source_action="response_to_external",
         expected_observation="device 応答", lag_kind="minutes",
-        content="device 宛て", cycle_id=0, channel="device",
-        match_pattern={"tool_name_any": ["output_display"], "channel_match": True},
+        content_intent="device 宛て", cycle_id=0, channel="device",
+        match_pattern={"source_action": "output_display", "expected_channel": "device"},
     )
     # 低 priority pending (claude channel)
     claude_pending = pending_add(
         state, source_action="response_to_external",
         expected_observation="claude 応答", lag_kind="cycles",
-        content="claude 宛て", cycle_id=0, channel="claude",
-        match_pattern={"tool_name_any": ["output_display"], "channel_match": True},
+        content_intent="claude 宛て", cycle_id=0, channel="claude",
+        match_pattern={"source_action": "output_display", "expected_channel": "claude"},
     )
     # tool は claude channel で実行 → claude pending のみ消化されるべき
     updated = try_observe_all(
@@ -339,12 +339,12 @@ def test_pending_observe_target_id_direct():
     p1 = pending_add(
         state, source_action="reflect",
         expected_observation="intent_a", lag_kind="cycles",
-        content="intent A", cycle_id=0, channel="self",
+        content_intent="intent A", cycle_id=0, channel="self",
     )
     p2 = pending_add(
         state, source_action="reflect",
         expected_observation="intent_b", lag_kind="cycles",
-        content="intent B", cycle_id=0, channel="self",
+        content_intent="intent B", cycle_id=0, channel="self",
     )
     updated = pending_observe(
         state=state, observed_content="obs",
@@ -364,11 +364,11 @@ def test_pending_observe_target_id_direct():
 
 if __name__ == "__main__":
     groups = [
-        ("_matches: tool_name_any hit", test_matches_tool_name_any_hit),
-        ("_matches: tool_name_any miss", test_matches_tool_name_any_miss),
-        ("_matches: tool_name_any None = any", test_matches_tool_name_any_none_means_any),
-        ("_matches: channel_match hit", test_matches_channel_match_hit),
-        ("_matches: channel_match mismatch", test_matches_channel_match_mismatch),
+        ("_matches: source_action hit", test_matches_source_action_hit),
+        ("_matches: source_action miss", test_matches_source_action_miss),
+        ("_matches: source_action None = any", test_matches_source_action_none_means_any),
+        ("_matches: expected_channel hit", test_matches_expected_channel_hit),
+        ("_matches: expected_channel mismatch", test_matches_expected_channel_mismatch),
         ("_matches: similarity hit", test_matches_similarity_hit),
         ("_matches: similarity miss", test_matches_similarity_miss),
         ("_matches: 複数 AND", test_matches_all_fields_and),
