@@ -221,6 +221,30 @@ def _wait_or_dismiss(args: dict) -> str:
     state = load_state()
     pending = state.get("pending", [])
     target = [p for p in pending if p.get("id", "") == dismiss_id]
+
+    # 段階10.5 後の構造 fix (案 C): log id ({session}_{cycle} 形式、prefix 'p_'
+    # なし) を受け取った場合、該当 cycle の未消化 pending を priority 降順で 1 個
+    # 特定する fallback。id 空間の視覚紛らわしさ (log id と pending id が
+    # {session}_{cycle} prefix 共通) という構造的欠陥を、LLM 教育ではなく system
+    # 側で吸収 (ゆう 2026-04-21 判断、feedback_llm_as_brain 整合)。
+    # 過去 fix 3bf6a6e で schema description に明記したが smoke で LLM が依然
+    # 違反 → 案 C で構造的緩和。
+    if not target and not dismiss_id.startswith("p_"):
+        import re
+        m = re.match(r'^([a-f0-9]+)_(\d{4})$', dismiss_id)
+        if m:
+            target_cycle = int(m.group(2))
+            cycle_pendings = [
+                p for p in pending
+                if p.get("type") == "pending"
+                and p.get("origin_cycle") == target_cycle
+                and p.get("observed_content") is None
+            ]
+            if cycle_pendings:
+                cycle_pendings.sort(key=lambda p: -float(p.get("priority", 0.0)))
+                target = [cycle_pendings[0]]
+                dismiss_id = target[0]["id"]  # 正規 id に置換 (後続 log 用)
+
     if not target:
         return f"[dismiss] id={dismiss_id} は未対応リストにありません"
     state["pending"] = [p for p in pending if p.get("id") != dismiss_id]
@@ -239,4 +263,7 @@ def _wait_or_dismiss(args: dict) -> str:
             state["unresponded_external_count"] = uec - 1
         # unresolved_externalはゼロにしない → tick loopで徐々に減衰する
     save_state(state)
-    return f"[dismiss] {_t.get('type','?')}: {_t.get('content','')[:50]} を却下しました"
+    # 段階10.5 Fix 2 漏れ補完: PendingEntry スキーマ変更後 (content → content_intent)
+    # の表示反映。旧 content フィールドは新形式では空なので content_intent fallback。
+    _display = _t.get("content_intent") or _t.get("content", "")
+    return f"[dismiss] {_t.get('type','?')}: {_display[:50]} を却下しました"

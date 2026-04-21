@@ -26,22 +26,29 @@ ExpiryPolicy = Literal["protected", "time", "dynamic_n", "deprecated"]
 
 
 class MatchPattern(TypedDict, total=False):
-    """段階8 v4: pending 側の自己消化条件。
+    """段階8 v4 + 段階10.5 Fix 2: pending 側の自己消化条件。
 
     tool 側に rules を持たせず、pending が「誰が自分を消化できるか」を
     自己属性として持つ対称設計。全 tool が同じ hook (try_observe_all) で
     処理され、特別扱いゼロ。Active Inference 対称性:
     tool = 行動 → observation / pending = 期待 → match の分離。
 
+    段階10.5 Fix 2 (案 P 確定、PLAN §4-2 新スキーマ):
+      - 旧 tool_name_any (OR list) → source_action (単一 tool 名、構造 match)
+      - 旧 channel_match (bool) → expected_channel (具体値、構造 match)
+      - 旧 content_similarity_threshold → observable_similarity_threshold
+        (比較対象を content → content_observable に切り替え、LLM 生成文面微差で
+        merge すり抜ける現象を根治)
+
     全フィールド optional。None or 省略は「その条件は skip」。
     複数フィールド指定時は AND 判定。
     """
-    # 候補 tool 名のリスト。None = どの tool でも OK (意味類似度のみで判定)
-    tool_name_any: Optional[list[str]]
-    # tool args.channel と pending.expected_channel を照合するか
-    channel_match: bool
-    # 意味類似度閾値 (tool_result vs pending.content の cosine sim)。None = skip
-    content_similarity_threshold: Optional[float]
+    # 消化できる tool 名 (単一)。None = どの tool でも OK
+    source_action: Optional[str]
+    # 消化時の channel (tool args.channel と一致判定)。None = channel 判定 skip
+    expected_channel: Optional[str]
+    # 意味類似度閾値 (tool_result vs pending.content_observable)。None = skip
+    observable_similarity_threshold: Optional[float]
 
 
 class PendingEntry(TypedDict, total=False):
@@ -70,7 +77,11 @@ class PendingEntry(TypedDict, total=False):
     # e2 を上方修正する (従来 pending_feedback の +40% 挙動を UPS に統合)
     retro_log_entry_id: Optional[str]
 
-    content: str
+    # 段階10.5 Fix 2 (案 P): content 二層化 (PLAN §4-1)
+    # - content_observable: 機械生成 (source_action + channel + cycle、match 用 what)
+    # - content_intent: LLM 生成 (表示用 why、旧 content 相当)
+    content_observable: str
+    content_intent: str
     gap: float
     attempts: int
     priority: float
@@ -146,12 +157,26 @@ def _new_id(source_action: str, cycle_id: int, session_id: str = "x") -> str:
     return f"p_{session_id}_{cycle_id:04d}_{sa_short}_{uuid.uuid4().hex[:6]}"
 
 
+def _make_observable(source_action: str, channel: Optional[str],
+                     cycle_id: int) -> str:
+    """段階10.5 Fix 2: content_observable を機械生成 (PLAN §4-3)。
+
+    f"{source_action} to channel={channel or 'self'} @ cycle {cycle_id}"
+
+    目的: LLM 生成 intent 文字列の stochastic 文面微差で semantic merge が
+    すり抜ける現象 (cycle 32 で cycle 26 再演) の根治。同 cycle 同 source_action
+    同 channel なら observable は**完全一致**するため、merge が構造的に機能する。
+    """
+    ch = channel or "self"
+    return f"{source_action} to channel={ch} @ cycle {cycle_id}"
+
+
 def pending_add(
     state: dict,
     source_action: str,
     expected_observation: str,
     lag_kind: LagKind,
-    content: str,
+    content_intent: str,
     *,
     cycle_id: int,
     channel: Optional[str] = None,
@@ -164,6 +189,10 @@ def pending_add(
 ) -> PendingEntry:
     """UPS v2 pending を state['pending'] に追加。
 
+    段階10.5 Fix 2 (案 P、PLAN §4): content 二層化。
+      - content_intent: 引数で受け取る LLM 生成テキスト (表示用、why)
+      - content_observable: _make_observable() で機械生成 (match 用、what)
+
     Args:
         source_action: "output_display" / "elyth_post" / "living_presence" 等。
             AI のどの action が起点か (§3 の語彙)。
@@ -171,10 +200,12 @@ def pending_add(
             (tool_expected_outcome 相当)。
         lag_kind: observation が来る想定時間スケール
             ("seconds" / "minutes" / "hours" / "cycles" / "unknown")。
-        content: human-readable summary。
+        content_intent: human-readable summary (LLM 生成、表示用)。
+            旧 content 引数から段階10.5 Fix 2 で rename。
         cycle_id: 現在 cycle。
         channel: observation の想定 channel ("device" / "elyth" / "x" / "self" / None)。
             None は「まだ特定されてない」を意味する (spontaneous 到着で後から埋まる)。
+            content_observable 生成時は None → 'self' に fallback。
         expiry_policy: "protected" (常に残る) / "time" (TTL 経過で削除) /
             "dynamic_n" (gap 上位 N 件のみ残す)。
         ttl_cycles: policy="time" 時の TTL (cycle 数)。
@@ -201,7 +232,8 @@ def pending_add(
         "observed_time": None,
         "observed_channel": None,
         "expected_channel": channel,
-        "content": str(content)[:500],
+        "content_observable": _make_observable(source_action, channel, cycle_id),
+        "content_intent": str(content_intent)[:500],
         "gap": float(initial_gap),
         "attempts": 1,
         "priority": 0.0,
@@ -442,15 +474,15 @@ def pending_add_response_intent(
         source_action="response_to_external",
         expected_observation="output_display 実行 (or wait dismiss)",
         lag_kind="cycles",
-        content=f"{channel} からの入力 '{snippet}...' への応答",
+        content_intent=f"{channel} からの入力 '{snippet}...' への応答",
         cycle_id=cycle_id,
         channel=channel,
         expiry_policy="dynamic_n",
         semantic_merge=True,
         initial_gap=1.0,
         match_pattern={
-            "tool_name_any": ["output_display"],
-            "channel_match": True,
+            "source_action": "output_display",
+            "expected_channel": channel,
         },
     )
 
@@ -467,7 +499,9 @@ def _matches(
     channel: Optional[str],
     pending: dict,
 ) -> bool:
-    """match_pattern の 3 フィールドで判定。全条件 AND (未指定フィールドは skip)。
+    """段階10.5 Fix 2 (案 P、PLAN §4-2): match_pattern 新構造 3 フィールドで判定。
+
+    全条件 AND (未指定フィールドは skip)。
 
     Args:
         mp: pending.match_pattern (dict)。
@@ -480,21 +514,26 @@ def _matches(
     Returns:
         全条件 OK なら True。
     """
-    # 1. tool_name_any: 指定された tool リストに含まれるか
-    tool_list = mp.get("tool_name_any")
-    if tool_list is not None:
-        if tool_name not in tool_list:
+    # 1. source_action: 消化できる tool 名 (単一) と一致するか
+    required_source = mp.get("source_action")
+    if required_source is not None:
+        if tool_name != required_source:
             return False
 
-    # 2. channel_match: tool の channel と pending.expected_channel 照合
-    if mp.get("channel_match"):
-        if channel != pending.get("expected_channel"):
+    # 2. expected_channel: 消化時 channel と一致するか (構造 match)
+    required_channel = mp.get("expected_channel")
+    if required_channel is not None:
+        if channel != required_channel:
             return False
 
-    # 3. content_similarity_threshold: 意味類似度判定
-    threshold = mp.get("content_similarity_threshold")
+    # 3. observable_similarity_threshold: content_observable との意味類似度判定
+    # (段階10.5 Fix 2: 旧 content_similarity_threshold から rename、比較対象を
+    # pending.content → pending.content_observable に切り替え。LLM 生成 intent
+    # 文面微差で merge すり抜ける現象を根治)
+    threshold = mp.get("observable_similarity_threshold")
     if threshold is not None:
-        if not _sim_check(tool_result, pending.get("content", ""), float(threshold)):
+        target_text = pending.get("content_observable", "")
+        if not _sim_check(tool_result, target_text, float(threshold)):
             return False
 
     return True
@@ -579,3 +618,28 @@ def try_observe_all(
         limit=1,
         target_id=target["id"],  # 段階8 hotfix: 同 source_action の別 pending 誤消化防止
     )
+
+
+# ============================================================
+# 段階10.5 Fix 2: 旧 pending 形式 drop migration
+# ============================================================
+
+
+def migrate_pending_observable_split(state: dict) -> int:
+    """state["pending"] から旧形式 pending (content_observable 欠落) を drop。
+
+    段階10.5 Fix 2 (案 P、PLAN §4-4): 旧形式 (`content` フィールドのみで
+    `content_observable` を持たない) pending は、新スキーマの match 判定と
+    整合しないため新 smoke 起点で drop。
+
+    Returns:
+        drop した pending 数 (0 なら migration 不要)
+    """
+    pending = state.get("pending")
+    if not isinstance(pending, list):
+        return 0
+    survivors = [p for p in pending if "content_observable" in p]
+    dropped = len(pending) - len(survivors)
+    if dropped > 0:
+        state["pending"] = survivors
+    return dropped

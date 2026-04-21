@@ -292,7 +292,7 @@ def test_ups_retro_e2_flow():
         source_action="output_display",
         expected_observation="ゆうの返答",
         lag_kind="minutes",
-        content="ゆうへの発話",
+        content_intent="ゆうへの発話",
         cycle_id=5,
         channel="device",
         expiry_policy="time",
@@ -329,19 +329,19 @@ def test_pending_prune_mixed_policies():
     # protected: 常に残る
     pending_add(state, source_action="living_presence",
                 expected_observation="外部声", lag_kind="unknown",
-                content="ゆうの声", cycle_id=0, channel="device",
+                content_intent="ゆうの声", cycle_id=0, channel="device",
                 expiry_policy="protected")
     # time expiry: ttl=5 で origin_cycle=0 → cycle 10 で削除対象
     pending_add(state, source_action="output_display",
                 expected_observation="反応", lag_kind="minutes",
-                content="古い発話", cycle_id=0, channel="device",
+                content_intent="古い発話", cycle_id=0, channel="device",
                 expiry_policy="time", ttl_cycles=5,
                 retro_log_entry_id="old")
     # dynamic_n 対象: 4 件 (gap 0.9, 0.5, 0.3, 0.1)
     for gap in [0.9, 0.5, 0.3, 0.1]:
         pending_add(state, source_action="reflection",
                     expected_observation="x", lag_kind="cycles",
-                    content=f"ref g={gap}", cycle_id=0, channel="self",
+                    content_intent=f"ref g={gap}", cycle_id=0, channel="self",
                     initial_gap=gap, semantic_merge=True)
 
     dropped = pending_prune(state, current_cycle=10, dynamic_n=3)

@@ -319,7 +319,7 @@ def broadcast_state(state: dict):
         "tool_level": state.get("tool_level", 0),
         "pressure": state.get("pressure", 0),
         "pending_count": len(state.get("pending", [])),
-        "pending_items": [{"type": p.get("type",""), "content": p.get("content","")[:80], "id": p.get("id","")} for p in state.get("pending", [])[:5]],
+        "pending_items": [{"type": p.get("type",""), "content": (p.get("content_intent") or p.get("content",""))[:80], "id": p.get("id","")} for p in state.get("pending", [])[:5]],
         "paused": _paused,
     })
 

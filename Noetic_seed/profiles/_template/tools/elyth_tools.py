@@ -29,7 +29,8 @@ def _elyth_post(args):
         resp.raise_for_status()
         data = resp.json() if resp.text else {}
         post_id = data.get("id", data.get("post_id", ""))
-        return f"投稿完了: {content[:80]}" + (f" (id={post_id})" if post_id else "")
+        # 段階10 Step 4 付帯 D: Fix 5 精神で post content truncation 撤去
+        return f"投稿完了: {content}" + (f" (id={post_id})" if post_id else "")
     except Exception as e:
         return f"エラー: {e}"
 
@@ -56,7 +57,9 @@ def _elyth_reply(args):
             save_state(state)
         # 対応する通知を自動既読化
         _try_mark_read_for_post(reply_to_id)
-        return f"返信完了: {content[:80]} (reply_to={reply_to_id[:8]}...)"
+        # 段階10 Step 4 付帯 D: Fix 5 精神で reply content truncation 撤去
+        # (reply_to_id の [:8] は UUID 短縮表示で発話境界じゃないので維持)
+        return f"返信完了: {content} (reply_to={reply_to_id[:8]}...)"
     except Exception as e:
         return f"エラー: {e}"
 

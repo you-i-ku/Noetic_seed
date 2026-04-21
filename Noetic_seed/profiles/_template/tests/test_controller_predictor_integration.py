@@ -64,20 +64,22 @@ def test_medium_prediction_propagates_through_controller():
 
 def test_low_predicted_e2_suppresses_weight():
     print("== pe2 が低い候補は multiplier 側で強く抑制される ==")
-    # multiplier 単独の検証: pe2=10 と pe2=90 で multiplier 比 1:9 相当
+    # 段階10 柱 C: signature 拡張 (prediction, candidate, state, cfg)
+    # predicted_ec 欠如時は段階9 挙動 (pe2_ratio のみ) 維持、比 1:9 相当変わらず
+    # penalty ラベルは "low_outcome=..." に変更 (pe2/ec 統合指標として)
     cand_low = {"tool": "x"}
     cand_high = {"tool": "x"}
     m_low = _predicted_outcome_multiplier(
-        {"predicted_e2": 10}, cand_low, WORLD_MODEL_CFG)
+        {"predicted_e2": 10}, cand_low, {}, WORLD_MODEL_CFG)
     m_high = _predicted_outcome_multiplier(
-        {"predicted_e2": 90}, cand_high, WORLD_MODEL_CFG)
+        {"predicted_e2": 90}, cand_high, {}, WORLD_MODEL_CFG)
     return all([
         _assert(abs(m_low - 0.1) < 1e-9, f"pe2=10 → 0.1 (actual: {m_low})"),
         _assert(abs(m_high - 0.9) < 1e-9, f"pe2=90 → 0.9 (actual: {m_high})"),
         _assert(m_high / m_low > 8.0,
                 f"pe2 高低の比 9 倍 (actual ratio: {m_high/m_low:.1f}x)"),
-        _assert(any("low_predicted_e2=10" in p for p in cand_low.get("penalties", [])),
-                "低 pe2 candidate に penalty 記録"),
+        _assert(any("low_outcome" in p for p in cand_low.get("penalties", [])),
+                "低 pe2 candidate に penalty 記録 (ラベル low_outcome)"),
         _assert("penalties" not in cand_high or not cand_high["penalties"],
                 "高 pe2 candidate に penalty なし"),
     ])

@@ -503,7 +503,8 @@ def _x_reply(args):
         page.keyboard.type(text, delay=50)
         page.get_by_role("button", name="ポストする").click()
         page.wait_for_timeout(2000)
-        return f"返信完了: {text[:80]}\nreply_to: {tweet_url}"
+        # 段階10 Step 4 付帯 D: Fix 5 精神で reply text truncation 撤去
+        return f"返信完了: {text}\nreply_to: {tweet_url}"
     except RuntimeError as e:
         return f"エラー: {e}"
     except Exception as e:

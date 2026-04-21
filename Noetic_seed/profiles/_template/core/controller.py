@@ -255,28 +255,58 @@ def _channel_mismatch_multiplier(candidate: dict, state: dict, cfg: dict) -> flo
 
 
 def _predicted_outcome_multiplier(prediction: dict, candidate: dict,
-                                  cfg: dict) -> float:
-    """predicted_e2 (0-100) を連続値 multiplier に変換 (段階9)。
+                                  state: dict, cfg: dict) -> float:
+    """predicted_e2 / predicted_ec を tool 別自己学習重みで正規化加重した
+    連続値 multiplier を返す (段階9 → 段階10 柱 C 拡張)。
 
-    段階5 までは category 離散 (error/no_response で 0.5) だったが、段階9 で
-    predicted_e2 直接乗算に置換。Active Inference の pragmatic value of EFE
-    と同型、既存 novelty (epistemic) と同じ max(floor, ratio) 形式。
+    段階9: predicted_e2 直接乗算 (pragmatic value of EFE)。
+    段階10 柱 C: predicted_ec (0.0-1.0) 併用 + state.predictor_confidence の
+    {e2_conf, ec_conf} で正規化加重。tool 別に「どの軸を信頼するか」が
+    β+ で自己学習され、当たる軸の weight が自動で上がる。
 
-    - predicted_e2=70 → 0.7 / 50 → 0.5 / 20 → 0.2 / 0 → 0.05 (floor)
-    - ratio < 0.4 の時 candidate["penalties"] に理由追記 (解釈可能性のため)
-    - cfg["predicted_e2_floor"] で下限 (default 0.05) を上書き可能
-    - 不正値/NaN は default 50 (neutral) として扱う
+    挙動:
+    - predicted_ec あり + 正常 conf: (pe2*e2_conf + pec*ec_conf) / (e2_conf+ec_conf)
+    - predicted_ec 欠如 (Light fallback 等): pe2_ratio のみ (段階9 挙動)
+    - 両 conf ゼロ: pass-through 1.0 (predictor 層 bypass、PLAN v1 §3-C 確定)
+    - combined < 0.4: candidate["penalties"] に理由追記 (解釈可能性)
+    - cfg["predicted_e2_floor"] で下限 (default 0.05) 上書き可、不正値は 50 neutral
     """
     pe2_raw = prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
     try:
         pe2 = max(0, min(100, int(pe2_raw)))
     except (TypeError, ValueError):
         pe2 = 50
-    ratio = pe2 / 100.0
+    pe2_ratio = pe2 / 100.0
+
+    pec_raw = prediction.get("predicted_ec") if isinstance(prediction, dict) else None
+
+    # 段階10 柱 C: tool 別自己学習重みを参照
+    tool_name = str(candidate.get("tool", ""))
+    pc_entry = state.get("predictor_confidence", {}).get(
+        tool_name, {"e2_conf": 0.7, "ec_conf": 0.7}
+    )
+    pe2_w = float(pc_entry.get("e2_conf", 0.7))
+    pec_w = float(pc_entry.get("ec_conf", 0.7))
+    total_w = pe2_w + pec_w
+
+    # 両 conf ゼロ fallback (PLAN v1 §3-C): predictor 層 bypass
+    if total_w <= 0:
+        return 1.0
+
+    if pec_raw is not None:
+        try:
+            pec = max(0.0, min(1.0, float(pec_raw)))
+        except (TypeError, ValueError):
+            pec = 0.5
+        combined = (pe2_ratio * pe2_w + pec * pec_w) / total_w
+    else:
+        # predicted_ec 欠如 (Light fallback や古い LLM 応答) は段階9 挙動維持
+        combined = pe2_ratio
+
     floor = float(cfg.get("predicted_e2_floor", 0.05))
-    mult = max(floor, ratio)
-    if ratio < 0.4:
-        candidate.setdefault("penalties", []).append(f"low_predicted_e2={pe2}")
+    mult = max(floor, combined)
+    if combined < 0.4:
+        candidate.setdefault("penalties", []).append(f"low_outcome={round(combined, 3)}")
     return mult
 
 
@@ -312,7 +342,9 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         c["predicted_outcome"] = prediction
         # 段階9: 予測誤差計測のため candidate に記録 (main.py で log entry に転写)
         c["_predicted_e2"] = prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
-        w *= _predicted_outcome_multiplier(prediction, c, WORLD_MODEL_CFG)
+        # 段階10 柱 C: predicted_ec も同様 (main.py で prediction_error_ec 計算に使用)
+        c["_predicted_ec"] = prediction.get("predicted_ec") if isinstance(prediction, dict) else None
+        w *= _predicted_outcome_multiplier(prediction, c, state, WORLD_MODEL_CFG)
         if novelty < 0.5:
             try:
                 from core.config import RESOLUTION_LOG

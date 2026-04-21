@@ -27,6 +27,77 @@ from typing import Optional
 
 
 # ============================================================
+# 段階10 柱 B: Predictor 自己学習 (β+ 式再利用)
+# ============================================================
+#
+# STAGE10 PLAN v1 §3-B の実装。段階3 update_fact_confidence の β+ 式を
+# そのまま再利用し、tool 別 {e2_conf, ec_conf} を予測誤差で自己学習する。
+#
+# matches 判定 = 案 (a) 自己相対化:
+#   - bootstrap (history < 5): 全 matches 扱い (初期不安定期の救済)
+#   - 以降: abs(error) < median(history) なら matches
+#
+# history は直近 100 件 FIFO (PC メモリの現実的制約)。
+
+HISTORY_CAP = 100
+BOOTSTRAP_N = 5
+
+
+def _is_match(error: float, history: list) -> bool:
+    """案 (a) 自己相対化。history 件数 < BOOTSTRAP_N なら全 matches。"""
+    if len(history) < BOOTSTRAP_N:
+        return True
+    sorted_h = sorted(history)
+    median = sorted_h[len(sorted_h) // 2]
+    return abs(float(error)) < median
+
+
+def _append_history(state: dict, error: float, axis: str = "e2") -> None:
+    """history に abs(error) を FIFO append、cap HISTORY_CAP。"""
+    key = f"prediction_error_history_{axis}"
+    history = state.setdefault(key, [])
+    history.append(abs(float(error)))
+    if len(history) > HISTORY_CAP:
+        del history[0]
+
+
+def update_predictor_confidence(state: dict, tool_name: str,
+                                 prediction_error: float,
+                                 prediction_error_ec: Optional[float] = None) -> None:
+    """段階3 update_fact_confidence の β+ 式を再利用して tool 別 confidence 更新。
+
+    Args:
+        state: state dict
+        tool_name: 実行された tool 名 (空文字なら no-op)
+        prediction_error: E2 軸の予測誤差 (abs 値、0-100 scale)
+        prediction_error_ec: EC 軸の予測誤差 (abs 値、0-1 scale)。Step 3 で有効化
+    """
+    if not tool_name:
+        return
+    from core.world_model import update_fact_confidence
+
+    pc = state.setdefault("predictor_confidence", {})
+    entry = pc.setdefault(tool_name, {"e2_conf": 0.7, "ec_conf": 0.7})
+
+    # E2 軸: 現在の history で matches 判定 → β+ 更新 → history append (順序重要)
+    history_e2 = state.setdefault("prediction_error_history_e2", [])
+    matches_e2 = _is_match(prediction_error, history_e2)
+    fake_fact = {"confidence": entry["e2_conf"]}
+    update_fact_confidence(fake_fact, matches_e2)
+    entry["e2_conf"] = fake_fact["confidence"]
+    _append_history(state, prediction_error, "e2")
+
+    # EC 軸 (Step 3 で有効化、Step 2 時点では prediction_error_ec=None)
+    if prediction_error_ec is not None:
+        history_ec = state.setdefault("prediction_error_history_ec", [])
+        matches_ec = _is_match(prediction_error_ec, history_ec)
+        fake_fact = {"confidence": entry["ec_conf"]}
+        update_fact_confidence(fake_fact, matches_ec)
+        entry["ec_conf"] = fake_fact["confidence"]
+        _append_history(state, prediction_error_ec, "ec")
+
+
+# ============================================================
 # カテゴリ定数 (WORLD_MODEL.md §6 段階5)
 # ============================================================
 
@@ -50,11 +121,13 @@ _VALID_CATEGORIES = {
 def make_prediction(category: str = CATEGORY_OTHER,
                     confidence: float = 0.3,
                     detail: str = "",
-                    predicted_e2: int = 50) -> dict:
-    """{category, confidence, detail, predicted_e2} 形式の予測 dict を返す。
+                    predicted_e2: int = 50,
+                    predicted_ec: Optional[float] = None) -> dict:
+    """{category, confidence, detail, predicted_e2, predicted_ec?} 形式の予測 dict。
 
     不正な category は OTHER に fallback、confidence は [0.0, 1.0] にクランプ、
-    predicted_e2 は [0, 100] にクランプ (段階9 追加、デフォルト 50=neutral)。
+    predicted_e2 は [0, 100] にクランプ (段階9)。
+    predicted_ec は [0.0, 1.0] にクランプ (段階10 柱 C、省略時 None)。
     """
     if category not in _VALID_CATEGORIES:
         category = CATEGORY_OTHER
@@ -63,12 +136,18 @@ def make_prediction(category: str = CATEGORY_OTHER,
         pe2 = max(0, min(100, int(predicted_e2)))
     except (TypeError, ValueError):
         pe2 = 50
-    return {
+    result = {
         "category": category,
         "confidence": conf,
         "detail": str(detail),
         "predicted_e2": pe2,
     }
+    if predicted_ec is not None:
+        try:
+            result["predicted_ec"] = max(0.0, min(1.0, float(predicted_ec)))
+        except (TypeError, ValueError):
+            pass  # 不正値は付加しない (None 扱い)
+    return result
 
 
 # category → 暫定 predicted_e2 マップ (LightPredictor 用、段階9)。
@@ -147,11 +226,16 @@ class MediumPredictor(BasePredictor):
                 world_model: Optional[dict] = None) -> dict:
         prediction = candidate.get("prediction")
         if isinstance(prediction, dict) and prediction.get("source") == "medium":
+            # 段階10 柱 B/C: 学習した e2_conf/ec_conf による selection 接続は
+            # controller._predicted_outcome_multiplier に一本化 (案 (イ) 役割分離)。
+            # MediumPredictor は LLM① の生予測を返す純粋な役割に徹する。
+            # predicted_ec も candidate.prediction から素通しする (柱 C)。
             return make_prediction(
-                category=CATEGORY_OTHER,  # category は補助情報、multiplier は predicted_e2 主
+                category=CATEGORY_OTHER,  # category は補助情報、multiplier は predicted_e2/ec 主
                 confidence=prediction.get("confidence", 0.7),
                 detail="medium",
                 predicted_e2=prediction.get("predicted_e2", 50),
+                predicted_ec=prediction.get("predicted_ec"),
             )
         return LightPredictor().predict(candidate, state, world_model)
 
@@ -193,3 +277,40 @@ def get_predictor(mode: str = "light") -> BasePredictor:
     """
     cls = _PREDICTOR_REGISTRY.get(mode, LightPredictor)
     return cls()
+
+
+# ============================================================
+# 段階10.5 Fix 1: chain 粒度 migration + ec clamp helper
+# ============================================================
+
+
+def migrate_chain_keys(state: dict) -> int:
+    """state["predictor_confidence"] の "+" 含むキー (chain 連結キー) を drop。
+
+    段階10 Step 3 smoke で tool 連結文字列をキーに chain 単位学習していた
+    15 種 entry を新 smoke 起点で破棄。tool 単位 entry のみ残し、Fix 1 で
+    tool 別自己学習重みが本来意図通りに動作するよう正規化。
+
+    Returns:
+        drop した entry 数 (0 なら migration 不要)
+    """
+    pc = state.get("predictor_confidence")
+    if not isinstance(pc, dict):
+        return 0
+    drop_keys = [k for k in pc if "+" in k]
+    for k in drop_keys:
+        pc.pop(k, None)
+    return len(drop_keys)
+
+
+def clamp_ec(value) -> float:
+    """effective_change (ec) を 0.0-1.0 に clamp。
+
+    段階10 Step 3 smoke で actual_ec=1.5 等の記録が 2 件発生、eff_change が
+    稀に 1.0 を超えるケースで学習値が壊れる防止。不正値 (None/str 等) は
+    0.0 に fallback (neutral/安全側)。
+    """
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0

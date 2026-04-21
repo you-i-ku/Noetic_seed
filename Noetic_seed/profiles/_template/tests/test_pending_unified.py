@@ -113,7 +113,7 @@ def test_add_basic():
     entry = pending_add(
         state, source_action="output_display",
         expected_observation="ゆうからの返答",
-        lag_kind="minutes", content="ゆうへの応答",
+        lag_kind="minutes", content_intent="ゆうへの応答",
         cycle_id=10, channel="device",
     )
     return all([
@@ -135,7 +135,7 @@ def test_add_priority_auto_calc():
     entry = pending_add(
         state, source_action="output_display",
         expected_observation="返答",
-        lag_kind="minutes", content="x",
+        lag_kind="minutes", content_intent="x",
         cycle_id=10, channel="device",
     )
     return _assert(abs(entry["priority"] - 6.0) < 1e-6,
@@ -148,7 +148,7 @@ def test_add_living_presence():
     entry = pending_add(
         state, source_action="living_presence",
         expected_observation="(spontaneous 到着)",
-        lag_kind="unknown", content="外部到着待ち",
+        lag_kind="unknown", content_intent="外部到着待ち",
         cycle_id=10, channel=None,  # まだ channel 未定
     )
     return all([
@@ -167,7 +167,7 @@ def test_add_empty_state():
     pending_add(
         state, source_action="x_post",
         expected_observation="反応",
-        lag_kind="hours", content="x 投稿",
+        lag_kind="hours", content_intent="x 投稿",
         cycle_id=0, channel="x",
     )
     return _assert("pending" in state and len(state["pending"]) == 1,
@@ -184,7 +184,7 @@ def test_observe_basic():
     pending_add(
         state, source_action="output_display",
         expected_observation="返答", lag_kind="minutes",
-        content="x", cycle_id=10, channel="device",
+        content_intent="x", cycle_id=10, channel="device",
     )
     updated = pending_observe(
         state, observed_content="はーい",
@@ -208,13 +208,13 @@ def test_observe_priority_descending():
     low = pending_add(
         state, source_action="E_eval",
         expected_observation="低", lag_kind="seconds",
-        content="低", cycle_id=0, channel=None,
+        content_intent="低", cycle_id=0, channel=None,
     )
     # 高 priority: lag="minutes"(3.0), channel="device"(2.0), gap=1.0 → 6.0
     high = pending_add(
         state, source_action="output_display",
         expected_observation="高", lag_kind="minutes",
-        content="高", cycle_id=0, channel="device",
+        content_intent="高", cycle_id=0, channel="device",
     )
     updated = pending_observe(
         state, observed_content="obs", channel="device",
@@ -233,12 +233,12 @@ def test_observe_match_source_actions():
     p1 = pending_add(
         state, source_action="elyth_post",
         expected_observation="反応", lag_kind="hours",
-        content="e", cycle_id=0, channel="elyth",
+        content_intent="e", cycle_id=0, channel="elyth",
     )
     p2 = pending_add(
         state, source_action="output_display",
         expected_observation="返答", lag_kind="minutes",
-        content="o", cycle_id=0, channel="device",
+        content_intent="o", cycle_id=0, channel="device",
     )
     updated = pending_observe(
         state, observed_content="reply", channel="elyth",
@@ -257,7 +257,7 @@ def test_observe_skips_already_observed():
     pending_add(
         state, source_action="output_display",
         expected_observation="返答", lag_kind="minutes",
-        content="x", cycle_id=0, channel="device",
+        content_intent="x", cycle_id=0, channel="device",
     )
     pending_observe(
         state, observed_content="first", channel="device", cycle_id=1,
@@ -289,7 +289,7 @@ def test_observe_limit_multiple():
         pending_add(
             state, source_action="output_display",
             expected_observation=f"r{i}", lag_kind="minutes",
-            content=f"c{i}", cycle_id=0, channel="device",
+            content_intent=f"c{i}", cycle_id=0, channel="device",
         )
     updated = pending_observe(
         state, observed_content="bulk", channel="device",
@@ -312,7 +312,7 @@ def test_prune_protected_kept():
     pending_add(
         state, source_action="living_presence",
         expected_observation="永続", lag_kind="unknown",
-        content="p", cycle_id=0, channel=None,
+        content_intent="p", cycle_id=0, channel=None,
         expiry_policy="protected",
     )
     dropped = pending_prune(state, current_cycle=1000)
@@ -328,7 +328,7 @@ def test_prune_time_expired():
     pending_add(
         state, source_action="E_eval",
         expected_observation="即", lag_kind="seconds",
-        content="e", cycle_id=0, channel=None,
+        content_intent="e", cycle_id=0, channel=None,
         expiry_policy="time", ttl_cycles=5,
     )
     # cycle 0 追加、cycle 4 で prune (4 < 5 → 生きる)
@@ -350,7 +350,7 @@ def test_prune_dynamic_n_top():
         pending_add(
             state, source_action="reflection",
             expected_observation=f"g{gap}", lag_kind="cycles",
-            content=f"gap{gap}", cycle_id=0, channel="self",
+            content_intent=f"gap{gap}", cycle_id=0, channel="self",
             initial_gap=gap,
         )
     dropped = pending_prune(state, current_cycle=1, dynamic_n=2)
@@ -371,7 +371,7 @@ def test_prune_dynamic_n_from_log():
         pending_add(
             state, source_action="reflection",
             expected_observation=f"g{gap}", lag_kind="cycles",
-            content=f"gap{gap}", cycle_id=0, channel="self",
+            content_intent=f"gap{gap}", cycle_id=0, channel="self",
             initial_gap=gap,
         )
     pending_prune(state, current_cycle=1, dynamic_n=None)
@@ -394,7 +394,7 @@ def test_prune_ignores_non_ups():
         pending_add(
             state, source_action="reflection",
             expected_observation="x", lag_kind="cycles",
-            content="x", cycle_id=0, channel="self",
+            content_intent="x", cycle_id=0, channel="self",
             initial_gap=gap,
         )
     pending_prune(state, current_cycle=1, dynamic_n=1)
@@ -416,7 +416,7 @@ def test_recalc_priorities():
     entry = pending_add(
         state, source_action="output_display",
         expected_observation="x", lag_kind="minutes",
-        content="x", cycle_id=0, channel=None,  # channel 未確定
+        content_intent="x", cycle_id=0, channel=None,  # channel 未確定
     )
     # channel 未確定時 priority = 1.0 * 3.0 * 1.0 = 3.0
     assert abs(entry["priority"] - 3.0) < 1e-6
@@ -440,7 +440,7 @@ def test_recalc_skips_non_ups():
     pending_add(
         state, source_action="x_post",
         expected_observation="r", lag_kind="hours",
-        content="x", cycle_id=0, channel="x",
+        content_intent="x", cycle_id=0, channel="x",
     )
     n = pending_recalc_priorities(state)
     return all([
@@ -503,7 +503,7 @@ def test_add_with_retro_log_entry_id():
     entry = pending_add(
         state, source_action="output_display",
         expected_observation="返答", lag_kind="minutes",
-        content="x", cycle_id=5, channel="device",
+        content_intent="x", cycle_id=5, channel="device",
         retro_log_entry_id="log_123",
     )
     return _assert(entry.get("retro_log_entry_id") == "log_123",
@@ -519,7 +519,7 @@ def test_observe_triggers_retro_e2():
     pending_add(
         state, source_action="output_display",
         expected_observation="返答", lag_kind="minutes",
-        content="x", cycle_id=5, channel="device",
+        content_intent="x", cycle_id=5, channel="device",
         retro_log_entry_id="log_123",
     )
     updated = pending_observe(
@@ -540,7 +540,7 @@ def test_observe_skips_retro_when_bonus_zero():
     pending_add(
         state, source_action="output_display",
         expected_observation="x", lag_kind="minutes",
-        content="x", cycle_id=0, channel="device",
+        content_intent="x", cycle_id=0, channel="device",
         retro_log_entry_id="log_x",
     )
     pending_observe(
@@ -559,7 +559,7 @@ def test_observe_no_retro_when_id_missing():
     pending_add(
         state, source_action="output_display",
         expected_observation="x", lag_kind="minutes",
-        content="x", cycle_id=0, channel="device",
+        content_intent="x", cycle_id=0, channel="device",
         # retro_log_entry_id 省略
     )
     pending_observe(
@@ -585,7 +585,7 @@ def test_integration_add_observe_prune():
         entries.append(pending_add(
             state, source_action="output_display",
             expected_observation=f"g{gap}", lag_kind="minutes",
-            content=f"gap{gap}", cycle_id=0, channel="device",
+            content_intent=f"gap{gap}", cycle_id=0, channel="device",
             initial_gap=gap,
         ))
 

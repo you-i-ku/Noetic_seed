@@ -27,7 +27,8 @@ def enter_plan_mode(inp: dict) -> str:
     plan = inp.get("plan", "")
     _plan_mode_active = True
     _plan_content = str(plan) if plan else ""
-    return f"Entered plan mode. Plan: {_plan_content[:200] or '(empty)'}"
+    # 段階10 Step 4 付帯 D: Fix 5 精神で plan content truncation 撤去
+    return f"Entered plan mode. Plan: {_plan_content or '(empty)'}"
 
 
 def exit_plan_mode(inp: dict) -> str:
@@ -35,7 +36,8 @@ def exit_plan_mode(inp: dict) -> str:
     _plan_mode_active = False
     saved = _plan_content
     _plan_content = ""
-    return f"Exited plan mode. Previous plan: {saved[:200] or '(empty)'}"
+    # 段階10 Step 4 付帯 D: Fix 5 精神で plan content truncation 撤去
+    return f"Exited plan mode. Previous plan: {saved or '(empty)'}"
 
 
 def register(registry: ToolRegistry) -> None:

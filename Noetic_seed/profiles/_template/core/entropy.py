@@ -19,6 +19,7 @@ ENTROPY_PARAMS = {
     "w_stagnation": 0.3,
     "w_unresolved_ext": 0.2,
     "w_pending_burden": 0.3,  # 段階8 改善6-D: 未消化 pending 総 priority → pressure
+    "w_prediction_error": 0.3,  # 段階10.5 Tune 1 (smoke 20 cycle): pe fire 90% 占有で 1.0 → 0.3 下方修正 (PLAN §7-1 の > 50% 該当)
     "tunnel_prob": 0.001,
     "measured_feedback_rate": 0.1,
     "entropy_floor_base": 0.15,
@@ -127,6 +128,13 @@ def calc_pressure_signals(state: dict, spiral: dict | None = None) -> dict:
         burden += float(p.get("priority", 0.0))
     # cap して過剰 pressure を防ぐ (他 signal と同レンジ 0-0.5)
     signals["pending_burden"] = min(0.5, burden * 0.1) * ep["w_pending_burden"]
+
+    # 段階10 柱 A: 予測誤差由来の surprise-driven internal drive。
+    # reflection.py:15 で参照されてた last_prediction_error を pressure 層にも接続。
+    # Active Inference epistemic value (-log p(obs|model)) の正規化近似。
+    # 0-100 scale の prediction_error を 0-1 に正規化し既存 w_* パターンに乗せる。
+    last_pred_err = float(state.get("last_prediction_error", 0))
+    signals["prediction_error"] = (last_pred_err / 100.0) * ep["w_prediction_error"]
 
     if spiral:
         signals["stagnation"] = max(0, 0.3 - spiral.get("magnitude", 0)) * ep["w_stagnation"]

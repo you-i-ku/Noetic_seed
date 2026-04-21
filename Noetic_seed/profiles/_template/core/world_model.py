@@ -414,12 +414,17 @@ def rebuild_wm_from_jsonl(wm: dict, wm_records: list) -> int:
     return count
 
 
-def render_for_prompt(wm: Optional[dict], max_entities: int = 10) -> str:
+def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
+                      *, opinions: Optional[list] = None,
+                      dispositions: Optional[dict] = None) -> str:
     """[世界モデル] セクションを system_prompt 用にレンダリング。
 
     wm=None または空の場合は空文字を返す (prompt_assembly 側で
     セクションごと省略される)。
     段階3: 各 fact に confidence 値を括弧で付与。
+    段階10.5 Fix 4 δ' (PLAN §6-2 準拠): opinions / dispositions を追加
+    セクションで表示して「構造化自己認識」を完成させる。
+    iku が自分の意見 / 傾向を自覚して行動多様化する自然圧を prompt に付与。
     """
     if not wm:
         return ""
@@ -460,5 +465,30 @@ def render_for_prompt(wm: Optional[dict], max_entities: int = 10) -> str:
             pass
     else:
         lines.append("(まだ観測されていない — 段階3 で自動登録される)")
+
+    # 段階10.5 Fix 4 δ': dispositions (iku の傾向、state["disposition"] から)
+    if dispositions:
+        lines.append("### 傾向 (dispositions)")
+        for key, val in sorted(dispositions.items()):
+            try:
+                lines.append(f"- {key}: {float(val):.2f}")
+            except (TypeError, ValueError):
+                continue
+
+    # 段階10.5 Fix 4 δ': opinions (iku の意見、memory tag="opinion" から上位 N 件)
+    if opinions:
+        lines.append("### 意見 (opinions)")
+        for op in opinions[:5]:
+            content = str(op.get("content", ""))[:120]
+            if not content:
+                continue
+            conf = op.get("metadata", {}).get("confidence")
+            if conf is not None:
+                try:
+                    lines.append(f"- {content} ({float(conf):.2f})")
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            lines.append(f"- {content}")
 
     return "\n".join(lines)

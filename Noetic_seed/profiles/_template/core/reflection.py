@@ -152,10 +152,16 @@ def _parse_reflection(text: str, state: dict) -> dict:
                 disposition_delta[key] = delta
 
     # Disposition更新（0.1-0.9にクランプ）
-    disp = state.get("disposition", {})
+    # 段階10.5 Fix 4 δ' 補助: 既存 dormant bug fix。
+    # 旧: state.get(...,{}) が local 空 dict を返し state に永続化されず、さらに
+    #     if key in disp で「既存 key のみ更新」のため空 dict に新規 key 追加不可。
+    #     結果 disposition_delta が永遠に棄却される状態だった。
+    # 新: setdefault で state 本体に dict 確保、disp.get(key, 0.5) + delta で
+    #     新規 key も default 0.5 起点で追加可能 (段階11 Phase 11-B の
+    #     disposition 軸自由化が来た時にも同じ構造で動作継続)。
+    disp = state.setdefault("disposition", {})
     for key, delta in disposition_delta.items():
-        if key in disp:
-            disp[key] = max(0.1, min(0.9, disp[key] + delta))
+        disp[key] = max(0.1, min(0.9, disp.get(key, 0.5) + delta))
     if disposition_delta:
         print(f"  [reflection] disposition delta: {disposition_delta}")
 

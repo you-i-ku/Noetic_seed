@@ -89,7 +89,8 @@ def task_create(inp: dict) -> str:
     if not description:
         return "Error: description is required"
     rec = _registry.create(description)
-    return f"Task created: id={rec.id} description={rec.description[:100]}"
+    # 段階10 Step 4 付帯 D: Fix 5 精神で task description truncation 撤去
+    return f"Task created: id={rec.id} description={rec.description}"
 
 
 def task_get(inp: dict) -> str:

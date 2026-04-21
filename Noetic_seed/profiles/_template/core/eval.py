@@ -376,7 +376,7 @@ def update_unresolved_intents(
     ]
     if candidates and _vector_ready:
         try:
-            texts = [intent[:200]] + [c.get("content", "")[:200] for c in candidates]
+            texts = [intent[:200]] + [c.get("content_intent", "")[:200] for c in candidates]
             vecs = _embed_sync(texts)
             if vecs and len(vecs) == len(texts):
                 for i, c in enumerate(candidates):
@@ -398,14 +398,15 @@ def update_unresolved_intents(
             source_action=source_action,
             expected_observation=intent[:200],
             lag_kind=lag_kind,
-            content=intent[:200],
+            content_intent=intent[:200],
             cycle_id=cycle_id,
             channel="self",  # unresolved 系は内省由来
             expiry_policy="dynamic_n",
             initial_gap=gap,
             semantic_merge=True,
-            # 段階8 v4: reflection 系は意味類似度で消化 (tool 非依存、content 類似度のみ)
-            match_pattern={"content_similarity_threshold": 0.7},
+            # 段階10.5 Fix 2: observable 類似度で消化 (content_observable 比較、
+            # LLM 生成 intent 文面微差で merge すり抜ける現象を根治)
+            match_pattern={"observable_similarity_threshold": 0.7},
         )
 
     # 動的容量管理: UPS v2 semantic_merge=True 系のみ対象、gap 上位 N 保持
