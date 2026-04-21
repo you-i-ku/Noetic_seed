@@ -202,9 +202,9 @@ _assert(
 
 
 # =========================================================================
-# Section 4: dual write 検証 (self perspective-keyed + flat state["disposition"])
+# Section 4: perspective-keyed 単一ソース (Step 5 以降、dual write 撤去済)
 # =========================================================================
-print("\n=== Section 4: dual write (Step 4→5 移行) ===")
+print("\n=== Section 4: perspective-keyed 単一ソース (Step 5) ===")
 
 # state["dispositions"]["self"] に perspective-keyed で書かれてる
 self_disp = state["dispositions"]["self"]
@@ -233,25 +233,26 @@ _assert(
     "4-6 self.curiosity.updated_at 存在 (ISO)",
 )
 
-# dual write: flat state["disposition"] にも同じ value
-flat_disp = state["disposition"]
+# Step 5: dual write 撤去確認 — state["disposition"] (flat) 不在
 _assert(
-    abs(flat_disp.get("curiosity", 0) - 0.55) < 0.01,
-    f"4-7 flat state['disposition']['curiosity']=0.55 (dual write、got {flat_disp.get('curiosity')})",
-)
-_assert(
-    abs(flat_disp.get("skepticism", 0) - 0.47) < 0.01,  # 0.5 - 0.03
-    "4-8 flat state['disposition']['skepticism']=0.47 (dual write)",
+    "disposition" not in state,
+    "4-7 state['disposition'] 不在 (dual write 撤去、単一ソース)",
 )
 
-# ATTRIBUTED は perspective-keyed 専用 (flat dual write なし)
+# skepticism も perspective-keyed 側で反映済
+_assert(
+    abs(self_disp["skepticism"]["value"] - 0.47) < 0.01,
+    "4-8 self.skepticism.value=0.47 (-0.03 適用)",
+)
+
+# ATTRIBUTED は perspective-keyed 専用
 _assert(
     "attributed:ent_yuu" in state["dispositions"],
     "4-9 attributed:ent_yuu 登場",
 )
 _assert(
-    "ent_yuu" not in flat_disp,
-    "4-10 flat_disp に 'ent_yuu' 書かれない (attributed は self only dual write)",
+    "attributed:claude" in state["dispositions"],
+    "4-10 attributed:claude も perspective-keyed 下にのみ存在",
 )
 
 
@@ -303,7 +304,6 @@ _assert(
 state3 = {
     "log": [],
     "dispositions": {"self": {"curiosity": {"value": 0.88}}},
-    "disposition": {"curiosity": 0.88},
 }
 _parse_reflection("""
 SELF_DISPOSITION:
@@ -314,11 +314,10 @@ _assert(
     "6-3 value cap = 0.9 (0.88+0.05 → 0.9 にキャップ)",
 )
 
-# 6-C: flat state["disposition"] から self 側への初期補填 (Step 4 過渡期)
+# 6-C: 既存 perspective-keyed state から +delta (Step 5 以降の通常運用)
 state4 = {
     "log": [],
-    # state["dispositions"] 未初期化、flat disposition のみ
-    "disposition": {"curiosity": 0.3},
+    "dispositions": {"self": {"curiosity": {"value": 0.3}}},
 }
 _parse_reflection("""
 SELF_DISPOSITION:
@@ -326,7 +325,7 @@ SELF_DISPOSITION:
 """, state4)
 _assert(
     abs(state4["dispositions"]["self"]["curiosity"]["value"] - 0.4) < 0.01,  # 0.3 + 0.1
-    "6-4 flat state['disposition'] から初期補填して +delta 適用 (0.3+0.1=0.4)",
+    "6-4 既存 perspective-keyed value に +delta 適用 (0.3+0.1=0.4)",
 )
 
 # 6-D: parse 時に OPINIONS / ENTITIES セクション順序が混在しても動く

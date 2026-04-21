@@ -2,8 +2,43 @@
 import json
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from core.config import STATE_FILE, PREF_FILE, DEBUG_LOG, SEED_FILE
+
+
+def _migrate_disposition_v11a(state: dict) -> None:
+    """段階11-A Step 5: 旧 state['disposition'] (flat) → state['dispositions']['self']
+    (perspective-keyed) へ移行する起動時 migration。冪等。
+
+    正典 PLAN: STAGE11A_PERSPECTIVE_FOUNDATION_PLAN.md §5-1
+
+    移行挙動:
+      - state['dispositions'] 未存在 → 初期化 ({"self": {}})
+      - state['disposition'] (flat) 存在 → self に未反映の trait のみ移行
+        (conflict 時 dispositions 側優先 = 既存 Step4 書き込みを尊重)
+      - 移行後、state['disposition'] (flat) を完全撤去 (`pop`)
+      - 既に dispositions だけの state → no-op (冪等)
+    """
+    from core.perspective import default_self_perspective
+    dispositions = state.setdefault("dispositions", {})
+    dispositions.setdefault("self", {})
+
+    old = state.pop("disposition", None)
+    if isinstance(old, dict) and old:
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for k, v in old.items():
+            if k in dispositions["self"]:
+                continue  # 既に pkeyed 側にある → 上書きしない (Step 4 書き込み尊重)
+            try:
+                val = float(v)
+            except (TypeError, ValueError):
+                val = 0.5
+            dispositions["self"][k] = {
+                "value": max(0.1, min(0.9, val)),
+                "confidence": None,
+                "perspective": default_self_perspective(),
+                "updated_at": now_iso,
+            }
 
 
 def _atomic_write(path, text: str):
@@ -91,11 +126,13 @@ def load_state() -> dict:
                 data["prediction_error_history_e2"] = []
             if "prediction_error_history_ec" not in data:
                 data["prediction_error_history_ec"] = []
+            # 段階11-A Step 5: disposition (flat) → dispositions (perspective-keyed) 移行
+            _migrate_disposition_v11a(data)
             return data
         except json.JSONDecodeError:
             pass
     from core.world_model import init_world_model
-    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": []}
+    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
 
 
 def save_state(state: dict):

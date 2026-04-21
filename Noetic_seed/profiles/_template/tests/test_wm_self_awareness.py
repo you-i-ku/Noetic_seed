@@ -100,7 +100,18 @@ state_with_self = {
     "cycle_id": 0,
     "self": {"name": "iku"},
     "energy": 50,
-    "disposition": {"curiosity": 0.8, "skepticism": 0.2},
+    # 段階11-A Step 5: dispositions perspective-keyed 単一ソース
+    # (旧 flat state["disposition"] は load_state migration で撤去済)
+    "dispositions": {
+        "self": {
+            "curiosity": {"value": 0.8, "confidence": None,
+                          "perspective": {"viewer": "self", "viewer_type": "actual"},
+                          "updated_at": "2026-04-22T00:00:00Z"},
+            "skepticism": {"value": 0.2, "confidence": None,
+                           "perspective": {"viewer": "self", "viewer_type": "actual"},
+                           "updated_at": "2026-04-22T00:00:00Z"},
+        },
+    },
     "world_model": {"entities": {}, "channels": {}},
 }
 tools_dict = {"output_display": {"desc": "発話"}}

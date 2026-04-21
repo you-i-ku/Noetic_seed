@@ -82,8 +82,7 @@ def build_world_model_section(world_model: Optional[dict] = None,
 
     段階10.5 Fix 4 δ' (PLAN §6-2 準拠): state 引数経由で opinions / dispositions
     を取得して render_for_prompt に渡し、構造化自己認識を完成させる。
-      - dispositions: state["dispositions"] (Step 5+) or state["disposition"]
-        (段階10.5 までの flat dict) を dual support
+      - dispositions: state["dispositions"] (perspective-keyed、Step 5+)
       - opinions: memory tag="opinion" の最新 5 件 (list_records 経由)
     state=None なら既存挙動 (entities/channels のみ) を維持。
 
@@ -96,14 +95,12 @@ def build_world_model_section(world_model: Optional[dict] = None,
     opinions = None
     dispositions = None
     if state:
-        # 段階11-A: perspective-keyed dispositions を優先、なければ flat
-        # (Step 5 で state["disposition"] → state["dispositions"] に移行)
+        # 段階11-A Step 5: perspective-keyed state["dispositions"] 単一ソース。
+        # flat state["disposition"] は load_state migration で削除済 (Step 5)、
+        # render 側で flat dual support は test が見張る不変として残す
         disp_pkeyed = state.get("dispositions")
-        disp_flat = state.get("disposition")
         if isinstance(disp_pkeyed, dict) and disp_pkeyed:
             dispositions = disp_pkeyed
-        elif isinstance(disp_flat, dict) and disp_flat:
-            dispositions = disp_flat
         try:
             from core.memory import list_records
             records = list_records("opinion", limit=5)

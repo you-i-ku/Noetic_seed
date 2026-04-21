@@ -325,9 +325,24 @@ def broadcast_state(state: dict):
 
 
 def broadcast_self(state: dict):
-    """自己モデル + dispositionをブロードキャスト"""
+    """自己モデル + dispositions をブロードキャスト。
+
+    段階11-A Step 5: state["dispositions"] (perspective-keyed) を primary 送信。
+    UI 後方互換のため flat "disposition" も self dispositions.value から投影。
+    UI 側は好きな方を使える (将来 "disposition" は deprecate 予定)。
+    """
     data = dict(state.get("self", {}))
-    data["disposition"] = state.get("disposition", {})
+    dispositions = state.get("dispositions", {}) or {}
+    data["dispositions"] = dispositions
+    # UI 後方互換: flat "disposition" を self perspective-keyed から投影
+    self_disp = dispositions.get("self", {}) if isinstance(dispositions, dict) else {}
+    flat = {}
+    for k, v in self_disp.items():
+        if isinstance(v, dict) and "value" in v:
+            flat[k] = v["value"]
+        elif isinstance(v, (int, float)):
+            flat[k] = v
+    data["disposition"] = flat
     broadcast({
         "type": "self",
         "data": data,

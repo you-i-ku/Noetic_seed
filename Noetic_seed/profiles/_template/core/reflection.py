@@ -120,26 +120,16 @@ def _build_reflect_sections() -> str:
 def _gather_dispositions_for_prompt(state: dict) -> tuple:
     """prompt 表示用の self_disp / attributed_disps を dict で返す。
 
-    段階11-A Step 4 過渡期: perspective-keyed state["dispositions"] 優先、
-    なければ flat state["disposition"] (段階10.5 Fix 4 δ' 形式) から
-    self 用に再構築。
+    段階11-A Step 5 以降: perspective-keyed state["dispositions"] 単一ソース。
+    flat state["disposition"] は load_state の _migrate_disposition_v11a で
+    起動時に撤去済み (dual write 期間は Step 4 で終了)。
     """
-    import json
-
     dispositions = state.get("dispositions") or {}
     self_disp_raw = dispositions.get("self") or {}
-    # perspective-keyed entry は {trait: {"value": ..., ...}} 形式、prompt では value のみ表示
-    self_disp_values = {}
-    for k, v in self_disp_raw.items():
-        if isinstance(v, dict):
-            self_disp_values[k] = v.get("value")
-        else:
-            self_disp_values[k] = v
-
-    # Step 4 過渡期: flat state["disposition"] から fallback 補填
-    if not self_disp_values and isinstance(state.get("disposition"), dict):
-        flat = state["disposition"]
-        self_disp_values = {k: v for k, v in flat.items() if isinstance(v, (int, float))}
+    self_disp_values = {
+        k: (v.get("value") if isinstance(v, dict) else v)
+        for k, v in self_disp_raw.items()
+    }
 
     # attributed のみ (self を除く)
     attr_disps = {}
@@ -344,25 +334,18 @@ def _parse_reflection(text: str, state: dict) -> dict:
                     attr_disp_delta.setdefault(viewer, {})[key] = (delta, conf)
 
     # ====================================================================
-    # SELF_DISPOSITION 反映 (perspective-keyed + dual write)
+    # SELF_DISPOSITION 反映 (perspective-keyed 単一ソース、Step 5 以降)
     # ====================================================================
-    # 段階10.5 Fix 4 δ' 補助 bug fix: setdefault で state 本体に dict 確保。
-    # 段階11-A Step 4: state["dispositions"]["self"] に perspective-keyed で
-    # 書き込み、state["disposition"] (flat) に Step 5 までの移行期間 dual write。
+    # 段階11-A Step 5: flat state["disposition"] への dual write を撤去、
+    # perspective-keyed state["dispositions"]["self"] を単一 source of truth。
+    # 起動時 migration (_migrate_disposition_v11a) で旧 flat dict は削除済み。
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     dispositions = state.setdefault("dispositions", {})
     self_disp = dispositions.setdefault("self", {})
-    flat_disp = state.setdefault("disposition", {})  # Step 5 で撤去
 
     for key, delta in self_disp_delta.items():
         cur = self_disp.get(key)
-        if isinstance(cur, dict):
-            cur_val = cur.get("value", 0.5)
-        elif isinstance(cur, (int, float)):
-            cur_val = float(cur)
-        else:
-            # flat 側からの初期補填 (Step 4 過渡期)
-            cur_val = float(flat_disp.get(key, 0.5)) if isinstance(flat_disp.get(key), (int, float)) else 0.5
+        cur_val = cur.get("value", 0.5) if isinstance(cur, dict) else 0.5
         new_val = max(0.1, min(0.9, cur_val + delta))
         self_disp[key] = {
             "value": new_val,
@@ -370,8 +353,6 @@ def _parse_reflection(text: str, state: dict) -> dict:
             "perspective": default_self_perspective(),
             "updated_at": now_iso,
         }
-        # dual write (Step 5 で撤去)
-        flat_disp[key] = new_val
 
     if self_disp_delta:
         print(f"  [reflection] self_disposition delta: {self_disp_delta}")
