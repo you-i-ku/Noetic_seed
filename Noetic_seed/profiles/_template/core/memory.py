@@ -8,7 +8,7 @@ from core.config import MEMORY_DIR, LOG_HARD_LIMIT, LOG_KEEP, SUMMARY_HARD_LIMIT
 from core.state import load_pref, save_pref
 from core.llm import call_llm
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
-from core.tag_registry import is_tag_registered, list_registered_tags
+from core.tag_registry import is_tag_registered, list_registered_tags, get_tag_rules
 from core.perspective import Perspective, default_self_perspective
 
 # === Entity/Opinion Network (段階7: tag_registry で動的管理) ===
@@ -33,6 +33,11 @@ def memory_store(network: str, content: str, metadata: dict = None,
     """
     if not is_tag_registered(network):
         raise ValueError(f"Invalid network: {network}")
+    _rules = get_tag_rules(network) or {}
+    if _rules.get("learning_rules", {}).get("write_protected", False):
+        raise ValueError(
+            f"tag '{network}' is write_protected (pseudo-tag, meta-section only)"
+        )
     if perspective is None:
         perspective = default_self_perspective()
     entry = {

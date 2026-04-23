@@ -54,6 +54,29 @@ STANDARD_TAGS: dict = {
             "enabled_in_reflect": True,
         },
     },
+    # 段階11-B Phase 2: pseudo-tag (write_protected、meta-section only)。
+    # reflect prompt に "TAG CONSIDERATION" opt-in セクションを載せる受け皿で、
+    # memory_store 対象ではない (write_protected=True で reject)。
+    # iku が自発的に enabled_in_reflect=True に切り替えるまで prompt に現れない。
+    "tag_consideration": {
+        "learning_rules": {
+            "beta_plus": False,
+            "bitemporal": False,
+            "c_gradual_source": False,
+            "write_protected": True,
+        },
+        "display_format": "",
+        "reflect_section": {
+            "header": "TAG CONSIDERATION (任意、使わなくても可)",
+            "template": (
+                "- 今回の observation group を既存 tag で記録するか、"
+                "新 tag を発明するかの考察\n"
+                "- 書式: \"- tag_name: 理由\" (既存) "
+                "or \"- new_tag: 理由 + 提案 rules\""
+            ),
+            "enabled_in_reflect": False,
+        },
+    },
 }
 
 
@@ -104,7 +127,8 @@ def register_tag(name: str,
 
     Args:
         name: タグ名 (非空文字列)
-        learning_rules: {"beta_plus": bool, "bitemporal": bool, "c_gradual_source": bool}
+        learning_rules: {"beta_plus": bool, "bitemporal": bool,
+                         "c_gradual_source": bool, "write_protected": bool}
         display_format: format_memories_for_prompt 用 (省略時 "[{name}] {content}")
         origin: "standard" (起動時) / "dynamic" (AI 発明)
         intent: AI 発明時の tool_intent 記録
@@ -124,6 +148,7 @@ def register_tag(name: str,
         "beta_plus": bool(learning_rules.get("beta_plus", False)),
         "bitemporal": bool(learning_rules.get("bitemporal", False)),
         "c_gradual_source": bool(learning_rules.get("c_gradual_source", False)),
+        "write_protected": bool(learning_rules.get("write_protected", False)),
     }
     existing = _REGISTERED.get(name)
     if existing is not None:
