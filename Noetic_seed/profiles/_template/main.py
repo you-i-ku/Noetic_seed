@@ -1266,6 +1266,16 @@ def main():
 
             # === Reflection (cycle 境界で 1 回) ===
             state["reflection_cycle"] = state.get("reflection_cycle", 0) + 1
+            # 段階11-C hotfix (2026-04-24): 段階11-C smoke 3 段目 baseline で
+            # reflect 自動発火ゼロを観察、root cause は「incremented 値が disk
+            # に書かれず、次 tool 実行の _refresh_state() で memory 上の +1
+            # が毎回消えて reflection_cycle が永遠に 1 止まり」だった。
+            # reflect 発火時のみ save (L1274 reset 時) に依存していた race 条件
+            # (LLM が reflect tool chain を選ぶ偶発起動が初回書込契機として必要)。
+            # 累積値を increment 直後に永続化、reflect tool chain 選択の運に
+            # 独立して自動発火経路が機能するようにする。副作用: disk I/O が
+            # cycle あたり 1 回増える (同 state object で実害なし)。
+            save_state(state)
             _refl_interval = load_pref().get("reflection_interval", 10)
             if should_reflect(state, _refl_interval):
                 print("  [reflection] 内省開始...")
