@@ -1272,6 +1272,13 @@ def main():
                 state["reflection_cycle"] = 0
                 save_state(state)
 
+            # 段階11-B Phase 5 Step 5.4: cycle 境界で emergence metric 記録 (reflection 後 state snapshot)
+            try:
+                from core.tag_emergence_monitor import log_cycle_metrics
+                log_cycle_metrics(state.get("cycle_id", 0), state)
+            except Exception as _e:
+                print(f"  [emergence] log skip: {_e}")
+
         print()
 
 if __name__ == "__main__":
