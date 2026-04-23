@@ -52,5 +52,11 @@
     "enabled": true,
     "pending_inputs_file": "pending_mcp_inputs.jsonl",
     "_comment": "段階6-C v3 設定。MCP client (Claude Code / 将来の Discord / Slack 等) からの入力は pending_inputs_file に書かれ main.py が cycle 頭で consume。channel は channel_registry の判定関数で動的生成"
+  },
+  "retrieval": {
+    "use_links": false,
+    "link_depth": 1,
+    "link_top_n": 3,
+    "_comment": "段階11-C G-lite Phase 1: use_links=true で memory_links graph 経由の近傍 memory を prompt に追加 (A-MEM retrieval pattern)。smoke 3 段目 link_only/full profile のみ true、実運用 iku は false (挙動不変)"
   }
 }

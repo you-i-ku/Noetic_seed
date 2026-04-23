@@ -310,8 +310,16 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
         pending_text = "  なし"
 
     # 関連記憶（Entity/Opinionネットワーク）
+    # 段階11-C G-lite Phase 1: settings.retrieval から use_links/link_depth/link_top_n を配線
     from core.memory import get_relevant_memories, format_memories_for_prompt
-    memories = get_relevant_memories(state, limit=8)
+    from core.config import llm_cfg
+    _retrieval_cfg = llm_cfg.get("retrieval", {}) or {}
+    memories = get_relevant_memories(
+        state, limit=8,
+        use_links=bool(_retrieval_cfg.get("use_links", False)),
+        link_depth=int(_retrieval_cfg.get("link_depth", 1)),
+        link_top_n=int(_retrieval_cfg.get("link_top_n", 3)),
+    )
     memory_text = format_memories_for_prompt(memories) if memories else ""
 
     # camera_stream アクティブ時の状態表示（並行活動を可視化）

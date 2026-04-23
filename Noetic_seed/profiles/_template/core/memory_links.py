@@ -214,3 +214,126 @@ def generate_links_for(new_entry: dict, *,
         _append_link(link_entry)
         created.append(link_entry)
     return created
+
+
+# ============================================================
+# 段階11-C G-lite Phase 1: retrieval 拡張 (follow_links)
+# ============================================================
+
+LINK_TRAVERSAL_MAX_DEPTH_DEFAULT = 1   # G-lite 推奨 depth=1、smoke 後 tune 余地
+LINK_TRAVERSAL_TOP_N_DEFAULT = 3       # depth 毎の上位 N 件 (cost / 密度 balance)
+
+
+def follow_links(
+    node_id: str,
+    *,
+    depth: int = LINK_TRAVERSAL_MAX_DEPTH_DEFAULT,
+    link_types: Optional[tuple] = None,
+    min_confidence: float = LINK_CONFIDENCE_THRESHOLD,
+    top_n_per_depth: int = LINK_TRAVERSAL_TOP_N_DEFAULT,
+    visited: Optional[set] = None,
+) -> list:
+    """指定 memory entry から link graph を traverse して近傍 entry を返す.
+
+    段階11-C G-lite Phase 1: 既存 `memory_links.jsonl` (storage、Phase 4 実装)
+    を retrieval 経路で活用、A-MEM の top-k similarity + link traversal 戦略。
+
+    Args:
+        node_id: 起点 memory entry の id
+        depth: traversal 最大深さ (G-lite 推奨 1)
+        link_types: 追従する link_type tuple (None で全 type)
+        min_confidence: 未満の link は辿らない (G-lite 推奨 0.7 = 既存 storage 閾値)
+        top_n_per_depth: 各 depth で confidence 上位 N 件のみ展開
+        visited: 循環防止の visited memory id set (外部呼出は None)
+
+    Returns:
+        [{"memory_entry": dict, "via_link": dict,
+          "depth": int, "strength_hint": float}, ...]
+
+    API 契約 (full 見据え):
+        strength_hint は G-lite では via_link.confidence を流用、
+        11-D Phase 3 (Physarum) で strength field に差し替え可能。
+        呼び手は「retrieval 順序付けに使う float」として扱うだけ、
+        source を知らない設計で後付け拡張に壊れない。
+    """
+    if not node_id or depth <= 0:
+        return []
+    visited = set(visited) if visited else set()
+    visited.add(node_id)
+    all_links = list_links(limit=10000)
+    return _traverse_depth(
+        node_id, 1, depth, all_links, visited,
+        link_types, min_confidence, top_n_per_depth,
+    )
+
+
+def _traverse_depth(
+    node_id: str,
+    current_depth: int,
+    max_depth: int,
+    all_links: list,
+    visited: set,
+    link_types: Optional[tuple],
+    min_confidence: float,
+    top_n_per_depth: int,
+) -> list:
+    """follow_links の再帰実装 (current_depth 1 始まり)."""
+    if current_depth > max_depth:
+        return []
+
+    outgoing = [l for l in all_links if l.get("from_id") == node_id]
+    filtered = []
+    for l in outgoing:
+        lt = l.get("link_type", "none")
+        if lt == "none":
+            continue
+        if link_types is not None and lt not in link_types:
+            continue
+        if float(l.get("confidence", 0.0)) < min_confidence:
+            continue
+        filtered.append(l)
+    filtered.sort(key=lambda l: float(l.get("confidence", 0.0)), reverse=True)
+    near = filtered[:top_n_per_depth]
+
+    results = []
+    for link in near:
+        to_id = link.get("to_id")
+        if not to_id or to_id in visited:
+            continue
+        target_entry = _find_memory_entry_by_id(to_id)
+        if target_entry is None:
+            continue
+        visited.add(to_id)
+        results.append({
+            "memory_entry": target_entry,
+            "via_link": link,
+            "depth": current_depth,
+            "strength_hint": float(link.get("confidence", 0.0)),
+        })
+        if current_depth < max_depth:
+            child = _traverse_depth(
+                to_id, current_depth + 1, max_depth,
+                all_links, visited,
+                link_types, min_confidence, top_n_per_depth,
+            )
+            results.extend(child)
+    return results
+
+
+def _find_memory_entry_by_id(entry_id: str) -> Optional[dict]:
+    """登録済 network を走査して entry_id を持つ memory entry を見つける.
+
+    G-lite では coarse (全 tag 走査、network n 増加で線形)。
+    11-D Phase 7 migration で索引化を検討可。
+    """
+    from core.memory import list_records
+    from core.tag_registry import list_registered_tags
+    for tag in list_registered_tags():
+        try:
+            recs = list_records(tag, limit=10000)
+        except Exception:
+            continue
+        for r in recs:
+            if r.get("id") == entry_id:
+                return r
+    return None
