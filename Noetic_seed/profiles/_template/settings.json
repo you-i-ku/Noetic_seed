@@ -58,5 +58,9 @@
     "link_depth": 1,
     "link_top_n": 3,
     "_comment": "段階11-C G-lite Phase 1: use_links=true で memory_links graph 経由の近傍 memory を prompt に追加 (A-MEM retrieval pattern)。smoke 3 段目 link_only/full profile のみ true、実運用 iku は false (挙動不変)"
+  },
+  "reflection": {
+    "reflect_cold_start_mode": false,
+    "_comment": "段階11-C G-lite Phase 3: true で reflect prompt から OPINIONS/ENTITIES 等の tag_registry 駆動セクションを一時非表示、iku が既存 tag prior なしに reflect できる実験 mode。smoke 3 段目 full profile のみ true、実運用 iku は false。reflect 抽象再設計は G-full (11-D)"
   }
 }

@@ -93,13 +93,26 @@ def _format_observations(entries: list) -> str:
 # 段階11-A Step 4: tag_registry 駆動 reflect セクション (G1)
 # ============================================================
 
-def _build_reflect_sections() -> str:
+def _build_reflect_sections(visibility_mode: str = "visible") -> str:
     """tag_registry.reflect_section から reflect prompt の動的セクション組立。
 
     段階11-A G1: opinion/entity セクションを tag_registry 駆動化
     (hardcode 撤廃)。段階11-B で AI が新 tag を発明し reflect_section を
     付けた場合も、同経路で自動的に prompt に載る (11-B 受け皿)。
+
+    段階11-C G-lite Phase 3: visibility_mode で tag prior の可視性を切替可能。
+
+    Args:
+        visibility_mode:
+            "visible"    — 既存挙動 (デフォルト、reflect_section を全組立)
+            "cold_start" — 空文字列を返す、iku が既存 tag prior なしに reflect
+                            できる実験モード (settings.reflection.reflect_cold_start_mode
+                            から配線)。reflect_section ハードコードな OPINIONS /
+                            ENTITIES のみ影響、prompt 本体の指示文は変化なし。
+                            reflect 抽象再設計は G-full (11-D Phase 5)。
     """
+    if visibility_mode == "cold_start":
+        return ""
     from core.tag_registry import list_registered_tags, get_tag_rules
     sections = []
     for tag in list_registered_tags():
@@ -194,7 +207,18 @@ def reflect(state: dict, call_llm_fn) -> dict:
     pending_text = f"{len(pending)}件未対応" if pending else "なし"
 
     # 段階11-A G1: tag_registry 駆動の動的セクション
-    dynamic_sections = _build_reflect_sections()
+    # 段階11-C G-lite Phase 3: settings.reflection.reflect_cold_start_mode で
+    # 既存 tag prior (OPINIONS/ENTITIES section) の可視性を切替、opt-in 実験。
+    try:
+        from core.config import llm_cfg
+        _cold_start = bool(
+            (llm_cfg.get("reflection", {}) or {}).get("reflect_cold_start_mode", False)
+        )
+    except Exception:
+        _cold_start = False
+    dynamic_sections = _build_reflect_sections(
+        visibility_mode="cold_start" if _cold_start else "visible"
+    )
 
     prompt = f"""あなたは自律AIシステムの内省モジュールです。以下の直近の行動を振り返り、各項目を出力してください。
 
