@@ -294,7 +294,12 @@ def _parse_reflection(text: str, state: dict) -> dict:
                 name = m.group(1).strip()
                 desc = m.group(2).strip()
                 if name and desc:
-                    existing = memory_network_search(name, networks=["entity"], limit=3)
+                    from core.tag_registry import get_tags_with_rule
+                    entity_tags = get_tags_with_rule("c_gradual_source")
+                    if entity_tags:
+                        existing = memory_network_search(name, networks=entity_tags, limit=3)
+                    else:
+                        existing = []
                     matched = [e for e in existing
                                if e.get("metadata", {}).get("entity_name", "") == name]
                     if matched:
@@ -390,7 +395,11 @@ def _parse_reflection(text: str, state: dict) -> dict:
         from core.world_model import sync_from_memory_entities
         wm = state.get("world_model")
         if wm:
-            records = list_records("entity", limit=20)
+            from core.tag_registry import get_tags_with_rule
+            c_gradual_tags = get_tags_with_rule("c_gradual_source")
+            records = []
+            for tag in c_gradual_tags:
+                records.extend(list_records(tag, limit=20))
             _embed = _embed_sync if _vector_ready else None
             _cosine = cosine_similarity if _vector_ready else None
             created = sync_from_memory_entities(

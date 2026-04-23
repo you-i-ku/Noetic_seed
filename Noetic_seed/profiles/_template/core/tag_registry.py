@@ -46,7 +46,7 @@ STANDARD_TAGS: dict = {
         },
     },
     "entity": {
-        "learning_rules": {"beta_plus": True, "bitemporal": True},
+        "learning_rules": {"beta_plus": True, "bitemporal": True, "c_gradual_source": True},
         "display_format": "[entity:{entity_name}] {content}",
         "reflect_section": {
             "header": "ENTITIES",
@@ -104,7 +104,7 @@ def register_tag(name: str,
 
     Args:
         name: タグ名 (非空文字列)
-        learning_rules: {"beta_plus": bool, "bitemporal": bool}
+        learning_rules: {"beta_plus": bool, "bitemporal": bool, "c_gradual_source": bool}
         display_format: format_memories_for_prompt 用 (省略時 "[{name}] {content}")
         origin: "standard" (起動時) / "dynamic" (AI 発明)
         intent: AI 発明時の tool_intent 記録
@@ -123,6 +123,7 @@ def register_tag(name: str,
     rules_norm = {
         "beta_plus": bool(learning_rules.get("beta_plus", False)),
         "bitemporal": bool(learning_rules.get("bitemporal", False)),
+        "c_gradual_source": bool(learning_rules.get("c_gradual_source", False)),
     }
     existing = _REGISTERED.get(name)
     if existing is not None:
@@ -157,6 +158,21 @@ def get_tag_rules(name: str) -> Optional[dict]:
     """タグの rule dict を返す。未登録は None。"""
     _load_from_disk()
     return _REGISTERED.get(name)
+
+
+def get_tags_with_rule(rule_name: str) -> list:
+    """指定 learning_rule が True の tag 名 list を返す (段階11-B Phase 1)。
+
+    Phase 1 用途: c_gradual_source を持つ tag (現状 entity のみ) を動的取得、
+    reflection.py の entity lookup / C-gradual WM sync に使用。
+    Phase 5 (白紙 onboarding) で registered_tags が空なら [] を返す
+    = reflect が entity 抽出・WM sync を自然に skip する挙動に migrate。
+    """
+    _load_from_disk()
+    return [
+        name for name, entry in _REGISTERED.items()
+        if entry.get("learning_rules", {}).get(rule_name, False)
+    ]
 
 
 def list_registered_tags() -> list:
