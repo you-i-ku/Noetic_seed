@@ -50,17 +50,17 @@ def test_empty_registry(tmpdir: Path):
 
 
 def test_standard_tags_registered(tmpdir: Path):
-    print("== 標準タグ 5 種登録後 (wm/experience/opinion/entity/tag_consideration) ==")
+    print("== 標準タグ 4 種登録後 (wm/experience/opinion/entity) ==")
     _fresh(tmpdir)
     tr.register_standard_tags()
     stats = collect_emergence_stats()
     return all([
-        _assert(stats["total_registered"] == 5, f"total_registered=5 (got {stats['total_registered']})"),
-        _assert(stats["standard_count"] == 5, f"standard_count=5 (got {stats['standard_count']})"),
+        _assert(stats["total_registered"] == 4, f"total_registered=4 (got {stats['total_registered']})"),
+        _assert(stats["standard_count"] == 4, f"standard_count=4 (got {stats['standard_count']})"),
         _assert(stats["dynamic_count"] == 0, f"dynamic_count=0 (got {stats['dynamic_count']})"),
         _assert(
-            stats["write_protected_count"] == 1,
-            f"write_protected_count=1 (tag_consideration only, got {stats['write_protected_count']})",
+            stats["write_protected_count"] == 0,
+            f"write_protected_count=0 (標準 4 タグは全て write_protected=False、got {stats['write_protected_count']})",
         ),
     ])
 

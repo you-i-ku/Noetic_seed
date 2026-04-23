@@ -38,15 +38,12 @@ def _fresh(tmpdir: Path) -> Path:
 
 
 def test_register_standard_tags(tmpdir: Path):
-    print("== register_standard_tags: 標準 5 タグ登録 (段階11-B Phase 2: +tag_consideration) ==")
+    print("== register_standard_tags: 標準 4 タグ登録 ==")
     _fresh(tmpdir)
     tr.register_standard_tags()
     tags = tr.list_registered_tags()
     return all([
-        _assert(
-            set(tags) == {"wm", "experience", "opinion", "entity", "tag_consideration"},
-            "標準 5 タグ存在 (wm/experience/opinion/entity/tag_consideration)",
-        ),
+        _assert(set(tags) == {"wm", "experience", "opinion", "entity"}, "標準 4 タグ存在"),
         _assert(tr.is_tag_registered("wm"), "is_tag_registered('wm')"),
         _assert(tr.get_tag_rules("wm")["learning_rules"]["beta_plus"] is True, "wm beta_plus=True"),
         _assert(tr.get_tag_rules("wm")["learning_rules"]["bitemporal"] is True, "wm bitemporal=True"),
@@ -133,7 +130,7 @@ def test_persistence_and_reload(tmpdir: Path):
     results.append(_assert(tr.is_tag_registered("wm"), "再 load で wm 復元"))
     results.append(_assert(tr.is_tag_registered("dream"), "再 load で dream 復元"))
     results.append(_assert(tr.get_tag_rules("dream")["intent"] == "夢", "dream intent 復元"))
-    results.append(_assert(len(tr.list_registered_tags()) == 6, "total 6 タグ (標準5+dream)"))
+    results.append(_assert(len(tr.list_registered_tags()) == 5, "total 5 タグ (標準4+dream)"))
     return all(results)
 
 

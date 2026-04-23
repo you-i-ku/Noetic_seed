@@ -54,29 +54,11 @@ STANDARD_TAGS: dict = {
             "enabled_in_reflect": True,
         },
     },
-    # 段階11-B Phase 2: pseudo-tag (write_protected、meta-section only)。
-    # reflect prompt に "TAG CONSIDERATION" opt-in セクションを載せる受け皿で、
-    # memory_store 対象ではない (write_protected=True で reject)。
-    # iku が自発的に enabled_in_reflect=True に切り替えるまで prompt に現れない。
-    "tag_consideration": {
-        "learning_rules": {
-            "beta_plus": False,
-            "bitemporal": False,
-            "c_gradual_source": False,
-            "write_protected": True,
-        },
-        "display_format": "",
-        "reflect_section": {
-            "header": "TAG CONSIDERATION (任意、使わなくても可)",
-            "template": (
-                "- 今回の observation group を既存 tag で記録するか、"
-                "新 tag を発明するかの考察\n"
-                "- 書式: \"- tag_name: 理由\" (既存) "
-                "or \"- new_tag: 理由 + 提案 rules\""
-            ),
-            "enabled_in_reflect": False,
-        },
-    },
+    # 段階11-B Phase 2' scope-down (2026-04-23): tag_consideration pseudo-tag は
+    # 撤去。理由: 動的タグ生成は段階7 inline register で既に動く + tool spec に
+    # rules 引数が含まれる = iku への「新 tag 作れるよ」リマインダーは冗長
+    # (ゆう gut check)。write_protected schema と tag_emergence_monitor は
+    # 汎用機構 / 観察基盤として保持、Phase 5 白紙 onboarding で必要性を再評価。
 }
 
 
