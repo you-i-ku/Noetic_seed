@@ -346,9 +346,10 @@ def main():
         get_cycle_id=lambda: state.get("cycle_id", 0),
     ))
 
-    # Approval callback (pause_on_await + 3 層 UI)
+    # Approval callback (pause_on_await + 3 層 UI + smoke auto_approve_all)
     _approval_cb = make_approval_callback(
         pause_on_await=_approval_cfg.get("pause_on_await", True),
+        auto_approve_all=_approval_cfg.get("auto_approve_all", False),
     )
 
     # ConversationRuntime (system_prompt は fire 毎に assemble 差替)

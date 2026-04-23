@@ -261,6 +261,48 @@ def test_real_set_paused_integration():
 
 
 # ============================================================
+# auto_approve_all (smoke util bypass)
+# ============================================================
+
+def test_auto_approve_all_bypasses_everything():
+    """auto_approve_all=True で request_approval も set_paused も呼ばず True 返却。"""
+    print("== auto_approve_all=True: 全 bypass ==")
+    capture: dict = {}
+    history: list = []
+    cb = make_approval_callback(
+        pause_on_await=True,             # True でも auto_approve_all が優先
+        auto_approve_all=True,
+        request_approval_fn=_stub_approval(False, capture),  # False 固定 → bypass で無視
+        set_paused_fn=_stub_pause(history),
+    )
+    result = cb("any_tool", _full_input(), [])
+    return all([
+        _assert(result is True, "auto_approve_all=True で常に True"),
+        _assert("tool_name" not in capture, "request_approval が呼ばれない"),
+        _assert(history == [], "set_paused が呼ばれない (pause_on_await 関係なし)"),
+    ])
+
+
+def test_auto_approve_all_false_preserves_normal_flow():
+    """auto_approve_all=False (デフォルト) で従来挙動維持 (回帰ガード)。"""
+    print("== auto_approve_all=False: 従来挙動維持 ==")
+    capture: dict = {}
+    history: list = []
+    cb = make_approval_callback(
+        pause_on_await=False,
+        auto_approve_all=False,          # デフォルト明示
+        request_approval_fn=_stub_approval(True, capture),
+        set_paused_fn=_stub_pause(history),
+    )
+    result = cb("memory_store", _full_input(), [])
+    return all([
+        _assert(result is True, "auto_approve_all=False で request_approval 通過"),
+        _assert(capture.get("tool_name") == "memory_store",
+                "request_approval が 1 回呼ばれる (従来挙動)"),
+    ])
+
+
+# ============================================================
 # 実行
 # ============================================================
 
@@ -282,6 +324,10 @@ if __name__ == "__main__":
         ("pause: 例外時解放", test_pause_released_on_exception),
         ("pause: 拒否時解放", test_pause_released_on_denial),
         ("ws_server 実連動", test_real_set_paused_integration),
+        ("auto_approve: True で全 bypass",
+         test_auto_approve_all_bypasses_everything),
+        ("auto_approve: False 従来挙動",
+         test_auto_approve_all_false_preserves_normal_flow),
     ]
     results = []
     for _label, fn in groups:
