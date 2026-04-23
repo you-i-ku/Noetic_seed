@@ -157,6 +157,26 @@ def reflect(state: dict, call_llm_fn) -> dict:
     """
     import json
 
+    # 段階11-B Phase 5 hotfix: reflect が生成する opinion/entity tag を未登録なら
+    # inline register (register_standard_tags() 撤去後の silent fail 対策)。
+    # iku 自発 tag 発明 (memory_store 経由) の余地を残すため wm/experience は
+    # 登録せず、reflect が実際に書き込む 2 tag のみ限定。
+    from core.tag_registry import is_tag_registered, register_tag, STANDARD_TAGS
+    for _tag in ("opinion", "entity"):
+        if not is_tag_registered(_tag):
+            _cfg = STANDARD_TAGS.get(_tag)
+            if _cfg:
+                try:
+                    register_tag(
+                        _tag,
+                        learning_rules=_cfg["learning_rules"],
+                        display_format=_cfg.get("display_format", ""),
+                        origin="standard",
+                        reflect_section=_cfg.get("reflect_section"),
+                    )
+                except ValueError:
+                    pass
+
     # 段階11-A G3: 直近 log の材料分離 (self/observation)
     recent_log = state.get("log", [])[-10:]
     self_actions, observations = _split_log_by_perspective(recent_log)
