@@ -21,15 +21,68 @@ def _network_file(network: str):
     return MEMORY_DIR / f"{network}.jsonl"
 
 
+def _build_metadata_prompt(content: str, network: str) -> str:
+    """段階11-B Phase 3 Step 3.1: keywords + contextual_description 生成 prompt (軽量)。"""
+    return (
+        "以下の記憶 entry から keywords と contextual_description を生成してください:\n"
+        f"content: {content}\n"
+        f"tag: {network}\n"
+        "出力は JSON のみ (他の文字を含めない):\n"
+        '{"keywords": [str, ...], "contextual_description": str}\n'
+        "- keywords: 3-7 個、content の主要概念を抽出 (日本語可)\n"
+        "- contextual_description: 1-2 文、この memory が想起される文脈"
+    )
+
+
+def _parse_metadata_response(response: str) -> dict:
+    """LLM 応答から keywords / contextual_description を抽出 (robust parse)。"""
+    try:
+        m = re.search(r'\{.*\}', response, re.DOTALL)
+        if not m:
+            return {"keywords": [], "contextual_description": ""}
+        data = json.loads(m.group(0))
+        kws = data.get("keywords", [])
+        desc = data.get("contextual_description", "")
+        if not isinstance(kws, list):
+            kws = []
+        if not isinstance(desc, str):
+            desc = str(desc) if desc is not None else ""
+        return {
+            "keywords": [str(k)[:80] for k in kws][:7],
+            "contextual_description": desc[:500],
+        }
+    except Exception:
+        return {"keywords": [], "contextual_description": ""}
+
+
+def _generate_memory_metadata(content: str, network: str) -> dict:
+    """memory_store 同期呼出で keywords + contextual_description を LLM 生成。
+
+    LLM 呼出 / parse 失敗時は空 dict を返す (memory_store 側で fallback)。
+    """
+    from core.llm import call_llm
+    prompt = _build_metadata_prompt(content, network)
+    response = call_llm(prompt, max_tokens=300, temperature=0.3)
+    return _parse_metadata_response(response)
+
+
 def memory_store(network: str, content: str, metadata: dict = None,
                  origin: str = "unknown", source_context: str = "",
-                 perspective: Optional[Perspective] = None) -> dict:
+                 perspective: Optional[Perspective] = None, *,
+                 keywords: Optional[list] = None,
+                 contextual_description: Optional[str] = None,
+                 _auto_metadata: bool = True) -> dict:
     """記憶を保存。origin=生成きっかけ、source_context=根拠の出処。
 
     段階11-A: perspective kwarg を専用キーとして entry に昇格 (metadata と並列、
     型安全優先)。None なら default_self_perspective() (self/actual) で補完、
     呼び出し側は意識不要で後方互換。既存 jsonl entry (perspective 欠落) は
     読み出し側 (rebuild_wm / list_records) が default で解釈する。
+
+    段階11-B Phase 3 Step 3.1: keywords / contextual_description を keyword-only
+    引数として追加。両方 None + _auto_metadata=True なら LLM 同期呼出で自動生成
+    (A-MEM NeurIPS 2025 準拠)。LLM 失敗時は graceful fallback (空値で保存、
+    memory 書込は継続)。test 用途で `_auto_metadata=False` 指定で LLM skip 可能。
     """
     if not is_tag_registered(network):
         raise ValueError(f"Invalid network: {network}")
@@ -40,6 +93,21 @@ def memory_store(network: str, content: str, metadata: dict = None,
         )
     if perspective is None:
         perspective = default_self_perspective()
+
+    # Phase 3 Step 3.1: keywords / contextual_description の生成 / 補完
+    if _auto_metadata and keywords is None and contextual_description is None:
+        try:
+            _meta = _generate_memory_metadata(content, network)
+            keywords = _meta.get("keywords", [])
+            contextual_description = _meta.get("contextual_description", "")
+        except Exception as e:
+            print(f"  [memory] metadata 自動生成 skip (error: {e})")
+            keywords = []
+            contextual_description = ""
+    else:
+        keywords = keywords if keywords is not None else []
+        contextual_description = contextual_description if contextual_description is not None else ""
+
     entry = {
         "id": f"mem_{uuid.uuid4().hex[:12]}",
         "network": network,
@@ -48,6 +116,8 @@ def memory_store(network: str, content: str, metadata: dict = None,
         "source_context": source_context,
         "metadata": metadata or {},
         "perspective": perspective,
+        "keywords": keywords,
+        "contextual_description": contextual_description,
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
