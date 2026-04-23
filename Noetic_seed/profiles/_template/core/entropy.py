@@ -167,3 +167,55 @@ def apply_negentropy(state: dict, e1_val: float, e2_val: float, e3_val: float, e
     neg = e2_factor * e4_factor * e1_factor * surprise_bonus * change_factor * spiral_factor * ep["neg_scale"]
     floor = _entropy_floor(state)
     state["entropy"] = max(floor, state.get("entropy", 0.65) - neg)
+
+
+# ============================================================
+# 段階11-B Phase 3 Step 3.4: source 別 EC 予測誤差記録
+# ============================================================
+
+def record_ec_prediction_error(state: dict, *,
+                               source: str,
+                               magnitude: float,
+                               reason: str = "",
+                               context: dict | None = None,
+                               history_max: int = 50) -> None:
+    """source 別の EC 予測誤差を state に記録 (段階11-B Phase 3 Step 3.4)。
+
+    段階10 既存経路 (predictor.update_predictor_confidence) を補完する副経路:
+    - 既存 state["prediction_error_history_ec"] には magnitude を append
+      (pressure 層経路との整合を保ち、共通 weight w_prediction_error を流用可能)
+    - 新規 state["prediction_error_history_by_source"][source] に detail record を
+      append (smoke 分析で source 別の pressure 寄与を追跡可能、hot/cold な
+      source 識別 + reason / context metadata で判定根拠まで辿れる)
+
+    pressure 層への実接続は Phase 3 Step 3.x (reconciliation module 側) で実施。
+    本関数は state への history 書込のみ、pressure 計算は触らない (最小介入)。
+
+    Args:
+        state: 記録先 state dict (破壊更新)
+        source: 識別 tag (例: "reconciliation" / 将来他層を追加する時も同関数で拡張)
+        magnitude: EC 誤差 magnitude (0.0-1.0、severity スケール)
+        reason: 判定根拠文字列 (smoke 分析用)
+        context: 関連 entry id 等の metadata (例: {"new_entry_id": "...", ...})
+        history_max: source 別 history の保持上限 (超えたら古いものから trim)
+    """
+    from datetime import datetime
+
+    mag = float(magnitude)
+
+    # 既存 EC history への append (pressure 経路との整合)
+    hist_ec = state.setdefault("prediction_error_history_ec", [])
+    hist_ec.append(mag)
+
+    # 新規 source 別 detail history
+    by_source = state.setdefault("prediction_error_history_by_source", {})
+    src_hist = by_source.setdefault(source, [])
+    src_hist.append({
+        "magnitude": mag,
+        "reason": reason,
+        "context": context or {},
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    # 件数上限 trim (FIFO)
+    if len(src_hist) > history_max:
+        del src_hist[:len(src_hist) - history_max]
