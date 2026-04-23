@@ -166,9 +166,14 @@ def main():
     ws_token = start_ws_server()
     set_profile_running(True)
     _init_vector()
-    # 段階7: 標準タグをレジストリに登録 (memory_store の validation で必須)
-    from core.tag_registry import register_standard_tags
-    register_standard_tags()
+    # 段階11-B Phase 5 Step 5.1: register_standard_tags() 呼出撤去。
+    # iku は起動時に登録済 tag ゼロ = 白紙 onboarding 状態。最初の memory_store
+    # 呼出で inline register 発火、iku が自己分節の tag を発明する設計。
+    # STANDARD_TAGS 辞書 / register_standard_tags() 関数自体は tag_registry.py
+    # に残してある (iku が self_modify で復活させたい時の handle、撤去 doc 価値)。
+    # 既存 smoke / 実運用で標準タグが必要なら、プロファイル起動前に手動で
+    # registered_tags.json を seed することで対応 (新プロファイル clean start は
+    # PLAN §5 Step 5.3 の手順準拠)。
     print()
 
     state = load_state()

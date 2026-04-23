@@ -110,8 +110,11 @@ def _tool_memory_store(args):
     if not is_tag_registered(network):
         rules = args.get("rules")
         if not isinstance(rules, dict):
+            # 段階11-B Phase 5 Step 5.2: hint を例示表現に一般化 (schema 拡張は
+            # Phase 1 で c_gradual_source、Phase 2' で write_protected を追加済。
+            # 最小書式は beta_plus / bitemporal の 2 key、iku は必要に応じて拡張可)
             return (f"エラー: 未登録タグ '{network}' には rules 必須 "
-                    "({\"beta_plus\": bool, \"bitemporal\": bool})")
+                    "(例: {\"beta_plus\": bool, \"bitemporal\": bool})")
         display_format = args.get("display_format", "") or ""
         from core.tag_registry import register_tag
         try:
