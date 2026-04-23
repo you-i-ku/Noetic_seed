@@ -36,7 +36,7 @@ def _build_specs(tools_dict: dict) -> list:
         ToolSpec(
             name="search_memory",
             description=(
-                "記憶ネットワーク (標準: wm / experience / opinion / entity、動的拡張可) を "
+                "記憶ネットワーク (動的拡張可) を "
                 "ベクトル + キーワード検索する。"
             ),
             input_schema={
@@ -64,14 +64,14 @@ def _build_specs(tools_dict: dict) -> list:
             name="memory_store",
             description=(
                 "記憶ネットワークに新エントリを保存する。network で保存先のタグ名を指定 "
-                "(標準: wm / experience / opinion / entity、動的拡張可)。"
+                "(動的拡張可、未登録タグは rules={beta_plus:bool, bitemporal:bool} 必須)。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "network": {
                         "type": "string",
-                        "description": "保存先のタグ名 (標準: wm/experience/opinion/entity、未登録タグは段階7 Step 5 で inline 登録対応)",
+                        "description": "保存先のタグ名 (動的拡張可、未登録タグは rules 必須で inline 登録)",
                     },
                     "content": {
                         "type": "string",
