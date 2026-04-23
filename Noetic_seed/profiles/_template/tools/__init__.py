@@ -47,7 +47,7 @@ TOOLS = {
     "secret_read":  {"desc": "sandbox/secrets/ に保存された秘密情報を読む（承認不要）。引数: name=secret名【name= を使う。read_file の path= と混同しないこと】", "func": secret_read},
     "secret_write": {"desc": "sandbox/secrets/ に秘密情報を書き込む（承認必要）。引数: name=secret名 content=内容 intent=目的 [message=外部への説明]", "func": secret_write},
     "auth_profile_info": {"desc": "認証プロファイルのメタ情報を取得。name未指定で一覧、name指定で詳細（機密フィールドtoken/key/secret等は隠される）。引数: [name=プロファイル名]", "func": auth_profile_info},
-    "inspect_wm_view": {"desc": "指定視点（viewer / viewer_type）で WM をフィルタ表示する read-only メタ認知ツール。自己視点に囚われたくない時や、他者 entity から見た自己を覗きたい時に能動起動する。引数: [viewer=self/entity_id default=self] [viewer_type=actual/imagined/past_self/future_self default=actual]。副作用なし、承認不要。", "func": _inspect_wm_view},
+    "inspect_wm_view": {"desc": "視点属性 (viewer, viewer_type) で WM を絞り込んで表示する。引数: [viewer=self/entity_id default=self] [viewer_type=actual/imagined/past_self/future_self default=actual]。read-only。", "func": _inspect_wm_view},
 }
 
 # === ツール段階解放テーブル ===
