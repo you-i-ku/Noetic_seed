@@ -71,7 +71,11 @@ def memory_store(network: str, content: str, metadata: dict = None,
                  perspective: Optional[Perspective] = None, *,
                  keywords: Optional[list] = None,
                  contextual_description: Optional[str] = None,
-                 _auto_metadata: bool = True) -> dict:
+                 _auto_metadata: bool = True,
+                 _state: Optional[dict] = None,
+                 _reconcile_embed_fn: Optional[object] = None,
+                 _reconcile_cosine_fn: Optional[object] = None,
+                 _reconcile_llm_fn: Optional[object] = None) -> dict:
     """記憶を保存。origin=生成きっかけ、source_context=根拠の出処。
 
     段階11-A: perspective kwarg を専用キーとして entry に昇格 (metadata と並列、
@@ -123,6 +127,29 @@ def memory_store(network: str, content: str, metadata: dict = None,
     }
     with open(_network_file(network), "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    # 段階11-B Phase 3 Step 3.3: reconciliation hook (state 渡された時のみ発火)
+    # bitemporal 凍結原則: 既存 fact は書き換えない、矛盾は EC 誤差として state に記録
+    # (reflect 継続原則、exception は catch して memory 書込を止めない)
+    if _state is not None:
+        try:
+            from core.reconciliation import check_on_write
+            # embed_fn / cosine_fn: 明示指定なしで _vector_ready なら自動選択
+            # (Tier 2/3 を実運用で有効化、test では mock を明示 pass)
+            _ef = _reconcile_embed_fn
+            _cf = _reconcile_cosine_fn
+            if _ef is None and _vector_ready:
+                _ef = _embed_sync
+                _cf = cosine_similarity
+            check_on_write(
+                entry, _state,
+                embed_fn=_ef,
+                cosine_fn=_cf,
+                llm_call_fn=_reconcile_llm_fn,
+            )
+        except Exception as e:
+            print(f"  [reconciliation] skip (error: {e})")
+
     return entry
 
 

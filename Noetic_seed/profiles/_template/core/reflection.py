@@ -283,6 +283,7 @@ def _parse_reflection(text: str, state: dict) -> dict:
                     "opinion", content, {"confidence": confidence},
                     origin="reflection", source_context="self_inference",
                     perspective=default_self_perspective(),
+                    _state=state,  # 段階11-B Phase 3: reconciliation hook (矛盾検出 → EC 誤差)
                 )
                 opinions.append(entry)
                 print(f"  [reflection] opinion: {content[:60]} (conf={confidence})")
@@ -312,6 +313,7 @@ def _parse_reflection(text: str, state: dict) -> dict:
                             "entity", desc, {"entity_name": name},
                             origin="reflection", source_context="self_inference",
                             perspective=default_self_perspective(),
+                            _state=state,  # 段階11-B Phase 3: reconciliation hook (矛盾検出 → EC 誤差)
                         )
                         entities.append(entry)
                         print(f"  [reflection] entity new: {name} = {desc[:60]}")

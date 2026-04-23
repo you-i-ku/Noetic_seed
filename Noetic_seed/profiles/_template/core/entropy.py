@@ -134,7 +134,20 @@ def calc_pressure_signals(state: dict, spiral: dict | None = None) -> dict:
     # Active Inference epistemic value (-log p(obs|model)) の正規化近似。
     # 0-100 scale の prediction_error を 0-1 に正規化し既存 w_* パターンに乗せる。
     last_pred_err = float(state.get("last_prediction_error", 0))
-    signals["prediction_error"] = (last_pred_err / 100.0) * ep["w_prediction_error"]
+    base_pe = last_pred_err / 100.0
+
+    # 段階11-B Phase 3 Step 3.4: reconciliation 由来 EC 誤差を同じ pressure signal に merge。
+    # 共通 weight w_prediction_error を流用 (新規マジックナンバー 0)、別 w_contradiction は
+    # 導入しない (PLAN §6-4 の「情報理論的に pressure 1 本に集約」決定通り)。
+    # 直近 5 件 magnitude 平均を加算 (段階10 _is_match の 5 件 bootstrap と整合)、cap 1.0。
+    recon_hist = state.get("prediction_error_history_by_source", {}).get("reconciliation", [])
+    recon_pe = 0.0
+    if recon_hist:
+        recent = [float(h.get("magnitude", 0.0)) for h in recon_hist[-5:]]
+        recon_pe = sum(recent) / max(1, len(recent))
+    combined_pe = min(1.0, base_pe + recon_pe)
+
+    signals["prediction_error"] = combined_pe * ep["w_prediction_error"]
 
     if spiral:
         signals["stagnation"] = max(0, 0.3 - spiral.get("magnitude", 0)) * ep["w_stagnation"]
