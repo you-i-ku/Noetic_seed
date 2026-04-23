@@ -383,6 +383,7 @@ def test_post_hook_adds_ups_unresolved_pending():
         if p.get("type") == "pending" and p.get("semantic_merge") is True
     ]
     entry = ups_unresolved[0] if ups_unresolved else {}
+    mp = entry.get("match_pattern") or {}
     return all([
         _assert(len(ups_unresolved) == 1,
                 f"UPS semantic_merge pending 1 件: {len(ups_unresolved)}"),
@@ -394,6 +395,11 @@ def test_post_hook_adds_ups_unresolved_pending():
                 "expected_channel=self (内省 pending)"),
         _assert(abs(entry.get("gap", 0) - 0.2) < 0.01,
                 "gap=0.2 (E3=80 由来)"),
+        # 段階11-C hotfix: match_pattern 対称化 (段階11-A hotfix 契約追随)
+        _assert(mp.get("source_action") == "reflect",
+                "match_pattern.source_action=reflect (対称化)"),
+        _assert(mp.get("expected_channel") == "self",
+                "match_pattern.expected_channel=self (対称化)"),
     ])
 
 

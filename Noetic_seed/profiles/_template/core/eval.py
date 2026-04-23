@@ -406,7 +406,16 @@ def update_unresolved_intents(
             semantic_merge=True,
             # 段階10.5 Fix 2: observable 類似度で消化 (content_observable 比較、
             # LLM 生成 intent 文面微差で merge すり抜ける現象を根治)
-            match_pattern={"observable_similarity_threshold": 0.7},
+            # 段階11-C hotfix (本 commit): 段階11-A hotfix `3725db3` で
+            # _matches に追加された「source_action / expected_channel 両方
+            # 未指定は自動消化対象外」契約への対称追随 (Fix 2 時点の実装漏れ)。
+            # 消化実効率向上 (content_observable が機械生成ラベルで embedding
+            # match が弱い件) は content_intent 併用の別 commit で対応。
+            match_pattern={
+                "source_action": source_action,
+                "expected_channel": "self",
+                "observable_similarity_threshold": 0.7,
+            },
         )
 
     # 動的容量管理: UPS v2 semantic_merge=True 系のみ対象、gap 上位 N 保持
