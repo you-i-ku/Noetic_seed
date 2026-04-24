@@ -12,6 +12,11 @@ import subprocess
 import sys
 import pathlib
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+except (AttributeError, OSError):
+    pass
+
 ROOT = pathlib.Path(__file__).parent
 VENV_PY = ROOT / ".venv/Scripts/python.exe"
 PROFILE = ROOT / "profiles/_template"
