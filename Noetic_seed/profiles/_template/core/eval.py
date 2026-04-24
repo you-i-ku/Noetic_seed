@@ -406,15 +406,17 @@ def update_unresolved_intents(
             semantic_merge=True,
             # 段階10.5 Fix 2: observable 類似度で消化 (content_observable 比較、
             # LLM 生成 intent 文面微差で merge すり抜ける現象を根治)
-            # 段階11-C hotfix (本 commit): 段階11-A hotfix `3725db3` で
-            # _matches に追加された「source_action / expected_channel 両方
-            # 未指定は自動消化対象外」契約への対称追随 (Fix 2 時点の実装漏れ)。
-            # 消化実効率向上 (content_observable が機械生成ラベルで embedding
-            # match が弱い件) は content_intent 併用の別 commit で対応。
+            # 段階11-A hotfix `3725db3`: 「source_action / expected_channel
+            # 両方未指定は自動消化対象外」契約導入。
+            # 段階11-C hotfix (2026-04-24、案D): _matches の比較方法を
+            # pending (ラベル|本文) vs tool (ラベル|出力) の連結 embedding に
+            # 拡張したことに伴い、threshold を 0.7 → 0.75 に引上げ
+            # (simulate_prescription.py の実ログ検証で 23/23 pair が
+            # 0.75 超、誤消化余地は限定的と確認)。
             match_pattern={
                 "source_action": source_action,
                 "expected_channel": "self",
-                "observable_similarity_threshold": 0.7,
+                "observable_similarity_threshold": 0.75,
             },
         )
 
