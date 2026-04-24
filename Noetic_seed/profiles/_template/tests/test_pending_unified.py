@@ -379,6 +379,38 @@ def test_prune_dynamic_n_from_log():
                    f"log 10 件 → 上位 3 残る (実={len(state['pending'])})")
 
 
+def test_prune_semantic_merge_excluded_from_cap():
+    """段階11-C hotfix (2026-04-24、案 b): semantic_merge=True 系 pending は
+    dynamic_n cap 対象外 (繰り返しの熱を attempts に溜めるための時間持続性)。"""
+    print("== pending_prune: semantic_merge=True は dynamic_n 対象外 ==")
+    state = _fresh_state()
+    state["log"] = [{"cycle": i} for i in range(10)]  # cap=3 になるログ量
+    # semantic_merge=True を 5 件 (本来なら cap=3 で 2 件落ちるはず)
+    for gap in [0.9, 0.7, 0.5, 0.3, 0.1]:
+        pending_add(
+            state, source_action="reflection",
+            expected_observation=f"g{gap}", lag_kind="cycles",
+            content_intent=f"gap{gap}", cycle_id=0, channel="self",
+            initial_gap=gap, semantic_merge=True,
+        )
+    # semantic_merge=False を 5 件 (こちらは cap=3 で 2 件落ちる)
+    for gap in [0.8, 0.6, 0.4, 0.2, 0.05]:
+        pending_add(
+            state, source_action="output_display",
+            expected_observation=f"ext{gap}", lag_kind="cycles",
+            content_intent=f"ext{gap}", cycle_id=0, channel="device",
+            initial_gap=gap, semantic_merge=False,
+        )
+    pending_prune(state, current_cycle=1, dynamic_n=None)
+    sm_count = sum(1 for p in state["pending"] if p.get("semantic_merge") is True)
+    ext_count = sum(1 for p in state["pending"]
+                    if p.get("source_action") == "output_display")
+    return all([
+        _assert(sm_count == 5, f"semantic_merge=True 5 全残 (実={sm_count})"),
+        _assert(ext_count == 3, f"外部系は cap=3 で 3 残 (実={ext_count})"),
+    ])
+
+
 def test_prune_ignores_non_ups():
     print("== pending_prune: UPS v2 以外 (旧形式) は touch しない ==")
     state = _fresh_state()
@@ -633,6 +665,8 @@ if __name__ == "__main__":
         ("prune: time 期限切れ", test_prune_time_expired),
         ("prune: dynamic_n 上位 N", test_prune_dynamic_n_top),
         ("prune: dynamic_n None → log 長", test_prune_dynamic_n_from_log),
+        ("prune: semantic_merge は cap 対象外",
+         test_prune_semantic_merge_excluded_from_cap),
         ("prune: 旧形式 skip", test_prune_ignores_non_ups),
         ("recalc: 全 UPS v2 再計算", test_recalc_priorities),
         ("recalc: 旧形式 skip", test_recalc_skips_non_ups),

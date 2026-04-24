@@ -15,8 +15,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # 重い memory 依存 (archive 読込 + embedding) を外すためのスタブ
+# 段階11-C G-lite Phase 1: get_relevant_memories に use_links/link_depth/link_top_n
+# の keyword-only 引数追加に伴い、mock 側も **kwargs で受け流す。
 import core.memory as _memory_mod
-_memory_mod.get_relevant_memories = lambda state, limit=8: []
+_memory_mod.get_relevant_memories = lambda state, limit=8, **kwargs: []
 _memory_mod.format_memories_for_prompt = lambda mems, max_chars=2000: ""
 
 from core.prompt import build_prompt_propose

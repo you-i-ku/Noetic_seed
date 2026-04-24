@@ -97,6 +97,7 @@ def make_approval_callback(
     timeout_sec: int = 300,
     request_approval_fn: Optional[Callable[[str, str, int], bool]] = None,
     set_paused_fn: Optional[Callable[[bool], None]] = None,
+    auto_approve_all: bool = False,
 ) -> ApprovalCallback:
     """ConversationRuntime に渡す approval_callback を生成。
 
@@ -108,6 +109,12 @@ def make_approval_callback(
             ws_server.request_approval を遅延 import。
         set_paused_fn: pause 操作関数 (テスト注入用)。None で
             ws_server.set_paused を遅延 import。
+        auto_approve_all: True で全 tool 呼出を無条件 approve する
+            smoke util (settings.approval.auto_approve_all)。pause / UI
+            request は一切発動しない。実運用では False 維持。smoke 3 段目
+            等のモニタ負荷軽減時のみ True にする (破壊的ツールも bypass
+            するため smoke 以外で使用しない前提)。HITL → HOTL → HOOTL
+            軌跡の最初の一歩、将来 tool 分類ベースの段階承認へ展開予定。
 
     Returns:
         signature (tool_name, tool_input, pre_hook_messages) -> bool
@@ -129,6 +136,10 @@ def make_approval_callback(
         tool_input: dict,
         pre_hook_messages: list,
     ) -> bool:
+        if auto_approve_all:
+            print(f"  [approval] auto-approve (smoke util): {tool_name}")
+            return True
+
         preview = _format_preview(tool_name, tool_input,
                                   pre_hook_messages or [])
 

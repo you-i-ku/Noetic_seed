@@ -322,7 +322,7 @@ def test_ups_retro_e2_flow():
 # ============================================================
 
 def test_pending_prune_mixed_policies():
-    print("== pending_prune: time/dynamic_n/protected の同時淘汰 ==")
+    print("== pending_prune: protected / time / dynamic_n / semantic_merge 混在 ==")
     state = _fresh_state()
     state["log"] = [{"cycle": i} for i in range(10)]  # dynamic_n = 3
 
@@ -337,7 +337,8 @@ def test_pending_prune_mixed_policies():
                 content_intent="古い発話", cycle_id=0, channel="device",
                 expiry_policy="time", ttl_cycles=5,
                 retro_log_entry_id="old")
-    # dynamic_n 対象: 4 件 (gap 0.9, 0.5, 0.3, 0.1)
+    # 段階11-C hotfix: semantic_merge=True 系は dynamic_n cap 対象外に変更。
+    # 4 件投入しても全て残存することを検証。
     for gap in [0.9, 0.5, 0.3, 0.1]:
         pending_add(state, source_action="reflection",
                     expected_observation="x", lag_kind="cycles",
@@ -351,9 +352,9 @@ def test_pending_prune_mixed_policies():
         _assert("living_presence" in remaining_sources, "protected 残る"),
         _assert("output_display" not in remaining_sources,
                 "time expired 削除"),
-        _assert(remaining_sources.count("reflection") == 3,
-                f"dynamic_n=3 で上位 3 残る (実={remaining_sources.count('reflection')})"),
-        _assert(dropped >= 2, f"削除 >= 2 (実={dropped})"),
+        _assert(remaining_sources.count("reflection") == 4,
+                f"semantic_merge=True は cap 対象外で 4 全残 (実={remaining_sources.count('reflection')})"),
+        _assert(dropped == 1, f"削除は time のみ 1 件 (実={dropped})"),
     ])
 
 
@@ -383,6 +384,7 @@ def test_post_hook_adds_ups_unresolved_pending():
         if p.get("type") == "pending" and p.get("semantic_merge") is True
     ]
     entry = ups_unresolved[0] if ups_unresolved else {}
+    mp = entry.get("match_pattern") or {}
     return all([
         _assert(len(ups_unresolved) == 1,
                 f"UPS semantic_merge pending 1 件: {len(ups_unresolved)}"),
@@ -394,6 +396,11 @@ def test_post_hook_adds_ups_unresolved_pending():
                 "expected_channel=self (内省 pending)"),
         _assert(abs(entry.get("gap", 0) - 0.2) < 0.01,
                 "gap=0.2 (E3=80 由来)"),
+        # 段階11-C hotfix: match_pattern 対称化 (段階11-A hotfix 契約追随)
+        _assert(mp.get("source_action") == "reflect",
+                "match_pattern.source_action=reflect (対称化)"),
+        _assert(mp.get("expected_channel") == "self",
+                "match_pattern.expected_channel=self (対称化)"),
     ])
 
 

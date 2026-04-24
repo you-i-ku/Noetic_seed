@@ -73,9 +73,21 @@ expected_fields = {
     "write_protected_count", "memory_count", "link_count", "link_grad_density",
     "reconciliation_ec_count",
 }
+# 段階11-C G-lite Phase 2 (§5 Step 2.4) 拡張: 下記 field が追加される。
+# 既存 field 全保持 = superset check、新 field は下に存在確認。
+glite_phase2_fields = {
+    "tag_count", "total_usage", "shannon_h", "pielou_evenness", "gini_simpson",
+    "link_density", "avg_degree", "clustering_coefficient", "degree_distribution",
+    "opinion_entity_count", "other_tag_count", "opinion_entity_ratio",
+    "dynamic_origin_ratio", "new_tag_usage_ratio",
+}
 _assert(
-    set(m_a.keys()) == expected_fields,
-    f"A-1 全 field 揃い (got {set(m_a.keys())})",
+    expected_fields.issubset(set(m_a.keys())),
+    f"A-1 既存 field 全保持 (backward compat、got {set(m_a.keys())})",
+)
+_assert(
+    glite_phase2_fields.issubset(set(m_a.keys())),
+    f"A-1b G-lite Phase 2 新 field 追加済 (got missing {glite_phase2_fields - set(m_a.keys())})",
 )
 _assert(m_a["cycle"] == 1, "A-2 cycle 番号 反映")
 _assert(m_a["total_registered"] == 4, f"A-3 standard 4 tag (got {m_a['total_registered']})")

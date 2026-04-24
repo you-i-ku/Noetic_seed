@@ -3,7 +3,7 @@ import re
 import random
 from core.config import SANDBOX_TOOLS_DIR, WORLD_MODEL_CFG
 from core.state import load_pref
-from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.eval import predict_result_novelty
 from core.predictor import get_predictor
 
@@ -132,7 +132,7 @@ def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tool
 def _intent_conditioned_scores(candidates: list, state: dict) -> list:
     """候補ごとに、過去の類似intent×同toolのE2加重平均を返す。"""
     log = state.get("log", [])
-    if not log or not _vector_ready:
+    if not log or not is_vector_ready():
         return [50.0] * len(candidates)
 
     past = []

@@ -416,6 +416,16 @@ def pending_prune(
             origin = int(p.get("origin_cycle", current_cycle))
             if ttl is None or (current_cycle - origin) < int(ttl):
                 survivors.append(p)
+        elif p.get("semantic_merge") is True:
+            # 段階11-C hotfix (2026-04-24、案 b): semantic_merge=True (内省系
+            # unresolved_intent) は dynamic_n cap 対象外。
+            # 経緯: cap=max(3, min(20, log_count // 5)) で序盤 cap=3 張り付き
+            # → 比較相手が毎 cycle 押し出されて re-merge できず、attempts=1 固定。
+            # 「繰り返しの熱」を attempts に溜めるためには、semantic 系 pending が
+            # 時間持続する必要がある。消化経路は ① observed (_matches 案D、
+            # commit 77607f5 で有効化) ② attempts>=50 安全弁 (上記 deprecated) に委ねる。
+            # 外部由来 (output_display / response_to_external) は従来通り cap 適用。
+            survivors.append(p)
         else:
             dynamic_candidates.append(p)
 
@@ -510,6 +520,8 @@ def _matches(
     tool_result: str,
     channel: Optional[str],
     pending: dict,
+    *,
+    cycle_id: int = 0,
 ) -> bool:
     """段階10.5 Fix 2 (案 P、PLAN §4-2): match_pattern 新構造 3 フィールドで判定。
 
@@ -524,6 +536,7 @@ def _matches(
         tool_result: tool の output 文字列。
         channel: tool args.channel (or fallback "self")。
         pending: 対象 pending entry。
+        cycle_id: 実行 cycle (案D: tool 側 observable ラベル生成に利用)。
 
     Returns:
         全条件 OK なら True。
@@ -548,14 +561,22 @@ def _matches(
         if channel != required_channel:
             return False
 
-    # 3. observable_similarity_threshold: content_observable との意味類似度判定
-    # (段階10.5 Fix 2: 旧 content_similarity_threshold から rename、比較対象を
-    # pending.content → pending.content_observable に切り替え。LLM 生成 intent
-    # 文面微差で merge すり抜ける現象を根治)
+    # 3. observable_similarity_threshold: pending 側 (ラベル|本文) と tool 側
+    # (ラベル|出力) の連結 embedding で意味類似度判定。
+    # 段階11-C hotfix (2026-04-24、案D): pending.content_observable 単独 (機械ラベル)
+    # と tool_result (自然言語) の embedding 比較は空間が乖離し実効率ほぼゼロ
+    # (smoke3_baseline で 10/23 pair しか 0.7 超えず)。tool 側も同形式の機械ラベル
+    # を生成し、両側を「ラベル | 本文」連結形にして embedding 計算することで、
+    # 機械ラベル部分が anchor となり本文の意味差を正しく反映 (23/23 pair が 0.75 超)。
     threshold = mp.get("observable_similarity_threshold")
     if threshold is not None:
-        target_text = pending.get("content_observable", "")
-        if not _sim_check(tool_result, target_text, float(threshold)):
+        tool_observable = _make_observable(tool_name, channel, cycle_id)
+        pending_side = (
+            f"{pending.get('content_observable', '')} | "
+            f"{pending.get('content_intent', '')}"
+        )
+        tool_side = f"{tool_observable} | {tool_result}"
+        if not _sim_check(pending_side, tool_side, float(threshold)):
             return False
 
     return True
@@ -575,7 +596,9 @@ def _sim_check(text_a: str, text_b: str, threshold: float) -> bool:
     if not _vector_ready:
         return False
     try:
-        vecs = _embed_sync([text_a[:200], text_b[:200]])
+        # 段階11-C hotfix (案D): 連結テキスト (ラベル|本文) を扱うため truncation 拡大。
+        # bge-m3 の上限 512 tokens に対し 400 文字は余裕内。
+        vecs = _embed_sync([text_a[:400], text_b[:400]])
         if not vecs or len(vecs) != 2:
             return False
         sim = cosine_similarity(vecs[0], vecs[1])
@@ -622,7 +645,8 @@ def try_observe_all(
         mp = p.get("match_pattern")
         if not mp:
             continue  # match_pattern なし = 明示 dismiss のみで消化
-        if _matches(mp, tool_name, tool_args, tool_result, channel, p):
+        if _matches(mp, tool_name, tool_args, tool_result, channel, p,
+                    cycle_id=cycle_id):
             candidates.append(p)
 
     if not candidates:

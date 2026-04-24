@@ -7,7 +7,7 @@ from typing import Optional
 from core.config import MEMORY_DIR, LOG_HARD_LIMIT, LOG_KEEP, SUMMARY_HARD_LIMIT, META_SUMMARY_RAW
 from core.state import load_pref, save_pref
 from core.llm import call_llm
-from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.tag_registry import is_tag_registered, list_registered_tags, get_tag_rules
 from core.perspective import Perspective, default_self_perspective
 
@@ -136,7 +136,7 @@ def memory_store(network: str, content: str, metadata: dict = None,
     if _state is not None:
         _ef = _reconcile_embed_fn
         _cf = _reconcile_cosine_fn
-        if _ef is None and _vector_ready:
+        if _ef is None and is_vector_ready():
             _ef = _embed_sync
             _cf = cosine_similarity
 
@@ -280,7 +280,7 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5,
         all_entries = [e for e in all_entries if _match(e)]
         if not all_entries:
             return []
-    if _vector_ready:
+    if is_vector_ready():
         try:
             texts = [e.get("content", "")[:400] for e in all_entries]
             vecs = _embed_sync([query] + texts)
@@ -303,10 +303,22 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5,
     return [{"score": s, **e} for s, e in scored[:limit]]
 
 
-def get_relevant_memories(state: dict, limit: int = 8) -> list:
+def get_relevant_memories(
+    state: dict,
+    limit: int = 8,
+    *,
+    use_links: bool = False,
+    link_depth: int = 1,
+    link_top_n: int = 3,
+) -> list:
     """プロンプト用: 直近intentに関連する記憶を取得。
     4ネットワーク検索 + archive の直近外部入力を合わせて返す。
-    外部入力は優先的に先頭へ入れる（外部からの会話は忘却耐性を与える）。"""
+    外部入力は優先的に先頭へ入れる（外部からの会話は忘却耐性を与える）。
+
+    段階11-C G-lite Phase 1: use_links=True で memory_links graph 経由の
+    近傍 memory を merge (既存 semantic search と併用、opt-in)。
+    use_links=False (デフォルト) で挙動不変。
+    """
     recent_intents = [e.get("intent", "") for e in state.get("log", [])[-5:] if e.get("intent")]
 
     # archive からの最近の [external] 入力を優先的に取得
@@ -329,8 +341,36 @@ def get_relevant_memories(state: dict, limit: int = 8) -> list:
         if mid and mid in seen_ids:
             continue
         merged.append(m)
+        if mid:
+            seen_ids.add(mid)  # 段階11-C Phase 1: link merge 側で seen チェックに使うため明示追加
         if len(merged) >= limit + len(external_mems):
             break
+
+    # 段階11-C G-lite Phase 1: link 経由の近傍 memory を merge (opt-in)
+    if use_links and network_mems:
+        from core.memory_links import follow_links
+        for origin_mem in network_mems[:link_top_n]:
+            origin_id = origin_mem.get("id")
+            if not origin_id:
+                continue
+            reached = follow_links(
+                origin_id,
+                depth=link_depth,
+                top_n_per_depth=link_top_n,
+            )
+            for r in reached:
+                entry = r.get("memory_entry") or {}
+                eid = entry.get("id")
+                if not eid or eid in seen_ids:
+                    continue
+                # log 集計用の内部属性付与 (§11-d 確定: prompt 表示 marker は省略)
+                entry = dict(entry)
+                entry["_retrieval_via"] = "link"
+                entry["_retrieval_depth"] = r.get("depth", 1)
+                entry["_retrieval_strength_hint"] = r.get("strength_hint", 0.0)
+                merged.append(entry)
+                seen_ids.add(eid)
+
     return merged
 
 

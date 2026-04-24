@@ -3,7 +3,7 @@ import re
 import json
 import math
 from difflib import SequenceMatcher
-from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 
 # 外界に不可逆な作用を及ぼすツール（output_display + SNSポスト系）
 EXTERNAL_ACTION_TOOLS = {
@@ -33,7 +33,7 @@ def _calc_e4(current_intent: str, current_result: str, recent_entries: list, n: 
 
     current_text = f"{current_intent} {current_result[:500]}"
 
-    if _vector_ready:
+    if is_vector_ready():
         try:
             vecs = _embed_sync([current_text] + past_texts)
             if vecs and len(vecs) == 1 + len(past_texts):
@@ -182,7 +182,7 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
             dist = 1.0 - SequenceMatcher(None, old_v, new_v).ratio()
             if dist >= 0.15:
                 # 5-c: 文字列 diff は大きいが意味的に同じ（言い換え）を弾く
-                if _vector_ready:
+                if is_vector_ready():
                     try:
                         vecs = _embed_sync([old_v[:200], new_v[:200]])
                         if vecs and len(vecs) == 2:
@@ -249,7 +249,7 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
                 recent_texts.append(combined[:500])
 
         content_novelty = 1.0
-        if recent_texts and current_intent and _vector_ready:
+        if recent_texts and current_intent and is_vector_ready():
             try:
                 current_text = f"{current_intent[:300]} {tool_result[:200]}"[:500]
                 texts = [current_text] + recent_texts[-5:]
@@ -313,7 +313,7 @@ def update_gaps_by_relevance(state: dict, result_str: str, ec: float):
         p for p in pending
         if p.get("type") == "pending" and p.get("semantic_merge") is True
     ]
-    if not unresolved or not _vector_ready or not result_str:
+    if not unresolved or not is_vector_ready() or not result_str:
         return
     try:
         from core.pending_unified import calc_priority as _ups_priority
@@ -369,19 +369,30 @@ def update_unresolved_intents(
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # semantic merge 対象: UPS v2 で semantic_merge=True な pending
+    # 段階11-C hotfix (2026-04-24): 単一閾値 0.72 → 2 分岐 (案 Y)。
+    # simulate_prescription.py 実データ検証で 0.72 単独は diff_tool ペアも
+    # 93% merge 判定 → 誤 merge リスク、かつ same_tool 連続は embedding 文面揺れで
+    # 漏れも発生しうる構造。構造 anchor (source_action 一致) の有無で 2 レーンに分け、
+    # 将来レーン別閾値 (same_tool ゆるめ / diff_tool 厳しめ等) に拡張する
+    # スロットを先置き。現時点では両レーン 0.85 (実データ推奨値) で対称動作。
+    MERGE_TH_SAME_SOURCE = 0.85   # レーン1: 同 source_action 連続の merge 閾値
+    MERGE_TH_CROSS_SOURCE = 0.85  # レーン2: 異 source_action 横断 merge 閾値
     merged = False
     candidates = [
         p for p in pending
         if p.get("type") == "pending" and p.get("semantic_merge") is True
     ]
-    if candidates and _vector_ready:
+    if candidates and is_vector_ready():
         try:
             texts = [intent[:200]] + [c.get("content_intent", "")[:200] for c in candidates]
             vecs = _embed_sync(texts)
             if vecs and len(vecs) == len(texts):
                 for i, c in enumerate(candidates):
                     sim = cosine_similarity(vecs[0], vecs[i + 1])
-                    if sim > 0.72:
+                    same_source = (c.get("source_action") == source_action)
+                    threshold = (MERGE_TH_SAME_SOURCE if same_source
+                                 else MERGE_TH_CROSS_SOURCE)
+                    if sim > threshold:
                         c["attempts"] = c.get("attempts", 1) + 1
                         c["last_cycle"] = cycle_id
                         c["gap"] = gap  # 最新 gap で上書き (回復→低→自然に選別外)
@@ -406,23 +417,26 @@ def update_unresolved_intents(
             semantic_merge=True,
             # 段階10.5 Fix 2: observable 類似度で消化 (content_observable 比較、
             # LLM 生成 intent 文面微差で merge すり抜ける現象を根治)
-            match_pattern={"observable_similarity_threshold": 0.7},
+            # 段階11-A hotfix `3725db3`: 「source_action / expected_channel
+            # 両方未指定は自動消化対象外」契約導入。
+            # 段階11-C hotfix (2026-04-24、案D): _matches の比較方法を
+            # pending (ラベル|本文) vs tool (ラベル|出力) の連結 embedding に
+            # 拡張したことに伴い、threshold を 0.7 → 0.75 に引上げ
+            # (simulate_prescription.py の実ログ検証で 23/23 pair が
+            # 0.75 超、誤消化余地は限定的と確認)。
+            match_pattern={
+                "source_action": source_action,
+                "expected_channel": "self",
+                "observable_similarity_threshold": 0.75,
+            },
         )
 
-    # 動的容量管理: UPS v2 semantic_merge=True 系のみ対象、gap 上位 N 保持
-    log_count = len(state.get("log", []))
-    n_cap = max(3, min(20, log_count // 5))
-    merge_entries = [
-        p for p in state["pending"]
-        if p.get("type") == "pending" and p.get("semantic_merge") is True
-    ]
-    merge_entries.sort(key=lambda p: -p.get("gap", 0.0))
-    keep_ids = {c["id"] for c in merge_entries[:n_cap]}
-    state["pending"] = [
-        p for p in state["pending"]
-        if not (p.get("type") == "pending" and p.get("semantic_merge") is True)
-        or p.get("id") in keep_ids
-    ]
+    # 段階11-C hotfix (2026-04-24、案 b): semantic_merge=True 系 pending の
+    # 動的容量 cap を撤去。cap=max(3, min(20, log_count // 5)) は序盤 3 張り付きで
+    # 比較相手を毎 cycle 押し出し、re-merge を構造的に阻害していた (smoke3_baseline
+    # で 15 cycle attempts=1 固定)。代わりに pending_prune 側で semantic_merge=True
+    # を dynamic_n 除外 + attempts>=50 安全弁で memory 肥大を防ぐ。
+    # 消化経路は _matches 案D (commit 77607f5) が主導。
 
 
 def apply_effective_change_to_e2(e2_raw: float, effective_change: float) -> float:
@@ -439,7 +453,7 @@ def calc_spiral_vector(state: dict, log: list, k: int = 20) -> dict:
     magnitude = 0.0
     consistency = 0.0
 
-    if len(log) < k * 2 or not _vector_ready:
+    if len(log) < k * 2 or not is_vector_ready():
         return {"magnitude": magnitude, "consistency": consistency}
 
     # --- magnitude: k期間前と今の差 ---
@@ -494,7 +508,7 @@ def calc_measured_entropy(state: dict, log: list) -> float:
 
     # 2. intent_diversity: intent埋め込みの非類似度（直近10件）
     recent_intents = [e.get("intent", "") for e in log[-10:] if e.get("intent")]
-    if len(recent_intents) >= 2 and _vector_ready:
+    if len(recent_intents) >= 2 and is_vector_ready():
         try:
             vecs = _embed_sync(recent_intents)
             if vecs and len(vecs) == len(recent_intents):
@@ -579,7 +593,7 @@ def predict_result_novelty(state: dict, tool_name: str, intent: str,
         matches = [e for e in ledger if e.get("action_key") == action_key]
         if matches:
             past_results = [e["result_snippet"] for e in matches[-3:]]
-            if past_results and _vector_ready:
+            if past_results and is_vector_ready():
                 try:
                     vecs = _embed_sync([intent[:200]] + [r[:200] for r in past_results])
                     if vecs and len(vecs) >= 2:
@@ -590,7 +604,7 @@ def predict_result_novelty(state: dict, tool_name: str, intent: str,
                     pass
             return 0.2  # embedding 失敗でも action_key 一致 = 低 novelty
 
-    if not _vector_ready or not intent:
+    if not is_vector_ready() or not intent:
         return 1.0
 
     # layer 2: 同ツールの past results とベクトル類似度

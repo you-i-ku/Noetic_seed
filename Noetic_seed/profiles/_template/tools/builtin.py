@@ -206,6 +206,11 @@ def _update_self(key: str, value: str) -> str:
             return f"エラー: nameは既に「{current}」として確定しています。変更できません"
         if not value.strip():
             return "エラー: 空のnameは設定できません"
+        # 段階11-C sub-B: identity name guard (LLM 役割語ブロック、cycle 1 汚染防止)
+        from core.identity_guard import validate_identity_name
+        ok, msg = validate_identity_name(value)
+        if not ok:
+            return msg
     state["self"][key] = value
     ds = state.setdefault("drives_state", {})
     ds["last_self_update"] = time.time()
