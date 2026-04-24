@@ -191,18 +191,6 @@ def main():
     if _p_dropped:
         print(f"  [migration] 段階10.5 Fix 2: 旧形式 pending {_p_dropped} 個を drop (content_observable 欠落)")
     save_state(state)
-    # 段階7: memory/wm.jsonl から WM materialized view を再構築
-    try:
-        from core.memory import list_records
-        from core.world_model import rebuild_wm_from_jsonl
-        wm_records = list_records("wm", limit=1000)
-        if wm_records:
-            rebuilt = rebuild_wm_from_jsonl(state["world_model"], wm_records)
-            if rebuilt:
-                print(f"  [WM] materialized view 再構築: {rebuilt} fact 取り込み")
-                save_state(state)
-    except Exception as e:
-        print(f"  [WM] materialized view rebuild スキップ (エラー: {e})")
     print(f"session: {state['session_id']}  cycle_id: {state['cycle_id']}")
     broadcast_state(state)
 

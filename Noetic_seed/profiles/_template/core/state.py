@@ -114,11 +114,6 @@ def load_state() -> dict:
             if "world_model" not in data:
                 from core.world_model import init_world_model
                 data["world_model"] = init_world_model()
-            else:
-                # 段階2 entity に段階3 追加 field (aliases/channels/last_seen) を補完
-                from core.world_model import migrate_entity_fields
-                for _ent in data["world_model"].get("entities", {}).values():
-                    migrate_entity_fields(_ent)
             # 段階10 柱 B: Predictor 自己学習の state 拡張
             if "predictor_confidence" not in data:
                 data["predictor_confidence"] = {}

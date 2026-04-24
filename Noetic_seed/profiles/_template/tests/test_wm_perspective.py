@@ -50,9 +50,7 @@ from core.perspective import default_self_perspective, make_perspective
 from core.tag_registry import register_standard_tags
 from core.world_model import (
     init_world_model,
-    rebuild_wm_from_jsonl,
     render_for_prompt,
-    store_wm_fact,
     _pkey_matches_filter,
     _pkey_str_to_perspective,
     _is_perspective_keyed_dispositions,
@@ -71,117 +69,11 @@ def _assert(cond, msg):
 
 
 # =========================================================================
-# Section 1: store_wm_fact perspective 伝播
-# =========================================================================
-print("=== Section 1: store_wm_fact perspective 伝播 ===")
-
-wm = init_world_model()
-
-# 1-A: perspective kwarg 指定 (他者視点)
-p_yuu = make_perspective(viewer="device", viewer_type="actual", confidence=0.6)
-fact_other = store_wm_fact(wm, "ゆう", "role", "確認相手",
-                           confidence=0.8, perspective=p_yuu)
-_assert(
-    "perspective" in fact_other,
-    "1-1 fact に perspective 属性",
-)
-_assert(
-    fact_other["perspective"]["viewer"] == "device",
-    "1-2 fact.perspective.viewer=device",
-)
-
-# 1-B: perspective None → default (self/actual) 補完
-fact_default = store_wm_fact(wm, "iku_self", "state", "観察中",
-                             confidence=0.9)
-_assert(
-    fact_default["perspective"]["viewer"] == "self",
-    "1-3 kwarg 未指定 → default self 補完",
-)
-_assert(
-    fact_default["perspective"]["viewer_type"] == "actual",
-    "1-4 default viewer_type=actual",
-)
-
-# 1-C: memory_store 側にも伝播 (wm.jsonl の entry に perspective 入る)
-from core.memory import list_records
-wm_recs = list_records("wm", limit=10)
-_assert(
-    any("perspective" in r for r in wm_recs),
-    "1-5 memory_store 経由の wm.jsonl entry に perspective",
-)
-# 最新 entry (iku_self, state) が self 視点
-_assert(
-    wm_recs[0]["perspective"]["viewer"] == "self",
-    "1-6 最新 wm entry perspective=self (iku_self entry)",
-)
-# 2 件目 (ゆう, role) が device 視点
-_assert(
-    wm_recs[1]["perspective"]["viewer"] == "device",
-    "1-7 2 件目 wm entry perspective=device",
-)
-
-
-# =========================================================================
-# Section 2: rebuild_wm_from_jsonl
-# =========================================================================
-print("\n=== Section 2: rebuild_wm_from_jsonl ===")
-
-# 新 entry (perspective 付) と legacy entry (perspective 欠落) を混ぜる
-legacy_rec = {
-    "id": "mem_legacy_001",
-    "network": "wm",
-    "content": "test.key1 = legacy",
-    "metadata": {
-        "entity_name": "legacy_entity",
-        "fact_key": "key1",
-        "fact_value": "legacy_val",
-        "confidence": 0.7,
-    },
-    # perspective 欠落 (段階11-A 以前)
-}
-new_rec = {
-    "id": "mem_new_001",
-    "network": "wm",
-    "content": "test.key2 = new",
-    "metadata": {
-        "entity_name": "new_entity",
-        "fact_key": "key2",
-        "fact_value": "new_val",
-        "confidence": 0.8,
-    },
-    "perspective": make_perspective(viewer="claude", viewer_type="actual", confidence=0.5),
-}
-
-wm2 = init_world_model()
-count = rebuild_wm_from_jsonl(wm2, [legacy_rec, new_rec])
-_assert(count == 2, f"2-1 2 records 処理 (got {count})")
-
-# legacy_entity の fact は default self 補完
-legacy_ent = wm2["entities"].get("ent_legacy_entity")
-_assert(legacy_ent is not None, "2-2 legacy_entity が entity 化された")
-legacy_fact = legacy_ent["facts"][0]
-_assert(
-    legacy_fact["perspective"]["viewer"] == "self",
-    "2-3 legacy rec → fact.perspective.viewer=self (default 補完)",
-)
-
-# new_entity の fact は claude 視点保持
-new_ent = wm2["entities"].get("ent_new_entity")
-_assert(new_ent is not None, "2-4 new_entity が entity 化された")
-new_fact = new_ent["facts"][0]
-_assert(
-    new_fact["perspective"]["viewer"] == "claude",
-    "2-5 new rec → fact.perspective.viewer=claude",
-)
-
-
-# =========================================================================
 # Section 4: dispositions dual support
 # =========================================================================
 print("\n=== Section 4: dispositions dual support ===")
 
 wm4 = init_world_model()
-store_wm_fact(wm4, "dummy", "k", "v")
 
 # 4-A: flat dict (段階10.5 Fix 4 δ' 形式)
 flat_disp = {"curiosity": 0.8, "skepticism": 0.3}
