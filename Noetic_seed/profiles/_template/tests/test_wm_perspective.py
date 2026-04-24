@@ -176,39 +176,6 @@ _assert(
 
 
 # =========================================================================
-# Section 3: render_for_prompt view_filter
-# =========================================================================
-print("\n=== Section 3: render_for_prompt view_filter ===")
-
-# 3 種 fact を持つ wm を用意
-wm3 = init_world_model()
-store_wm_fact(wm3, "alpha", "key_a", "self_obs",
-              perspective=make_perspective())  # self/actual
-store_wm_fact(wm3, "beta", "key_b", "yuu_obs",
-              perspective=make_perspective(viewer="device", viewer_type="actual"))
-store_wm_fact(wm3, "gamma", "key_g", "imagined_obs",
-              perspective=make_perspective(viewer="future_fear", viewer_type="imagined"))
-
-# 3-A: view_filter=None → 全視点表示
-rendered_all = render_for_prompt(wm3, view_filter=None)
-_assert("alpha" in rendered_all, "3-1 view_filter=None: alpha 表示")
-_assert("beta" in rendered_all, "3-2 view_filter=None: beta 表示")
-_assert("gamma" in rendered_all, "3-3 view_filter=None: gamma 表示")
-
-# 3-B: view_filter={"viewer": "self"} → self 視点のみ (alpha のみ)
-rendered_self = render_for_prompt(wm3, view_filter={"viewer": "self"})
-_assert("alpha" in rendered_self, "3-4 view_filter=self: alpha 表示")
-_assert("beta" not in rendered_self, "3-5 view_filter=self: beta 除外 (device 視点)")
-_assert("gamma" not in rendered_self, "3-6 view_filter=self: gamma 除外 (imagined)")
-
-# 3-C: view_filter={"viewer_type": "actual"} → 仮想除外 (alpha + beta)
-rendered_actual = render_for_prompt(wm3, view_filter={"viewer_type": "actual"})
-_assert("alpha" in rendered_actual, "3-7 view_filter=actual: alpha 表示")
-_assert("beta" in rendered_actual, "3-8 view_filter=actual: beta 表示")
-_assert("gamma" not in rendered_actual, "3-9 view_filter=actual: gamma 除外 (imagined)")
-
-
-# =========================================================================
 # Section 4: dispositions dual support
 # =========================================================================
 print("\n=== Section 4: dispositions dual support ===")
@@ -274,29 +241,6 @@ _assert(
     "ent_yuu 視点" not in rendered_pkeyed_self,
     "4-9 pkeyed+self filter: ent_yuu 除外",
 )
-
-
-# =========================================================================
-# Section 5: 後方互換 (view_filter 未指定での既存挙動)
-# =========================================================================
-print("\n=== Section 5: 後方互換 ===")
-
-# view_filter / perspective 何も指定しない既存呼び出しで同等結果
-wm5 = init_world_model()
-# perspective を積極的に指定しない (自動 default)
-store_wm_fact(wm5, "testent", "role", "テスト")
-rendered_legacy = render_for_prompt(wm5, max_entities=10)
-_assert(
-    "testent" in rendered_legacy,
-    "5-1 view_filter 未指定で既存通り entity 表示",
-)
-_assert(
-    "role=テスト" in rendered_legacy,
-    "5-2 既存通り fact 表示",
-)
-
-# wm=None / 空の場合
-_assert(render_for_prompt(None) == "", "5-3 wm=None → 空文字")
 
 
 # =========================================================================

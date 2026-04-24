@@ -166,16 +166,10 @@ def test_render_with_none():
 
 
 def test_render_empty_facts():
-    print("== render: facts 空 → '(まだ観測されていない)' 表示 (v3: channels も空) ==")
+    print("== render: wm 中身空 → 空文字 ==")
     wm = init_world_model()
     s = render_for_prompt(wm)
-    return all([
-        _assert("## 世界モデル" in s, "セクション heading"),
-        # (v3) channels 空なので「### チャネル」heading は出ない
-        _assert("### チャネル" not in s, "channels 空のためチャネル heading 省略"),
-        _assert("### 観測された存在" in s, "存在 heading"),
-        _assert("まだ観測されていない" in s, "未観測メッセージ"),
-    ])
+    return _assert(s == "", "channels/dispositions/opinions すべて空なら空文字")
 
 
 def test_render_after_ensure_channel():
@@ -186,30 +180,6 @@ def test_render_after_ensure_channel():
     return all([
         _assert("### チャネル" in s, "チャネル heading 出現"),
         _assert("device (direct)" in s, "device 行"),
-    ])
-
-
-def test_render_with_facts():
-    print("== render: facts 入り entity が表示される ==")
-    wm = init_world_model()
-    # 段階3 の事前シミュレーションとして手動で facts を注入
-    wm["entities"]["ent_yuu"] = {
-        "id": "ent_yuu",
-        "name": "ゆう",
-        "facts": [
-            {"key": "primary_channel", "value": "device"},
-            {"key": "role", "value": "developer"},
-        ],
-        "created_at": "now",
-        "updated_at": "now",
-    }
-    s = render_for_prompt(wm)
-    return all([
-        _assert("ゆう" in s, "ゆう name 表示"),
-        _assert("primary_channel=device" in s, "fact 1 表示"),
-        _assert("role=developer" in s, "fact 2 表示"),
-        _assert("まだ観測されていない" not in s,
-                "facts ありなら未観測メッセージは出ない"),
     ])
 
 
@@ -577,35 +547,6 @@ def test_sync_without_embed_fn_no_merge():
 
 
 # ============================================================
-# 段階3: render で confidence 表示
-# ============================================================
-
-def test_render_shows_confidence():
-    print("== render: fact に confidence 括弧付きで表示 ==")
-    wm = init_world_model()
-    ent = ensure_entity(wm, "ent_yuu", "ゆう")
-    add_or_update_fact(ent, "role", "developer", confidence=0.8)
-    s = render_for_prompt(wm)
-    return all([
-        _assert("role=developer(0.80)" in s or "role=developer(0.8" in s,
-                "role=developer に confidence 括弧付き"),
-    ])
-
-
-def test_render_skips_frozen_facts():
-    print("== render: valid_to 設定済 fact はスキップ ==")
-    wm = init_world_model()
-    ent = ensure_entity(wm, "ent_yuu", "ゆう")
-    add_or_update_fact(ent, "role", "developer")
-    add_or_update_fact(ent, "role", "scientist")  # 旧を凍結
-    s = render_for_prompt(wm)
-    return all([
-        _assert("role=scientist" in s, "新 fact 表示"),
-        _assert("role=developer" not in s, "凍結された旧 fact 非表示"),
-    ])
-
-
-# ============================================================
 # 実行
 # ============================================================
 
@@ -622,9 +563,8 @@ if __name__ == "__main__":
         ("get_channel: 起動直後 device も None", test_get_channel_missing),
         ("list_entities/channels", test_list_entities_and_channels),
         ("render: None", test_render_with_none),
-        ("render: 空 facts (channels も空)", test_render_empty_facts),
+        ("render: wm 中身空 → 空文字", test_render_empty_facts),
         ("(v3) render: ensure 後に channel 出現", test_render_after_ensure_channel),
-        ("render: facts 入り", test_render_with_facts),
         # 段階3: Fact schema + β+
         ("make_fact: 構造", test_make_fact_structure),
         ("β+ match 収束", test_update_fact_confidence_match_converges),
@@ -653,9 +593,6 @@ if __name__ == "__main__":
         ("sync: limit 尊重", test_sync_respects_limit),
         ("sync: resolver で類似名 merge (段階4)", test_sync_resolver_merges_similar_names),
         ("sync: embed なしは merge しない (段階4)", test_sync_without_embed_fn_no_merge),
-        # 段階3: render 拡張
-        ("render: confidence 表示", test_render_shows_confidence),
-        ("render: frozen skip", test_render_skips_frozen_facts),
     ]
     results = []
     for _label, fn in groups:

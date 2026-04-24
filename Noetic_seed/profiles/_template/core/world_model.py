@@ -499,8 +499,8 @@ def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
                       view_filter: Optional[dict] = None) -> str:
     """[世界モデル] セクションを system_prompt 用にレンダリング。
 
-    wm=None または空の場合は空文字を返す (prompt_assembly 側で
-    セクションごと省略される)。
+    wm=None または中身全部空 (channels / dispositions / opinions いずれも
+    空) の場合は空文字を返す (prompt_assembly 側でセクションごと省略)。
     段階3: 各 fact に confidence 値を括弧で付与。
     段階10.5 Fix 4 δ' (PLAN §6-2 準拠): opinions / dispositions を追加
     セクションで表示して「構造化自己認識」を完成させる。
@@ -525,37 +525,6 @@ def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
         lines.append("### チャネル")
         for c in channels:
             lines.append(f"- {c['id']} ({c['type']})")
-
-    # entities サマリ (facts を持つ entity のみ表示)
-    entities = list_entities(wm)
-    entities_with_facts = [e for e in entities if e.get("facts")]
-    lines.append("### 観測された存在")
-    rendered_any_entity = False
-    if entities_with_facts:
-        for e in entities_with_facts[:max_entities]:
-            fact_summaries = []
-            for f in e.get("facts", [])[:3]:
-                # 凍結済 fact (valid_to 設定済) はスキップ
-                if f.get("valid_to") is not None:
-                    continue
-                # 段階11-A: view_filter 適用
-                if not _pkey_matches_filter(f.get("perspective"), view_filter):
-                    continue
-                key = f.get("key", "?")
-                val = f.get("value", "?")
-                conf = f.get("confidence")
-                if conf is not None:
-                    fact_summaries.append(f"{key}={val}({float(conf):.2f})")
-                else:
-                    fact_summaries.append(f"{key}={val}")
-            if fact_summaries:
-                lines.append(f"- {e.get('name', e['id'])}: {', '.join(fact_summaries)}")
-                rendered_any_entity = True
-        if not rendered_any_entity:
-            # view_filter 適用で fact が全部落ちた場合の明示 (debug 視認性)
-            lines.append("(この視点では観測された存在なし)")
-    else:
-        lines.append("(まだ観測されていない — 段階3 で自動登録される)")
 
     # 段階10.5 Fix 4 δ' + 段階11-A: dispositions dual support (flat / perspective-keyed)
     if dispositions:
@@ -623,4 +592,6 @@ def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
                     pass
             lines.append(f"- {content}")
 
+    if len(lines) == 1:
+        return ""
     return "\n".join(lines)
