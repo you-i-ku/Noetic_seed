@@ -4,6 +4,7 @@ import re
 from core.config import MEMORY_DIR
 from core.embedding import _vector_ready, _embed_sync, cosine_similarity
 from core.memory import memory_store, memory_update, memory_forget, memory_network_search
+from core.state import load_state
 from core.tag_registry import is_tag_registered, list_registered_tags
 
 # 段階7: _VALID_NETWORKS 撤去 → tag_registry で動的検証
@@ -143,8 +144,17 @@ def _tool_memory_store(args):
         if relationship:
             metadata["relationship"] = relationship
 
+    # 段階11-C hotfix (2026-04-24): _state 渡し忘れ修復 (段階11-B Phase 4 実装漏れ)。
+    # 現状 _tool_memory_store は state なしで memory_store() 呼ぶため、
+    # core/memory.py:136 の `if _state is not None:` ガードで
+    # Phase 3 reconciliation + Phase 4 memory_links 自動生成が**完全スキップ**
+    # されていた。reflect 経由 memory_store (reflection.py:326,356) は state 渡しで
+    # 正しく動作、LLM 手動 memory_store tool だけ link 生成が発動しない非対称状態。
+    # smoke3 で memory_links.jsonl 未生成の一因と特定 (2026-04-24 γ 調査)。
+    state = load_state()
     entry = memory_store(network, content, metadata,
-                         origin="tool:memory_store", source_context="deliberate")
+                         origin="tool:memory_store", source_context="deliberate",
+                         _state=state)
     # 段階10 Step 4 付帯 D: Fix 5 精神で content truncation 撤去。
     # iku が保存した記憶内容を「60 字で切れた」と次 cycle で誤認するリスク回避。
     return f"記憶保存完了: [{network}] {content} (id={entry['id']})"
