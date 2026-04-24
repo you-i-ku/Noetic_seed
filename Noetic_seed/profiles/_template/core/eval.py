@@ -369,6 +369,14 @@ def update_unresolved_intents(
     now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # semantic merge 対象: UPS v2 で semantic_merge=True な pending
+    # 段階11-C hotfix (2026-04-24): 単一閾値 0.72 → 2 分岐 (案 Y)。
+    # simulate_prescription.py 実データ検証で 0.72 単独は diff_tool ペアも
+    # 93% merge 判定 → 誤 merge リスク、かつ same_tool 連続は embedding 文面揺れで
+    # 漏れも発生しうる構造。構造 anchor (source_action 一致) の有無で 2 レーンに分け、
+    # 将来レーン別閾値 (same_tool ゆるめ / diff_tool 厳しめ等) に拡張する
+    # スロットを先置き。現時点では両レーン 0.85 (実データ推奨値) で対称動作。
+    MERGE_TH_SAME_SOURCE = 0.85   # レーン1: 同 source_action 連続の merge 閾値
+    MERGE_TH_CROSS_SOURCE = 0.85  # レーン2: 異 source_action 横断 merge 閾値
     merged = False
     candidates = [
         p for p in pending
@@ -381,7 +389,10 @@ def update_unresolved_intents(
             if vecs and len(vecs) == len(texts):
                 for i, c in enumerate(candidates):
                     sim = cosine_similarity(vecs[0], vecs[i + 1])
-                    if sim > 0.72:
+                    same_source = (c.get("source_action") == source_action)
+                    threshold = (MERGE_TH_SAME_SOURCE if same_source
+                                 else MERGE_TH_CROSS_SOURCE)
+                    if sim > threshold:
                         c["attempts"] = c.get("attempts", 1) + 1
                         c["last_cycle"] = cycle_id
                         c["gap"] = gap  # 最新 gap で上書き (回復→低→自然に選別外)
