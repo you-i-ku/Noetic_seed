@@ -416,6 +416,16 @@ def pending_prune(
             origin = int(p.get("origin_cycle", current_cycle))
             if ttl is None or (current_cycle - origin) < int(ttl):
                 survivors.append(p)
+        elif p.get("semantic_merge") is True:
+            # 段階11-C hotfix (2026-04-24、案 b): semantic_merge=True (内省系
+            # unresolved_intent) は dynamic_n cap 対象外。
+            # 経緯: cap=max(3, min(20, log_count // 5)) で序盤 cap=3 張り付き
+            # → 比較相手が毎 cycle 押し出されて re-merge できず、attempts=1 固定。
+            # 「繰り返しの熱」を attempts に溜めるためには、semantic 系 pending が
+            # 時間持続する必要がある。消化経路は ① observed (_matches 案D、
+            # commit 77607f5 で有効化) ② attempts>=50 安全弁 (上記 deprecated) に委ねる。
+            # 外部由来 (output_display / response_to_external) は従来通り cap 適用。
+            survivors.append(p)
         else:
             dynamic_candidates.append(p)
 

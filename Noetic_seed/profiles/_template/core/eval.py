@@ -420,20 +420,12 @@ def update_unresolved_intents(
             },
         )
 
-    # 動的容量管理: UPS v2 semantic_merge=True 系のみ対象、gap 上位 N 保持
-    log_count = len(state.get("log", []))
-    n_cap = max(3, min(20, log_count // 5))
-    merge_entries = [
-        p for p in state["pending"]
-        if p.get("type") == "pending" and p.get("semantic_merge") is True
-    ]
-    merge_entries.sort(key=lambda p: -p.get("gap", 0.0))
-    keep_ids = {c["id"] for c in merge_entries[:n_cap]}
-    state["pending"] = [
-        p for p in state["pending"]
-        if not (p.get("type") == "pending" and p.get("semantic_merge") is True)
-        or p.get("id") in keep_ids
-    ]
+    # 段階11-C hotfix (2026-04-24、案 b): semantic_merge=True 系 pending の
+    # 動的容量 cap を撤去。cap=max(3, min(20, log_count // 5)) は序盤 3 張り付きで
+    # 比較相手を毎 cycle 押し出し、re-merge を構造的に阻害していた (smoke3_baseline
+    # で 15 cycle attempts=1 固定)。代わりに pending_prune 側で semantic_merge=True
+    # を dynamic_n 除外 + attempts>=50 安全弁で memory 肥大を防ぐ。
+    # 消化経路は _matches 案D (commit 77607f5) が主導。
 
 
 def apply_effective_change_to_e2(e2_raw: float, effective_change: float) -> float:
