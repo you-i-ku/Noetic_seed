@@ -89,7 +89,6 @@ def build_world_model_section(world_model: Optional[dict] = None,
     段階11-A: system_prompt 用は view_filter={"viewer": "self"} を指定して
     self 視点のみをデフォルトで表示 (attributed/imagined は prompt に混入させない、
     ゆう persona 吸収抑制の要)。
-    iku 能動切替は inspect_wm_view tool 経由 (P2 affordance)、prompt 側では強制。
     """
     from core.world_model import render_for_prompt
     opinions = None

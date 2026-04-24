@@ -225,7 +225,7 @@ def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
 
     段階11-A:
       - view_filter kwarg 追加 (perspective filter)
-        None → 全視点表示 (debug / inspect_wm_view の default/free case)
+        None → 全視点表示 (debug / free case)
         {"viewer": "self"} → self 視点のみ (system_prompt での default)
         {"viewer_type": "actual"} → 仮想視点除外
       - dispositions の dual support: flat dict (段階10.5 既存) と
