@@ -7,7 +7,7 @@ from typing import Optional
 from core.config import MEMORY_DIR, LOG_HARD_LIMIT, LOG_KEEP, SUMMARY_HARD_LIMIT, META_SUMMARY_RAW
 from core.state import load_pref, save_pref
 from core.llm import call_llm
-from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.tag_registry import is_tag_registered, list_registered_tags, get_tag_rules
 from core.perspective import Perspective, default_self_perspective
 
@@ -136,7 +136,7 @@ def memory_store(network: str, content: str, metadata: dict = None,
     if _state is not None:
         _ef = _reconcile_embed_fn
         _cf = _reconcile_cosine_fn
-        if _ef is None and _vector_ready:
+        if _ef is None and is_vector_ready():
             _ef = _embed_sync
             _cf = cosine_similarity
 
@@ -280,7 +280,7 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5,
         all_entries = [e for e in all_entries if _match(e)]
         if not all_entries:
             return []
-    if _vector_ready:
+    if is_vector_ready():
         try:
             texts = [e.get("content", "")[:400] for e in all_entries]
             vecs = _embed_sync([query] + texts)

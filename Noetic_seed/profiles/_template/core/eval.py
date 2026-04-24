@@ -3,7 +3,7 @@ import re
 import json
 import math
 from difflib import SequenceMatcher
-from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 
 # 外界に不可逆な作用を及ぼすツール（output_display + SNSポスト系）
 EXTERNAL_ACTION_TOOLS = {
@@ -33,7 +33,7 @@ def _calc_e4(current_intent: str, current_result: str, recent_entries: list, n: 
 
     current_text = f"{current_intent} {current_result[:500]}"
 
-    if _vector_ready:
+    if is_vector_ready():
         try:
             vecs = _embed_sync([current_text] + past_texts)
             if vecs and len(vecs) == 1 + len(past_texts):
@@ -182,7 +182,7 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
             dist = 1.0 - SequenceMatcher(None, old_v, new_v).ratio()
             if dist >= 0.15:
                 # 5-c: 文字列 diff は大きいが意味的に同じ（言い換え）を弾く
-                if _vector_ready:
+                if is_vector_ready():
                     try:
                         vecs = _embed_sync([old_v[:200], new_v[:200]])
                         if vecs and len(vecs) == 2:
@@ -249,7 +249,7 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
                 recent_texts.append(combined[:500])
 
         content_novelty = 1.0
-        if recent_texts and current_intent and _vector_ready:
+        if recent_texts and current_intent and is_vector_ready():
             try:
                 current_text = f"{current_intent[:300]} {tool_result[:200]}"[:500]
                 texts = [current_text] + recent_texts[-5:]
@@ -313,7 +313,7 @@ def update_gaps_by_relevance(state: dict, result_str: str, ec: float):
         p for p in pending
         if p.get("type") == "pending" and p.get("semantic_merge") is True
     ]
-    if not unresolved or not _vector_ready or not result_str:
+    if not unresolved or not is_vector_ready() or not result_str:
         return
     try:
         from core.pending_unified import calc_priority as _ups_priority
@@ -382,7 +382,7 @@ def update_unresolved_intents(
         p for p in pending
         if p.get("type") == "pending" and p.get("semantic_merge") is True
     ]
-    if candidates and _vector_ready:
+    if candidates and is_vector_ready():
         try:
             texts = [intent[:200]] + [c.get("content_intent", "")[:200] for c in candidates]
             vecs = _embed_sync(texts)
@@ -453,7 +453,7 @@ def calc_spiral_vector(state: dict, log: list, k: int = 20) -> dict:
     magnitude = 0.0
     consistency = 0.0
 
-    if len(log) < k * 2 or not _vector_ready:
+    if len(log) < k * 2 or not is_vector_ready():
         return {"magnitude": magnitude, "consistency": consistency}
 
     # --- magnitude: k期間前と今の差 ---
@@ -508,7 +508,7 @@ def calc_measured_entropy(state: dict, log: list) -> float:
 
     # 2. intent_diversity: intent埋め込みの非類似度（直近10件）
     recent_intents = [e.get("intent", "") for e in log[-10:] if e.get("intent")]
-    if len(recent_intents) >= 2 and _vector_ready:
+    if len(recent_intents) >= 2 and is_vector_ready():
         try:
             vecs = _embed_sync(recent_intents)
             if vecs and len(vecs) == len(recent_intents):
@@ -593,7 +593,7 @@ def predict_result_novelty(state: dict, tool_name: str, intent: str,
         matches = [e for e in ledger if e.get("action_key") == action_key]
         if matches:
             past_results = [e["result_snippet"] for e in matches[-3:]]
-            if past_results and _vector_ready:
+            if past_results and is_vector_ready():
                 try:
                     vecs = _embed_sync([intent[:200]] + [r[:200] for r in past_results])
                     if vecs and len(vecs) >= 2:
@@ -604,7 +604,7 @@ def predict_result_novelty(state: dict, tool_name: str, intent: str,
                     pass
             return 0.2  # embedding 失敗でも action_key 一致 = 低 novelty
 
-    if not _vector_ready or not intent:
+    if not is_vector_ready() or not intent:
         return 1.0
 
     # layer 2: 同ツールの past results とベクトル類似度

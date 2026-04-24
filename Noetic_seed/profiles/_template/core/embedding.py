@@ -76,6 +76,22 @@ def cosine_similarity(a: list, b: list) -> float:
 # === ベクトル初期化状態 ===
 _vector_ready = False
 
+
+def is_vector_ready() -> bool:
+    """bge-m3 ONNX 初期化済みか返す (関数経由で呼出時の最新値を返す)。
+
+    段階11-C hotfix (2026-04-24、犯人 C): 他モジュールで
+    `from core.embedding import _vector_ready` していたため、Python の
+    import スナップショット仕様で import 時の False が固定化されていた。
+    `_init_vector()` が後で True に更新しても import 先には反映されず、
+    memory.py の link 生成経路 (`if _vector_ready:`) が永遠に False 分岐
+    → generate_links_for に embed_fn=None で渡る → early return で
+    memory_links.jsonl が 11-B Phase 4 以降一度も生成されなかった根本原因。
+    関数経由で参照することで呼出時の最新値を取得、スナップショット封じ。
+    """
+    return _vector_ready
+
+
 def _init_vector():
     """bge-m3 ONNX埋め込みを初期化"""
     global _vector_ready

@@ -2,7 +2,7 @@
 import json
 import re
 from core.config import MEMORY_DIR
-from core.embedding import _vector_ready, _embed_sync, cosine_similarity
+from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.memory import memory_store, memory_update, memory_forget, memory_network_search
 from core.state import load_state
 from core.tag_registry import is_tag_registered, list_registered_tags
@@ -58,7 +58,7 @@ def _search_memory(args):
         return "記憶ファイルが空です"
 
     # ベクトル検索
-    if _vector_ready:
+    if is_vector_ready():
         try:
             texts = [f"{e.get('intent','')} {str(e.get('result',''))}"[:400] for e in all_entries]
             vecs = _embed_sync([query] + texts)
