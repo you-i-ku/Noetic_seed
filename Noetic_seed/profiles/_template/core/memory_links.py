@@ -197,7 +197,8 @@ def _append_link(link_entry: dict) -> None:
 
 
 def update_link_strength_used(link_id: str,
-                              current_cycle: Optional[int] = None) -> Optional[dict]:
+                              current_cycle: Optional[int] = None,
+                              prediction_error: Optional[float] = None) -> Optional[dict]:
     """retrieval で使われた link の strength を up + last_used / usage_count update。
 
     11-D Phase 3 (Physarum rule、案 Q lazy decay):
@@ -206,9 +207,18 @@ def update_link_strength_used(link_id: str,
     3. last_used / last_used_cycle / usage_count を update
     4. memory_links.jsonl に書き戻し
 
+    11-D Phase 4 (Predictive coding modulator):
+    - prediction_error (0.0-1.0) が指定されたら strength up を modulate:
+      * strength_delta = α * max(0.0, 1.0 - prediction_error)
+      * 予測誤差小 (成功) → modulator 1.0 → α そのまま
+      * 予測誤差大 (失敗) → modulator 0.0 → strength up ゼロ
+    - 段階10 経路 (entropy.record_ec_prediction_error) との接続点。
+      values は 0.0-1.0 severity スケールでそのまま使える (clamp あり)
+
     Args:
         link_id: 対象 link の id
         current_cycle: 現在の cycle 番号 (state["cycle_id"])。None なら decay skip
+        prediction_error: 0.0-1.0 の severity (段階10 magnitude)。None なら modulator なし
 
     Returns:
         更新後の link entry (見つからない場合 None)
@@ -220,6 +230,15 @@ def update_link_strength_used(link_id: str,
         lines = fpath.read_text(encoding="utf-8").splitlines()
     except Exception:
         return None
+    # 11-D Phase 4: prediction_error modulator 計算 (段階10 接続)
+    if prediction_error is not None:
+        try:
+            err = max(0.0, min(1.0, float(prediction_error)))
+        except (TypeError, ValueError):
+            err = 0.0
+        strength_delta = PHYSARUM_ALPHA * (1.0 - err)
+    else:
+        strength_delta = PHYSARUM_ALPHA
     updated_entry = None
     new_lines = []
     for line in lines:
@@ -236,8 +255,8 @@ def update_link_strength_used(link_id: str,
                 strength = _apply_lazy_decay(link, current_cycle)
             else:
                 strength = _link_strength(link)
-            # 2. strength up + cap
-            strength = min(STRENGTH_CAP, strength + PHYSARUM_ALPHA)
+            # 2. strength up + cap (Phase 4 modulator 適用済の delta を使う)
+            strength = min(STRENGTH_CAP, strength + strength_delta)
             link["strength"] = strength
             link["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if current_cycle is not None:
@@ -248,6 +267,51 @@ def update_link_strength_used(link_id: str,
     if new_lines:
         fpath.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     return updated_entry
+
+
+# ============================================================
+# 段階11-D Phase 4 Step 4.2: 新 link 探索 trigger (動的 percentile threshold)
+# ============================================================
+
+NEW_LINK_EXPLORATION_PERCENTILE = 90        # 90% percentile (Active Inference epistemic value 系)
+NEW_LINK_EXPLORATION_HISTORY_N = 20         # 過去 N cycle のサンプル
+NEW_LINK_EXPLORATION_MIN_SAMPLES = 5        # サンプル不足判定
+NEW_LINK_EXPLORATION_FALLBACK = 0.7         # サンプル不足時の初期 fallback
+
+
+def should_explore_new_links(state: dict, current_error: float) -> bool:
+    """予測誤差大時に新 link 探索を起動するか判定 (Phase 4 Step 4.2、動的 percentile)。
+
+    Session W v1 確定 (動的派生、literal 定数なし):
+    過去 N=20 cycle の prediction_error 分布の 90% percentile を threshold とする。
+    サンプル不足 (< 5) は initial fallback 0.7 (Active Inference epistemic value 系
+    + anomaly detection 分野の確立手法、固定値より状況適応性が高い)。
+
+    実 generation 発火 (LLM judge で新 link 探索) は呼び手側で判断、本関数は
+    trigger の boolean のみ返す。reflect 継続原則。
+
+    Args:
+        state: state dict (state["prediction_error_history_ec"] を参照)
+        current_error: 現在の prediction error (0.0-1.0 severity)
+
+    Returns:
+        True: 探索 trigger (current_error > 動的 threshold)
+    """
+    history = state.get("prediction_error_history_ec", []) if isinstance(state, dict) else []
+    recent = list(history)[-NEW_LINK_EXPLORATION_HISTORY_N:]
+    if len(recent) < NEW_LINK_EXPLORATION_MIN_SAMPLES:
+        threshold = NEW_LINK_EXPLORATION_FALLBACK
+    else:
+        sorted_recent = sorted(float(x) for x in recent)
+        # 90% percentile (linear interpolation 不要、近似で十分)
+        idx = int(len(sorted_recent) * (NEW_LINK_EXPLORATION_PERCENTILE / 100.0))
+        idx = min(idx, len(sorted_recent) - 1)
+        threshold = sorted_recent[idx]
+    try:
+        cur = max(0.0, min(1.0, float(current_error)))
+    except (TypeError, ValueError):
+        return False
+    return cur > threshold
 
 
 def prune_weak_links(current_cycle: int) -> int:
