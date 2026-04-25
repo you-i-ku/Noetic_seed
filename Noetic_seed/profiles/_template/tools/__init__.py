@@ -9,6 +9,7 @@ from tools.device_tools import _camera_stream, _camera_stream_stop, _screen_peek
 from tools.http_tool import http_request
 from tools.secret_tools import secret_read, secret_write
 from tools.auth_tools import auth_profile_info
+from tools.memory_graph_tool import _memory_graph
 
 TOOLS = {
     "update_self":  {"desc": "自己モデルを更新する。引数: key=キー名 value=値", "func": lambda args: _update_self(args.get("key", ""), args.get("value", ""))},
@@ -46,6 +47,7 @@ TOOLS = {
     "secret_read":  {"desc": "sandbox/secrets/ に保存された秘密情報を読む（承認不要）。引数: name=secret名【name= を使う。read_file の path= と混同しないこと】", "func": secret_read},
     "secret_write": {"desc": "sandbox/secrets/ に秘密情報を書き込む（承認必要）。引数: name=secret名 content=内容 intent=目的 [message=外部への説明]", "func": secret_write},
     "auth_profile_info": {"desc": "認証プロファイルのメタ情報を取得。name未指定で一覧、name指定で詳細（機密フィールドtoken/key/secret等は隠される）。引数: [name=プロファイル名]", "func": auth_profile_info},
+    "memory_graph": {"desc": "memory entry と self を node とした graph 構造を JSON で返す。引数: [view=ego (default)] [depth=2 (default)]", "func": _memory_graph},
 }
 
 # === ツール段階解放テーブル ===
@@ -60,8 +62,8 @@ _LV3_TOOLS = (
 )
 LEVEL_TOOLS = {
     0: {"glob_search", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio", "bash"},
-    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "reflect", "output_display", "view_image", "listen_audio", "bash"},
-    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio", "bash"},
+    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_graph", "reflect", "output_display", "view_image", "listen_audio", "bash"},
+    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "memory_graph", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio", "bash"},
     3: _LV3_TOOLS | {"bash"},
     4: _LV3_TOOLS | {"create_tool", "bash"},
     5: set(TOOLS.keys()) - {"self_modify"} | _CLAW_FILE_OPS | {"bash"},
