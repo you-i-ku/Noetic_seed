@@ -64,6 +64,7 @@ documents/
 expalanationsumple/
 UIイメージ/
 WORLD_MODEL_DESIGN/
+参考文献/
 DESIGN_ORCHESTRATION.md
 DESIGN_CLAUDE_CODE_MIGRATION.md
 V0_ARCHITECTURE.md
@@ -72,6 +73,7 @@ CLAWCODE_CAPABILITY_INVENTORY.md
 
 # External reference projects (not part of Noetic Seed)
 claw-code/
+repos/
 
 # Test / debug scripts at root
 test_vision_*.py
