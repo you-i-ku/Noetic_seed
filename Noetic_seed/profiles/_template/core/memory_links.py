@@ -3,13 +3,19 @@
 memory entry 間に関係性 link を LLM judge で生成、Zettelkasten 形式の graph 化。
 既存 entity facts (段階4) とは別 layer として並立、データ重複なし。
 
-link_type 候補: similar / contradict / elaborate / causal / temporal
+link_type 候補:
+  既存 5 type (11-B Phase 4): similar / contradict / elaborate / causal / temporal
+  追加 3 type (11-D Phase 2): co_activation / semantic / supporting
+    - semantic は本 Phase 2 から LLM judge 経由で生成可能
+    - co_activation / supporting は LINK_TYPES 受け入れのみ、実 generation hook
+      は Phase 4 (predictive coding 接続時) で実装
 confidence 閾値: 0.7 以上のみ保存 (link 爆発防止、escape hatch で tune 可)
 link 生成タイミング: memory_store 同期 + top-K=5 近傍のみ LLM judge
 (Phase 3 keywords 同期と一貫性)
 
-Phase 4 スコープ: storage のみ。retrieval (follow_links) は Phase 5 smoke
-観察後に判定 (link_grad_density > 0.2 なら拡張、< 0.2 なら保留)。
+11-D Phase 2 schema 拡張: link_entry に strength / last_used / usage_count
+3 field 追加 (Phase 3 Physarum update の前準備、§-1 v1「initial strength =
+confidence」自然 migration)。
 """
 import json
 import re
@@ -24,7 +30,12 @@ from core.config import MEMORY_DIR
 LINK_FILE_NAME = "memory_links.jsonl"
 LINK_CONFIDENCE_THRESHOLD = 0.7      # Phase 4 Step 4.2: これ未満は discard
 LINK_GENERATION_TOP_K = 5            # Phase 4 Step 4.3: 近傍 top-K のみ judge
-LINK_TYPES = ("similar", "contradict", "elaborate", "causal", "temporal")
+LINK_TYPES = (
+    # 既存 5 type (11-B Phase 4)
+    "similar", "contradict", "elaborate", "causal", "temporal",
+    # 11-D Phase 2 追加 3 type (storage 受け入れ + semantic は LLM judge 候補)
+    "co_activation", "semantic", "supporting",
+)
 
 
 def _link_file() -> Path:
@@ -33,7 +44,12 @@ def _link_file() -> Path:
 
 
 def _build_link_prompt(entry_a: dict, entry_b: dict) -> str:
-    """link 判定用 LLM prompt (PLAN Step 4.2 準拠、軽量 JSON 出力)。"""
+    """link 判定用 LLM prompt (PLAN §5 Phase 4 Step 4.2 + 11-D Phase 2 Step 2.2 準拠、軽量 JSON 出力)。
+
+    11-D Phase 2: semantic (embedding 類似ベース、5 type の generic 化) を
+    LLM judge 候補に追加。co_activation / supporting は Phase 4 hook で生成、
+    LLM judge では出さない (構造誘導の混乱回避)。
+    """
     a_kws = entry_a.get("keywords", []) or []
     b_kws = entry_b.get("keywords", []) or []
     return (
@@ -44,6 +60,7 @@ def _build_link_prompt(entry_a: dict, entry_b: dict) -> str:
         f"  tag: {entry_b.get('network', '')}, keywords: {b_kws}\n"
         "\nlink_type 候補:\n"
         "- similar: 類似内容 (重複に近い)\n"
+        "- semantic: 意味的に関連する一般概念 (similar より broader)\n"
         "- contradict: 矛盾 (Phase 3 reconciliation と補完関係)\n"
         "- elaborate: 片方が他方を詳述 / 具体化\n"
         "- causal: 原因-結果 / 行動-観察\n"
@@ -51,7 +68,7 @@ def _build_link_prompt(entry_a: dict, entry_b: dict) -> str:
         "- (none): 関係薄い → link 作らない\n"
         "\n出力は JSON のみ (他の文字を含めない):\n"
         '{"link_type": str, "confidence": float, "reason": str}\n'
-        '- link_type は上記 5 種 or "none"\n'
+        '- link_type は上記 6 種 or "none"\n'
         "- confidence 0.0-1.0、reason は 1 文"
     )
 
@@ -97,16 +114,28 @@ def _llm_judge_link(entry_a: dict, entry_b: dict,
 
 
 def _build_link_entry(from_entry: dict, to_entry: dict, verdict: dict) -> dict:
-    """link entry dict 生成 (storage 用)。11-A perspective 属性を付与。"""
+    """link entry dict 生成 (storage 用)。11-A perspective 属性を付与。
+
+    11-D Phase 2 schema 拡張 (Phase 3 Physarum update 前準備):
+    - strength: 初期値 = confidence (PLAN §-1 v1「initial strength = confidence」
+      自然 migration、Phase 3 Step 3.2 で動的更新対象)
+    - last_used: 初期値 = created_at (Phase 3 Step 3.3 で retrieval 毎に update)
+    - usage_count: 初期値 = 0 (Phase 3 Step 3.3 で retrieval 毎に increment)
+    """
     from core.perspective import default_self_perspective
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    confidence = float(verdict.get("confidence", 0.0))
     return {
         "id": f"link_{uuid.uuid4().hex[:12]}",
         "from_id": from_entry.get("id", ""),
         "to_id": to_entry.get("id", ""),
         "link_type": verdict.get("link_type", "none"),
-        "confidence": float(verdict.get("confidence", 0.0)),
+        "confidence": confidence,
+        "strength": confidence,            # 11-D Phase 2: 初期値 = confidence
         "perspective": default_self_perspective(),
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "created_at": now,
+        "last_used": now,                  # 11-D Phase 2: 初期値 = created_at
+        "usage_count": 0,                  # 11-D Phase 2: 初期値 = 0
         "reason": verdict.get("reason", ""),
     }
 
@@ -325,10 +354,16 @@ def _find_memory_entry_by_id(entry_id: str) -> Optional[dict]:
 
     G-lite では coarse (全 tag 走査、network n 増加で線形)。
     11-D Phase 7 migration で索引化を検討可。
+
+    11-D Phase 2 hotfix (Phase 1 untagged 対応の補完): UNTAGGED_NETWORK も
+    走査対象に追加。Phase 1 で memory_update / memory_forget /
+    memory_network_search / list_records は untagged 対応済だったが、
+    本関数の見落としで untagged memory が link traverse から見えなかった
+    (link 生成は走るが follow_links から hit しない非対称) のを修復。
     """
-    from core.memory import list_records
+    from core.memory import list_records, UNTAGGED_NETWORK
     from core.tag_registry import list_registered_tags
-    for tag in list_registered_tags():
+    for tag in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
         try:
             recs = list_records(tag, limit=10000)
         except Exception:

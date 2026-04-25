@@ -126,9 +126,12 @@ _assert(
 # =========================================================================
 print("=== Section C: link_type 候補と閾値 ===")
 
+# 11-D Phase 2 で LINK_TYPES を 5 → 8 type に拡張 (co_activation / semantic /
+# supporting 追加)。詳細は test_link_types_extended.py で個別検証、本 test では
+# 既存 5 type が引き続き含まれることのみ回帰確認。
 _assert(
-    set(LINK_TYPES) == {"similar", "contradict", "elaborate", "causal", "temporal"},
-    f"C-1 LINK_TYPES 5 種固定 (got {LINK_TYPES})",
+    {"similar", "contradict", "elaborate", "causal", "temporal"}.issubset(set(LINK_TYPES)),
+    f"C-1 LINK_TYPES に既存 5 type 含む (回帰確認、got {LINK_TYPES})",
 )
 _assert(LINK_CONFIDENCE_THRESHOLD == 0.7, f"C-2 confidence threshold 0.7 (PLAN 準拠)")
 _assert(LINK_GENERATION_TOP_K == 5, f"C-3 top_k 5 (PLAN 準拠)")
