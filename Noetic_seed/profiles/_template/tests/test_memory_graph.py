@@ -248,7 +248,7 @@ def test_memory_graph_default_view():
 
 
 def test_memory_graph_unsupported_view_error():
-    print("== _memory_graph: view=global / both で error response ==")
+    print("== _memory_graph: view=global / both で error response (Step 0.3 b' future_views 含む) ==")
     for v in ["global", "both", "invalid"]:
         result = _memory_graph({"view": v})
         try:
@@ -259,7 +259,37 @@ def test_memory_graph_unsupported_view_error():
             return _assert(False, f"view={v} で error key なし")
         if "supported_views" not in data:
             return _assert(False, f"view={v} で supported_views なし")
-    return _assert(True, "global/both/invalid 全部 error response")
+    # Step 0.3 b': future_views slot で Phase 4/5 降臨予定を明示
+    result_global = json.loads(_memory_graph({"view": "global"}))
+    result_both = json.loads(_memory_graph({"view": "both"}))
+    return all([
+        _assert("future_views" in result_global, "global error に future_views"),
+        _assert("global" in result_global.get("future_views", []),
+                "future_views に global 含む"),
+        _assert("both" in result_global.get("future_views", []),
+                "future_views に both 含む"),
+        _assert("future_views" in result_both, "both error にも future_views"),
+    ])
+
+
+def test_memory_graph_placeholder_args_accepted():
+    print("== _memory_graph: PLAN §6-6 placeholder args 受取 (Step 0.3 b') ==")
+    # Step 0.2 では未使用だが、PLAN §6-6 signature 互換のため reject しない
+    result = _memory_graph({
+        "view": "ego",
+        "depth": 2,
+        "focus_node": "self",
+        "cluster_count": 5,
+        "frontier_count": 3,
+    })
+    try:
+        data = json.loads(result)
+    except Exception as e:
+        return _assert(False, f"JSON parse 失敗: {e}")
+    return all([
+        _assert("error" not in data, "placeholder args で error にならない"),
+        _assert(data.get("view") == "ego", "view=ego の正常出力"),
+    ])
 
 
 def test_memory_graph_depth_arg():
@@ -315,6 +345,7 @@ if __name__ == "__main__":
         ("_memory_graph: ego view shape", test_memory_graph_ego_view_shape),
         ("_memory_graph: default view", test_memory_graph_default_view),
         ("_memory_graph: 未対応 view で error", test_memory_graph_unsupported_view_error),
+        ("_memory_graph: placeholder args (Step 0.3 b')", test_memory_graph_placeholder_args_accepted),
         ("_memory_graph: depth 引数", test_memory_graph_depth_arg),
         ("_memory_graph: 自然言語 key なし", test_memory_graph_output_no_natural_language_keys),
     ]

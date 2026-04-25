@@ -159,9 +159,12 @@ def _compute_trace(all_memory: list, memory_edges: list) -> dict:
 def _memory_graph(args: dict) -> str:
     """memory_graph tool 本体。出力は JSON 構造化 text (中立、自然言語ゼロ).
 
-    args:
-        view: "ego" (Step 0.2 MVP)、Step 0.3 で global、Step 0.4 で both 追加
+    args (PLAN §6-6 signature 互換):
+        view: "ego" (Step 0.2 で実装)、global / both は Phase 4/5 で descended
         depth: int (default 2)
+        focus_node: ego view 中心切替用 (Phase 1+ で使用、Step 0.2 では受取のみ)
+        cluster_count: global view cluster 件数上限 (Phase 5 で使用、Step 0.2 では受取のみ)
+        frontier_count: frontier 候補件数上限 (Phase 4 で使用、Step 0.2 では受取のみ)
     """
     view = args.get("view", "ego")
     try:
@@ -169,10 +172,21 @@ def _memory_graph(args: dict) -> str:
     except (ValueError, TypeError):
         depth = DEFAULT_DEPTH
 
+    # Step 0.3 (b'): PLAN §6-6 signature 互換の placeholder 引数。Step 0.2 範囲では
+    # 未使用だが受け取りだけして reject しない。view=global/both と同時降臨予定の
+    # main payload (cluster: Phase 5 / frontier: Phase 4) で実際に使われる。
+    args.get("focus_node")
+    args.get("cluster_count")
+    args.get("frontier_count")
+
     if view != "ego":
         return json.dumps({
-            "error": f"view={view} は Step 0.2 MVP 未対応 (ego のみ)。",
+            "error": (
+                f"view={view} は未対応。global は Phase 5 cluster 推定本実装と"
+                f"同時降臨予定、both は両 view 完成後に descended する設計。"
+            ),
             "supported_views": ["ego"],
+            "future_views": ["global", "both"],
         }, ensure_ascii=False, indent=2)
 
     state = load_state()
