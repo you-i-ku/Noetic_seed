@@ -607,7 +607,9 @@ def main():
             state=state,
             tools_dict=TOOLS,
             fire_cause=fire_cause,
-            allowed_tools=ctrl["allowed_tools"],
+            # Step 0.4 hotfix: prompt 用は displayed_tools (affordance 前)、
+            # parser 用は allowed_tools (affordance 後)。description は表示、選択は弾く。
+            allowed_tools=ctrl.get("displayed_tools", ctrl["allowed_tools"]),
             world_model=state.get("world_model"),
             registry=_rt_registry,
         )

@@ -378,6 +378,37 @@ def test_controller_affordance_gate_high_count_still_includes():
                    "高 count でも維持")
 
 
+def test_controller_displayed_tools_keeps_memory_graph_at_count_zero():
+    print("== controller (Step 0.4 hotfix): count=0 で displayed_tools には memory_graph 含む (description 維持、逆 bootstrap 回避) ==")
+    from core.controller import controller
+    args = _build_minimal_controller_args({"voluntary_memory_store_count": 0})
+    ctrl = controller(**args)
+    displayed = ctrl.get("displayed_tools", set())
+    allowed = ctrl.get("allowed_tools", set())
+    return all([
+        _assert("displayed_tools" in ctrl, "ctrl に displayed_tools key 存在"),
+        _assert("memory_graph" in displayed,
+                "displayed_tools (prompt 用) に memory_graph 含む = description 表示"),
+        _assert("memory_graph" not in allowed,
+                "allowed_tools (parser 用) には memory_graph 含まない = 候補却下"),
+        _assert(displayed != allowed,
+                "displayed と allowed が分離されてる"),
+    ])
+
+
+def test_controller_displayed_tools_equals_allowed_when_unlocked():
+    print("== controller (Step 0.4 hotfix): count>=1 では displayed と allowed が一致 (memory_graph 両方含む) ==")
+    from core.controller import controller
+    args = _build_minimal_controller_args({"voluntary_memory_store_count": 1})
+    ctrl = controller(**args)
+    displayed = ctrl.get("displayed_tools", set())
+    allowed = ctrl.get("allowed_tools", set())
+    return all([
+        _assert("memory_graph" in displayed, "displayed に memory_graph"),
+        _assert("memory_graph" in allowed, "allowed にも memory_graph"),
+    ])
+
+
 def test_memory_graph_output_no_natural_language_keys():
     print("== _memory_graph: 出力 key に自然言語比喩なし (中立技術用語のみ) ==")
     result = _memory_graph({"view": "ego"})
@@ -425,6 +456,8 @@ if __name__ == "__main__":
         ("Step 0.4: affordance gate OFF (count=0 → 除外)", test_controller_affordance_gate_off_excludes_memory_graph),
         ("Step 0.4: affordance gate ON (count=1 → 含む)", test_controller_affordance_gate_on_includes_memory_graph),
         ("Step 0.4: 高 count でも affordance 維持", test_controller_affordance_gate_high_count_still_includes),
+        ("Step 0.4 hotfix: count=0 で displayed != allowed (description 維持)", test_controller_displayed_tools_keeps_memory_graph_at_count_zero),
+        ("Step 0.4 hotfix: count>=1 で displayed == allowed (両方含む)", test_controller_displayed_tools_equals_allowed_when_unlocked),
         ("_memory_graph: 自然言語 key なし", test_memory_graph_output_no_natural_language_keys),
     ]
     results = []

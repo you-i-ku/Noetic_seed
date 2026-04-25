@@ -124,11 +124,18 @@ def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tool
     # 段階11-D Phase 0 Step 0.4: memory_graph affordance ガード (B2)
     # 自発 memory_store ≥ 1 経験で candidate 解除 (Y1 確定: description は据え置き、
     # 候補に出ても allowed_tools フィルタで弾かれる "中間状態" を試行で気づく設計)
+    #
+    # Step 0.4 hotfix (2026-04-26): description は tools 一覧に残す + 選択候補からのみ
+    # フィルタする PLAN §5 Step 0.4 literal を実装するため、displayed_tools (prompt 用、
+    # affordance ガード前) と allowed_tools (parser 用、ガード後) を分離。逆 bootstrap
+    # loop 回避 (description は LLM① に表示される、存在認知は可能、選択時のみ却下)。
+    displayed_tools = set(allowed)
     if state.get("voluntary_memory_store_count", 0) < 1:
         allowed.discard("memory_graph")
 
     return {
-        "allowed_tools": allowed,
+        "allowed_tools": allowed,           # parser 用 (affordance 適用後)
+        "displayed_tools": displayed_tools,  # prompt 用 (affordance 適用前)
         "tool_rank": {t: round(tool_avg[t], 1) for t in ranked},
         "tool_level": new_lv,
         "tool_level_prev": lv,

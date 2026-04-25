@@ -29,7 +29,11 @@ def should_reflect(state: dict, interval: int = 10) -> bool:
     if cycles_since >= interval:
         return True
     # 高prediction_errorで前倒し（ただし最低3サイクル間隔）
-    if cycles_since >= 3 and state.get("last_prediction_error", 0) > 0.8:
+    # 段階11-D smoke 1 hotfix (2026-04-26): main.py:883 が last_prediction_error を
+    # 0-100 scale (e2 の差分絶対値) で書き込むのに対し、本式は 0-1 scale 想定で
+    # `> 0.8` 判定だった = 段階10 (a582bc5) 以降ほぼ常時 pre-fire 発動 bug。
+    # entropy.py:137 と同じ /100.0 正規化方式に統一して 80% 相当を正しく判定。
+    if cycles_since >= 3 and (state.get("last_prediction_error", 0) / 100.0) > 0.8:
         return True
     return False
 
