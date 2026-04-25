@@ -26,6 +26,7 @@ from core.cluster_estimation import (
     estimate_clusters,
     _kmeans_simple,
     _llm_label_for_cluster,
+    compute_default_n_clusters,
 )
 
 
@@ -244,6 +245,83 @@ def test_label_empty_on_no_fn():
 
 
 # ============================================================
+# Section D: 動的 n_clusters 派生 (PLAN §11-4 マジックナンバー 0 整合)
+# ============================================================
+
+def test_compute_default_n_clusters_floor():
+    print("== compute_default_n_clusters: floor=2 (N=0/1/2/4) ==")
+    return all([
+        _assert(compute_default_n_clusters(0) == 2, "N=0 → 2 (floor)"),
+        _assert(compute_default_n_clusters(1) == 2, "N=1 → 2 (floor)"),
+        _assert(compute_default_n_clusters(2) == 2, "N=2 → 2 (sqrt=1.4 但し floor)"),
+        _assert(compute_default_n_clusters(4) == 2, "N=4 → 2 (sqrt(4)=2)"),
+    ])
+
+
+def test_compute_default_n_clusters_sqrt():
+    print("== compute_default_n_clusters: sqrt 自然増加 ==")
+    return all([
+        _assert(compute_default_n_clusters(10) == 3, "N=10 -> 3 (sqrt(10)~3.16 -> int=3)"),
+        _assert(compute_default_n_clusters(50) == 7, "N=50 -> 7 (sqrt(50)~7.07 -> int=7)"),
+        _assert(compute_default_n_clusters(100) == 10, "N=100 -> 10"),
+        _assert(compute_default_n_clusters(200) == 14, "N=200 -> 14"),
+    ])
+
+
+def test_estimate_clusters_uses_dynamic_n_when_none():
+    """n_clusters=None で動的派生 (sqrt) が走り、cluster 数が派生値に従う。"""
+    print("== estimate_clusters: n_clusters=None で動的派生 ==")
+    orig_ready = ce.is_vector_ready
+    orig_embed = ce._embed_sync
+    ce.is_vector_ready = lambda: True
+    # 4 memory → sqrt(4)=2 cluster になるはず
+    ce._embed_sync = lambda texts: [
+        [1.0, 0.0] if "猫" in t else [0.0, 1.0]
+        for t in texts
+    ]
+    try:
+        memories = [
+            {"id": f"m{i}", "content": "猫" if i < 2 else "犬"}
+            for i in range(4)
+        ]
+        result = estimate_clusters(memories, method="embedding", n_clusters=None)
+        # N=4 → sqrt(4)=2 → 2 cluster (memories 4 件、effective_k=min(2,4)=2)
+        return _assert(len(result) == 2, f"N=4 で 2 cluster (got: {len(result)})")
+    finally:
+        ce.is_vector_ready = orig_ready
+        ce._embed_sync = orig_embed
+
+
+def test_estimate_clusters_n_explicit_overrides_dynamic():
+    """n_clusters 明示指定で動的派生を override (smoke / test 用)。
+
+    N=16、動的派生なら sqrt(16)=4 だが、明示 n=2 で override → 2 cluster になる。
+    検証は override の方向性 (動的とは異なる値が反映されること)。
+    """
+    print("== estimate_clusters: n_clusters 明示で override ==")
+    orig_ready = ce.is_vector_ready
+    orig_embed = ce._embed_sync
+    ce.is_vector_ready = lambda: True
+    ce._embed_sync = lambda texts: [
+        [1.0, 0.0] if "猫" in t else [0.0, 1.0]
+        for t in texts
+    ]
+    try:
+        memories = [
+            {"id": f"m{i}", "content": "猫" if i < 8 else "犬"}
+            for i in range(16)
+        ]
+        result = estimate_clusters(memories, method="embedding", n_clusters=2)
+        return _assert(
+            len(result) == 2,
+            f"明示 n=2 で 2 cluster (動的派生 sqrt(16)=4 を override) (got: {len(result)})",
+        )
+    finally:
+        ce.is_vector_ready = orig_ready
+        ce._embed_sync = orig_embed
+
+
+# ============================================================
 # Runner
 # ============================================================
 
@@ -264,6 +342,10 @@ def run_all():
         test_label_strip_quotes_and_clip(),
         test_label_empty_on_exception(),
         test_label_empty_on_no_fn(),
+        test_compute_default_n_clusters_floor(),
+        test_compute_default_n_clusters_sqrt(),
+        test_estimate_clusters_uses_dynamic_n_when_none(),
+        test_estimate_clusters_n_explicit_overrides_dynamic(),
     ]
     passed = sum(results)
     total = len(results)

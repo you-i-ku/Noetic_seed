@@ -15,6 +15,7 @@ graceful fallback:
 - memories 空 → []
 - LLM 失敗 → label="" (cluster 自体は返す)
 """
+import math
 import uuid
 from typing import Callable, Optional
 
@@ -25,6 +26,19 @@ except ImportError:
     _numpy_available = False
 
 from core.embedding import is_vector_ready, _embed_sync
+
+
+def compute_default_n_clusters(memory_count: int) -> int:
+    """memory 数から動的に cluster 数を派生 (sqrt(N)、floor 2)。
+
+    PLAN §11-4「新規マジックナンバー 0 維持」整合 — n_clusters を固定値で持たず、
+    内部状態 (memory 蓄積量) から派生する。iku の蓄積成長と cluster 粒度が
+    連動する。
+
+    floor=2 は数学的必然 (1 cluster は cluster と呼べない)。ceiling は設けず、
+    sqrt の自然増加に任せる (smoke 4 段目で観察、必要なら導入判断)。
+    """
+    return max(2, int(math.sqrt(memory_count)))
 
 
 def _kmeans_simple(vectors, n_clusters: int, max_iter: int = 10, seed: int = 42):
@@ -104,7 +118,7 @@ def _llm_label_for_cluster(memories: list, llm_call_fn: Optional[Callable]) -> s
 def estimate_clusters(
     memories: list,
     method: str = "hybrid",
-    n_clusters: int = 5,
+    n_clusters: Optional[int] = None,
     llm_call_fn: Optional[Callable] = None,
 ) -> list[dict]:
     """memory list を cluster 化、label と membership を返す。
@@ -114,7 +128,8 @@ def estimate_clusters(
     Args:
         memories: memory entry list (各 entry に "id", "content")
         method: "embedding" / "llm" / "hybrid" (default)
-        n_clusters: K-means の cluster 数 (memories 数より多いなら自動縮小)
+        n_clusters: K-means の cluster 数。None で動的派生 (sqrt(N) 整合)。
+            明示指定で override 可 (smoke / test 用)。
         llm_call_fn: hybrid / llm method 用の LLM 呼出関数
 
     Returns:
@@ -123,6 +138,9 @@ def estimate_clusters(
     """
     if not memories:
         return []
+
+    if n_clusters is None:
+        n_clusters = compute_default_n_clusters(len(memories))
 
     if not _numpy_available or not is_vector_ready():
         return [{
