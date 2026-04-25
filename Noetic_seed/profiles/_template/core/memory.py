@@ -395,6 +395,7 @@ def get_relevant_memories(
     use_links: bool = False,
     link_depth: int = 1,
     link_top_n: int = 3,
+    tag_filter: Optional[list] = None,
 ) -> list:
     """プロンプト用: 直近intentに関連する記憶を取得。
     4ネットワーク検索 + archive の直近外部入力を合わせて返す。
@@ -403,6 +404,15 @@ def get_relevant_memories(
     段階11-C G-lite Phase 1: use_links=True で memory_links graph 経由の
     近傍 memory を merge (既存 semantic search と併用、opt-in)。
     use_links=False (デフォルト) で挙動不変。
+
+    段階11-D Phase 7 Step 7.1: tag_filter で hybrid retrieval 経路選択 (案 α、
+    `get_relevant_memories` 拡張、PLAN §6-5 の `memory_search_hybrid` 新設は
+    11-C/D の段階的集約で本関数に内包済のため不要、`feedback_no_individual_tools`
+    + `feedback_verify_memory_before_spec` 整合)。
+      tag_filter=None (default): 全 networks (UNTAGGED_NETWORK 含む) 横断、現状挙動維持
+      tag_filter=list of tags: 指定 tag のみ semantic search
+      use_links=True と組み合わせて 3 経路 (semantic / link / tag-filtered)
+      hybrid retrieval が成立。経路別 top-k=5 / 統合 top-k=8 (PLAN §11-1)。
     """
     recent_intents = [e.get("intent", "") for e in state.get("log", [])[-5:] if e.get("intent")]
 
@@ -416,7 +426,11 @@ def get_relevant_memories(
         return external_mems
 
     query = " ".join(query_parts)[:500]
-    network_mems = memory_network_search(query, limit=limit)
+    # 段階11-D Phase 7 Step 7.1: tag_filter=None で全 networks (UNTAGGED 含む)、
+    # list 指定で絞込 (memory_network_search 内部で list_registered_tags +
+    # UNTAGGED_NETWORK fallback、明示 list は list_registered_tags 経由で
+    # is_tag_registered フィルタ)
+    network_mems = memory_network_search(query, networks=tag_filter, limit=limit)
 
     # 外部入力を先頭に（重複除去）
     seen_ids = {m.get("id") for m in external_mems if m.get("id")}
