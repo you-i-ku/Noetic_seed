@@ -37,6 +37,55 @@ LINK_TYPES = (
     "co_activation", "semantic", "supporting",
 )
 
+# 11-D Phase 3 (Physarum strength update、Session W v1 確定):
+# 数式 strength[t+1] = strength[t] * (1 - β) + α * usage[t] (EMA with decay 同型)
+# 根拠: Tero et al. 2007 + Sun 2017 review + RL/EMA 典型値
+PHYSARUM_ALPHA = 0.1                 # up rate (Tero 2007 + EMA 典型値 0.01-0.1 上限)
+PHYSARUM_BETA = 0.05                 # decay rate (Tero 2007 + 半減期 14 cycle)
+STRENGTH_CAP = 1.0                   # 数学派生 saturate ceiling (α=0.1 で 10 連続 hit で saturate)
+PRUNING_STRENGTH_RATIO = 0.15        # pruning threshold = initial × 0.15 (動的相対基準)
+
+
+def _compute_pruning_idle_cycles() -> int:
+    """pruning idle cycle 閾値 = β 半減期 × 4 (動的派生、literal 定数追加なし)。
+
+    β=0.05 で ≒ 56 cycle。β を変えれば自動再計算 (ゆう ① マジックナンバー回避精神)。
+    """
+    import math
+    return int(round(math.log(0.5) / math.log(1.0 - PHYSARUM_BETA) * 4))
+
+
+def _link_strength(link: dict) -> float:
+    """link の現在 strength を取得 (Phase 2 以前 link の backward compat)。
+
+    Phase 2 以前 (11-B Phase 4 で作られた link) は strength field 欠落、
+    confidence 値にフォールバック (initial strength = confidence の自然 migration)。
+    """
+    return float(link.get("strength", link.get("confidence", 0.0)))
+
+
+def _apply_lazy_decay(link: dict, current_cycle: int) -> float:
+    """case Q lazy decay: last_used_cycle から経過 cycle 分の decay を計算 (read-only)。
+
+    数式: strength_decayed = strength * (1 - β)^elapsed_cycles
+    既存 link (last_used_cycle 欠落、Phase 2 以前) は decay skip (current cycle 扱い)、
+    Phase 3 以降の新 link は最初の access で last_used_cycle が設定される。
+
+    Returns:
+        decay 適用後の strength (link 自体は変更しない)
+    """
+    strength = _link_strength(link)
+    last_cycle = link.get("last_used_cycle")
+    if last_cycle is None:
+        return strength
+    try:
+        elapsed = max(0, int(current_cycle) - int(last_cycle))
+    except (TypeError, ValueError):
+        return strength
+    if elapsed == 0:
+        return strength
+    return strength * ((1.0 - PHYSARUM_BETA) ** elapsed)
+
 
 def _link_file() -> Path:
     MEMORY_DIR.mkdir(exist_ok=True)
@@ -145,6 +194,116 @@ def _append_link(link_entry: dict) -> None:
     fpath = _link_file()
     with open(fpath, "a", encoding="utf-8") as f:
         f.write(json.dumps(link_entry, ensure_ascii=False) + "\n")
+
+
+def update_link_strength_used(link_id: str,
+                              current_cycle: Optional[int] = None) -> Optional[dict]:
+    """retrieval で使われた link の strength を up + last_used / usage_count update。
+
+    11-D Phase 3 (Physarum rule、案 Q lazy decay):
+    1. last_used_cycle から経過 cycle 分の decay を適用 (case Q)
+    2. strength += α、上限 STRENGTH_CAP (1.0) で clip
+    3. last_used / last_used_cycle / usage_count を update
+    4. memory_links.jsonl に書き戻し
+
+    Args:
+        link_id: 対象 link の id
+        current_cycle: 現在の cycle 番号 (state["cycle_id"])。None なら decay skip
+
+    Returns:
+        更新後の link entry (見つからない場合 None)
+    """
+    fpath = _link_file()
+    if not fpath.exists():
+        return None
+    try:
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+    updated_entry = None
+    new_lines = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            link = json.loads(line)
+        except Exception:
+            new_lines.append(line)
+            continue
+        if link.get("id") == link_id:
+            # 1. lazy decay (案 Q)
+            if current_cycle is not None:
+                strength = _apply_lazy_decay(link, current_cycle)
+            else:
+                strength = _link_strength(link)
+            # 2. strength up + cap
+            strength = min(STRENGTH_CAP, strength + PHYSARUM_ALPHA)
+            link["strength"] = strength
+            link["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if current_cycle is not None:
+                link["last_used_cycle"] = int(current_cycle)
+            link["usage_count"] = int(link.get("usage_count", 0)) + 1
+            updated_entry = link
+        new_lines.append(json.dumps(link, ensure_ascii=False))
+    if new_lines:
+        fpath.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    return updated_entry
+
+
+def prune_weak_links(current_cycle: int) -> int:
+    """全 link を走査、低 strength + idle 長 の link を削除。
+
+    11-D Phase 3 Step 3.5 (Session W v1 確定、両方とも動的派生):
+    - strength threshold = confidence × 0.15 (initial strength = confidence の relative ratio)
+    - idle threshold = β 半減期 × 4 ≒ 56 cycle (β からの完全派生)
+
+    呼出タイミング: cycle 終端 batch (案 P 系の sweep 用、lazy decay 案 Q と並存)。
+    main.py の cycle loop で `pending_prune` と並んで呼ぶ運用想定。
+
+    Args:
+        current_cycle: 現在の cycle 番号 (state["cycle_id"])
+
+    Returns:
+        削除した link 件数
+    """
+    fpath = _link_file()
+    if not fpath.exists():
+        return 0
+    try:
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return 0
+    idle_threshold = _compute_pruning_idle_cycles()
+    kept = []
+    removed = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            link = json.loads(line)
+        except Exception:
+            kept.append(line)
+            continue
+        # initial strength = confidence (PLAN §-1 v1 自然 migration)
+        initial = float(link.get("confidence", 0.0))
+        strength_threshold = initial * PRUNING_STRENGTH_RATIO
+        # 現在の有効 strength (lazy decay 込み)
+        current_strength = _apply_lazy_decay(link, current_cycle)
+        last_cycle = link.get("last_used_cycle")
+        if last_cycle is None:
+            idle = 0   # last_used_cycle 欠落 link は idle 0 扱い (Phase 2 以前 / 新規 link 保護)
+        else:
+            try:
+                idle = max(0, int(current_cycle) - int(last_cycle))
+            except (TypeError, ValueError):
+                idle = 0
+        if current_strength < strength_threshold and idle >= idle_threshold:
+            removed += 1
+            continue
+        kept.append(json.dumps(link, ensure_ascii=False))
+    if removed:
+        fpath.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+    return removed
 
 
 def list_links(limit: int = 200) -> list:
@@ -306,7 +465,12 @@ def _traverse_depth(
     min_confidence: float,
     top_n_per_depth: int,
 ) -> list:
-    """follow_links の再帰実装 (current_depth 1 始まり)."""
+    """follow_links の再帰実装 (current_depth 1 始まり).
+
+    11-D Phase 3 Step 3.2: strength_hint を confidence → strength に置換。
+    sort key も strength を優先 (Phase 2 以前 link は confidence にフォールバック)。
+    API 契約は変更なし (呼び手は strength_hint を float として扱うだけ)。
+    """
     if current_depth > max_depth:
         return []
 
@@ -321,7 +485,8 @@ def _traverse_depth(
         if float(l.get("confidence", 0.0)) < min_confidence:
             continue
         filtered.append(l)
-    filtered.sort(key=lambda l: float(l.get("confidence", 0.0)), reverse=True)
+    # 11-D Phase 3 Step 3.2: sort key を strength に変更 (Phase 2 以前は confidence)
+    filtered.sort(key=lambda l: _link_strength(l), reverse=True)
     near = filtered[:top_n_per_depth]
 
     results = []
@@ -337,7 +502,8 @@ def _traverse_depth(
             "memory_entry": target_entry,
             "via_link": link,
             "depth": current_depth,
-            "strength_hint": float(link.get("confidence", 0.0)),
+            # 11-D Phase 3 Step 3.2: strength_hint を strength に置換 (fallback あり)
+            "strength_hint": _link_strength(link),
         })
         if current_depth < max_depth:
             child = _traverse_depth(

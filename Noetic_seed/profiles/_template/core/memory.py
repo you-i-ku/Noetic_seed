@@ -396,8 +396,10 @@ def get_relevant_memories(
             break
 
     # 段階11-C G-lite Phase 1: link 経由の近傍 memory を merge (opt-in)
+    # 段階11-D Phase 3 Step 3.3: 経由 link の strength を update (Physarum rule)
     if use_links and network_mems:
-        from core.memory_links import follow_links
+        from core.memory_links import follow_links, update_link_strength_used
+        current_cycle = state.get("cycle_id") if isinstance(state, dict) else None
         for origin_mem in network_mems[:link_top_n]:
             origin_id = origin_mem.get("id")
             if not origin_id:
@@ -417,6 +419,15 @@ def get_relevant_memories(
                 entry["_retrieval_via"] = "link"
                 entry["_retrieval_depth"] = r.get("depth", 1)
                 entry["_retrieval_strength_hint"] = r.get("strength_hint", 0.0)
+                # 段階11-D Phase 3 Step 3.3: 使用された link の strength を up
+                # (lazy decay 込み、case Q)。reflect 継続原則で例外は catch
+                via_link = r.get("via_link") or {}
+                link_id = via_link.get("id")
+                if link_id:
+                    try:
+                        update_link_strength_used(link_id, current_cycle=current_cycle)
+                    except Exception as e:
+                        print(f"  [memory_links] strength update skip (error: {e})")
                 merged.append(entry)
                 seen_ids.add(eid)
 
