@@ -16,26 +16,55 @@ from core.perspective import Perspective, default_self_perspective
 # 段階7: tag_registry.is_tag_registered で動的検証 (標準タグ含めて register 経由)
 
 
-def _network_file(network: str):
+UNTAGGED_NETWORK = "_untagged"
+
+
+def _network_file(network):
+    """network jsonl ファイルパスを返す。
+
+    段階11-D Phase 1 (Step 1.1): network=None or UNTAGGED_NETWORK で
+    `_untagged.jsonl` を返す (tag 廃止移行の保存先、untagged memory 専用)。
+    """
     MEMORY_DIR.mkdir(exist_ok=True)
+    if network is None or network == UNTAGGED_NETWORK:
+        return MEMORY_DIR / f"{UNTAGGED_NETWORK}.jsonl"
     return MEMORY_DIR / f"{network}.jsonl"
 
 
-def _build_metadata_prompt(content: str, network: str) -> str:
-    """段階11-B Phase 3 Step 3.1: keywords + contextual_description 生成 prompt (軽量)。"""
+def _build_metadata_prompt(content: str, network) -> str:
+    """段階11-B Phase 3 Step 3.1: keywords + contextual_description 生成 prompt (軽量)。
+
+    段階11-D Phase 1 (Step 1.7 v1 調整、A-MEM paper 版 literal 整合):
+    A-MEM (WujiangXu memory_layer.py + agiresearch memory_system.py 共通) の
+    実プロンプト literal は「at least three keywords, but don't be too redundant」+
+    「one sentence summarizing」(個数上限・文字数 literal なし)。Noetic は
+    日本語訳でこの literal に揃え、上限を Noetic 側で課さない (cognitive
+    richness 優先、`feedback_llm_as_brain` + ゆう gut「マジックナンバー回避」
+    + ゆう gut「o 制約解放」 三原則整合)。
+
+    段階11-D Phase 1 (Step 1.1): network=None 対応 (untagged の場合は
+    "(untagged)" ラベル表示、LLM への文脈提示は維持)。
+    """
+    tag_label = network if network else "(untagged)"
     return (
         "以下の記憶 entry から keywords と contextual_description を生成してください:\n"
         f"content: {content}\n"
-        f"tag: {network}\n"
+        f"tag: {tag_label}\n"
         "出力は JSON のみ (他の文字を含めない):\n"
         '{"keywords": [str, ...], "contextual_description": str}\n'
-        "- keywords: 3-7 個、content の主要概念を抽出 (日本語可)\n"
-        "- contextual_description: 1-2 文、この memory が想起される文脈"
+        "- keywords: 3 個以上 (冗長にならない範囲で)、content の主要概念を抽出 (日本語可)\n"
+        "- contextual_description: 1 文、この memory が想起される文脈を要約"
     )
 
 
 def _parse_metadata_response(response: str) -> dict:
-    """LLM 応答から keywords / contextual_description を抽出 (robust parse)。"""
+    """LLM 応答から keywords / contextual_description を抽出 (robust parse)。
+
+    段階11-D Phase 1 (Step 1.7 v1 調整、A-MEM paper 版 literal 整合):
+    上限値 (旧 keywords[:7] / desc[:500]) を撤去。A-MEM 実 literal に
+    上限指定なし、Noetic も上限を課さない (cognitive richness 優先)。
+    型安全化のみ実施。
+    """
     try:
         m = re.search(r'\{.*\}', response, re.DOTALL)
         if not m:
@@ -48,8 +77,8 @@ def _parse_metadata_response(response: str) -> dict:
         if not isinstance(desc, str):
             desc = str(desc) if desc is not None else ""
         return {
-            "keywords": [str(k)[:80] for k in kws][:7],
-            "contextual_description": desc[:500],
+            "keywords": [str(k) for k in kws],
+            "contextual_description": desc,
         }
     except Exception:
         return {"keywords": [], "contextual_description": ""}
@@ -66,7 +95,7 @@ def _generate_memory_metadata(content: str, network: str) -> dict:
     return _parse_metadata_response(response)
 
 
-def memory_store(network: str, content: str, metadata: dict = None,
+def memory_store(network: Optional[str] = None, content: str = "", metadata: dict = None,
                  origin: str = "unknown", source_context: str = "",
                  perspective: Optional[Perspective] = None, *,
                  keywords: Optional[list] = None,
@@ -86,16 +115,23 @@ def memory_store(network: str, content: str, metadata: dict = None,
 
     段階11-B Phase 3 Step 3.1: keywords / contextual_description を keyword-only
     引数として追加。両方 None + _auto_metadata=True なら LLM 同期呼出で自動生成
-    (A-MEM NeurIPS 2025 準拠)。LLM 失敗時は graceful fallback (空値で保存、
-    memory 書込は継続)。test 用途で `_auto_metadata=False` 指定で LLM skip 可能。
+    (A-MEM paper 版 = WujiangXu memory_layer.py 哲学整合: atomic enrich on store
+    で reconciliation の前提条件を満たす)。LLM 失敗時は graceful fallback
+    (空値で保存、memory 書込は継続)。test 用途で `_auto_metadata=False` 指定で
+    LLM skip 可能。
+
+    段階11-D Phase 1 (Step 1.1-1.2): network=None 許可 (tag 廃止移行)。
+    network=None なら is_tag_registered チェック skip、UNTAGGED_NETWORK
+    マーカーで内部統一して `_untagged.jsonl` に保存する。
     """
-    if not is_tag_registered(network):
-        raise ValueError(f"Invalid network: {network}")
-    _rules = get_tag_rules(network) or {}
-    if _rules.get("learning_rules", {}).get("write_protected", False):
-        raise ValueError(
-            f"tag '{network}' is write_protected (pseudo-tag, meta-section only)"
-        )
+    if network is not None:
+        if not is_tag_registered(network):
+            raise ValueError(f"Invalid network: {network}")
+        _rules = get_tag_rules(network) or {}
+        if _rules.get("learning_rules", {}).get("write_protected", False):
+            raise ValueError(
+                f"tag '{network}' is write_protected (pseudo-tag, meta-section only)"
+            )
     if perspective is None:
         perspective = default_self_perspective()
 
@@ -115,7 +151,7 @@ def memory_store(network: str, content: str, metadata: dict = None,
 
     entry = {
         "id": f"mem_{uuid.uuid4().hex[:12]}",
-        "network": network,
+        "network": network if network is not None else UNTAGGED_NETWORK,
         "content": content,
         "origin": origin,
         "source_context": source_context,
@@ -170,8 +206,11 @@ def memory_store(network: str, content: str, metadata: dict = None,
 
 
 def memory_update(memory_id: str, content: str = None, metadata: dict = None) -> str:
-    """既存記憶を更新。"""
-    for network in list_registered_tags():
+    """既存記憶を更新。
+
+    段階11-D Phase 1 (Step 1.1): UNTAGGED_NETWORK も走査対象に追加。
+    """
+    for network in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
         fpath = _network_file(network)
         if not fpath.exists():
             continue
@@ -200,8 +239,11 @@ def memory_update(memory_id: str, content: str = None, metadata: dict = None) ->
 
 
 def memory_forget(memory_id: str) -> str:
-    """記憶を削除。"""
-    for network in list_registered_tags():
+    """記憶を削除。
+
+    段階11-D Phase 1 (Step 1.1): UNTAGGED_NETWORK も走査対象に追加。
+    """
+    for network in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
         fpath = _network_file(network)
         if not fpath.exists():
             continue
@@ -213,11 +255,14 @@ def memory_forget(memory_id: str) -> str:
     return f"エラー: {memory_id} が見つかりません"
 
 
-def list_records(network: str, limit: int = 20) -> list:
+def list_records(network, limit: int = 20) -> list:
     """指定ネットワークの jsonl を新しい順に読んで直近 limit 件を返す。
     WM の C-gradual 同期 (段階3) 等、検索ではなく全件走査系の消費者向け。
+
+    段階11-D Phase 1 (Step 1.1): network=UNTAGGED_NETWORK は untagged
+    jsonl を走査 (is_tag_registered チェック skip)。
     """
-    if not is_tag_registered(network):
+    if network != UNTAGGED_NETWORK and not is_tag_registered(network):
         return []
     fpath = _network_file(network)
     if not fpath.exists():
@@ -251,10 +296,14 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5,
     view_filter={"viewer":"self"} 等で拾われる (backward compat)。
     """
     if not networks:
-        networks = list_registered_tags()
+        # 段階11-D Phase 1 (Step 1.1): networks=None なら全登録タグ +
+        # UNTAGGED_NETWORK を走査対象にする (untagged memory も検索対象)。
+        networks = list(list_registered_tags()) + [UNTAGGED_NETWORK]
     all_entries = []
     for network in networks:
-        if not is_tag_registered(network):
+        # 段階11-D Phase 1: UNTAGGED_NETWORK は is_tag_registered で False
+        # を返すが、untagged jsonl は明示的に走査対象に含める。
+        if network != UNTAGGED_NETWORK and not is_tag_registered(network):
             continue
         fpath = _network_file(network)
         if not fpath.exists():
@@ -414,7 +463,12 @@ def _recent_externals_from_archive(limit: int = 3, days_back: int = 7) -> list:
 
 
 def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
-    """記憶をプロンプト用テキストに整形 (段階7: display_format 駆動)。"""
+    """記憶をプロンプト用テキストに整形 (段階7: display_format 駆動)。
+
+    段階11-D Phase 1 (Step 1.3): UNTAGGED_NETWORK は `[untagged] {content}`
+    形式で表示 (smoke 4 段目で表示形式の観察 → tune 予定、PLAN §5 Phase 1
+    Step 1.3)。
+    """
     from core.tag_registry import get_tag_rules
     if not memories:
         return ""
@@ -428,6 +482,9 @@ def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
         if network == "external":
             t = meta.get("time", "")
             line = f"  [external voice {t}] {content}"
+        elif network == UNTAGGED_NETWORK:
+            # 段階11-D Phase 1: untagged memory の表示
+            line = f"  [untagged] {content}"
         else:
             rules = get_tag_rules(network)
             fmt = (rules or {}).get("display_format", "") or f"[{network}] {{content}}"
