@@ -29,7 +29,7 @@ TOOLS = {
     "elyth_get":    {"desc": "Elythデータ取得。引数: type=my_posts/thread/profile [post_id=] [handle=] [limit=]", "func": _elyth_get},
     "elyth_mark_read": {"desc": "Elyth通知を既読化。引数: notification_ids=id1,id2,...", "func": _elyth_mark_read},
     "search_memory": {"desc": "過去の記憶をベクトル/ID検索。引数: query=検索キーワード [max_results=件数]", "func": _search_memory},
-    "memory_store":  {"desc": "記憶を保存。引数: network=world/experience/opinion/entity content= [confidence=] [entity_name=]", "func": _tool_memory_store},
+    "memory_store":  {"desc": "記憶を保存 (未登録 tag は rules={beta_plus:bool, bitemporal:bool} 必須)。引数: network=tag名 content=本文 [rules={...}] [confidence=] [entity_name=]", "func": _tool_memory_store},
     "memory_update": {"desc": "記憶を更新。引数: memory_id= [content=] [confidence=]", "func": _tool_memory_update},
     "memory_forget": {"desc": "記憶を削除。引数: memory_id=", "func": _tool_memory_forget},
     "reflect":       {"desc": "自己を内省し、学びや気づきを記憶に保存する（引数なし）", "func": lambda args: "[reflect] main.pyで初期化されます"},
