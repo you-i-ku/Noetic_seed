@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 
 from core.cluster_estimation import estimate_clusters
 from core.memory import load_all_memories, memory_store
+from core.memory_links import list_links
+from core.tag_emergence_monitor import compute_cluster_mutual_information
 from core.perspective import (
     default_self_perspective,
     is_self_view,
@@ -205,6 +207,16 @@ def reflect(state: dict, call_llm_fn) -> dict:
     )
     cluster_sections = _build_cluster_sections(clusters, memory_index)
 
+    # 段階11-D Phase 6 Step 6.2: cluster MI 計算 (観察のみ、log_cycle_metrics 経由 jsonl 永続化)
+    # state["phase6_metrics"] に書き、log_cycle_metrics 側が次 cycle 以降拾う
+    mi_metrics = compute_cluster_mutual_information(clusters, list_links(limit=10000))
+    if isinstance(state, dict):
+        state.setdefault("phase6_metrics", {})
+        state["phase6_metrics"]["cluster_mi"] = mi_metrics["cluster_mi"]
+        state["phase6_metrics"]["cluster_inter_ratio"] = mi_metrics["cluster_inter_ratio"]
+        state["phase6_metrics"]["last_cluster_link_pairs"] = mi_metrics["cluster_link_pairs"]
+        state["phase6_metrics"]["last_reflect_cycle"] = state.get("cycle_id")
+
     prompt = f"""あなたは自律AIシステムの内省モジュールです。以下の直近の行動 + memory cluster 整理を振り返り、各項目を出力してください。
 
 [自己モデル]
@@ -255,12 +267,20 @@ ATTRIBUTED_DISPOSITION:
     try:
         text = call_llm_fn(prompt, max_tokens=1000, temperature=0.3)
         append_debug_log("Reflection", text)
-        return _parse_reflection(text, state)
+        parsed = _parse_reflection(text, state)
+        # 段階11-D Phase 6 Step 6.2: 戻り値に MI 観察値を含める (新キー追加のみ、既存 test 影響なし)
+        parsed.setdefault("cluster_mi", mi_metrics["cluster_mi"])
+        parsed.setdefault("cluster_inter_ratio", mi_metrics["cluster_inter_ratio"])
+        parsed.setdefault("cluster_link_pairs", mi_metrics["cluster_link_pairs"])
+        return parsed
     except Exception as e:
         print(f"  [reflection] エラー: {e}")
         return {
             "notes": [],
             "self_disp_delta": {}, "attr_disp_delta": {},
+            "cluster_mi": mi_metrics.get("cluster_mi", 0.0),
+            "cluster_inter_ratio": mi_metrics.get("cluster_inter_ratio", 0.0),
+            "cluster_link_pairs": mi_metrics.get("cluster_link_pairs", 0),
         }
 
 
