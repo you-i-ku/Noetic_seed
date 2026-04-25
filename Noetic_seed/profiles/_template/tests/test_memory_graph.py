@@ -304,6 +304,80 @@ def test_memory_graph_depth_arg():
     ])
 
 
+# ============================================================
+# Step 0.4: voluntary_memory_store_count + affordance ガード
+# (state.py initial/migration + controller.py allowed_tools フィルタ)
+# ============================================================
+
+def test_state_initial_has_voluntary_count():
+    print("== state initial に voluntary_memory_store_count=0 がある ==")
+    # load_state は state.json が無ければ initial dict を返す。
+    # ここでは _state_initial_for_test 相当として state.py の return dict を確認する。
+    # 新規 profile の起動時に voluntary_memory_store_count=0 が確実に入る前提。
+    from core.state import load_state
+    s = load_state()
+    return all([
+        _assert("voluntary_memory_store_count" in s,
+                "voluntary_memory_store_count key 存在"),
+        _assert(s.get("voluntary_memory_store_count") == 0,
+                f"初期値=0 (actual: {s.get('voluntary_memory_store_count')})"),
+    ])
+
+
+def _build_minimal_controller_args(state_overrides: dict = None):
+    """controller() を呼ぶための最小 mock 引数セット."""
+    from tools import TOOLS, LEVEL_TOOLS
+    state = {
+        "log": [],
+        "energy": 50,
+        "files_read": ["file1", "file2", "file3"],   # tool_level >=2 確保
+        "files_written": ["w1", "w2"],
+        "tools_created": [],
+        "tool_level": 2,                              # memory_graph が level 1+ なので 2 で十分
+        "voluntary_memory_store_count": 0,
+        "self": {},
+    }
+    if state_overrides:
+        state.update(state_overrides)
+    return {
+        "state": state,
+        "tools_dict": dict(TOOLS),
+        "level_tools": LEVEL_TOOLS,
+        "ai_created_tools": {},
+        "dangerous_patterns": [],
+        "run_ai_tool_fn": lambda f, a: "",
+    }
+
+
+def test_controller_affordance_gate_off_excludes_memory_graph():
+    print("== controller: voluntary_memory_store_count=0 で memory_graph が allowed_tools 外 ==")
+    from core.controller import controller
+    args = _build_minimal_controller_args({"voluntary_memory_store_count": 0})
+    ctrl = controller(**args)
+    allowed = ctrl.get("allowed_tools", set())
+    return _assert("memory_graph" not in allowed,
+                   f"memory_graph 除外 (allowed = {sorted(allowed)})")
+
+
+def test_controller_affordance_gate_on_includes_memory_graph():
+    print("== controller: voluntary_memory_store_count>=1 で memory_graph が allowed_tools 含む ==")
+    from core.controller import controller
+    args = _build_minimal_controller_args({"voluntary_memory_store_count": 1})
+    ctrl = controller(**args)
+    allowed = ctrl.get("allowed_tools", set())
+    return _assert("memory_graph" in allowed,
+                   f"memory_graph 含む (allowed に memory_graph があるか: {('memory_graph' in allowed)})")
+
+
+def test_controller_affordance_gate_high_count_still_includes():
+    print("== controller: voluntary_memory_store_count=10 でも memory_graph 維持 ==")
+    from core.controller import controller
+    args = _build_minimal_controller_args({"voluntary_memory_store_count": 10})
+    ctrl = controller(**args)
+    return _assert("memory_graph" in ctrl.get("allowed_tools", set()),
+                   "高 count でも維持")
+
+
 def test_memory_graph_output_no_natural_language_keys():
     print("== _memory_graph: 出力 key に自然言語比喩なし (中立技術用語のみ) ==")
     result = _memory_graph({"view": "ego"})
@@ -347,6 +421,10 @@ if __name__ == "__main__":
         ("_memory_graph: 未対応 view で error", test_memory_graph_unsupported_view_error),
         ("_memory_graph: placeholder args (Step 0.3 b')", test_memory_graph_placeholder_args_accepted),
         ("_memory_graph: depth 引数", test_memory_graph_depth_arg),
+        ("Step 0.4: state initial voluntary_memory_store_count=0", test_state_initial_has_voluntary_count),
+        ("Step 0.4: affordance gate OFF (count=0 → 除外)", test_controller_affordance_gate_off_excludes_memory_graph),
+        ("Step 0.4: affordance gate ON (count=1 → 含む)", test_controller_affordance_gate_on_includes_memory_graph),
+        ("Step 0.4: 高 count でも affordance 維持", test_controller_affordance_gate_high_count_still_includes),
         ("_memory_graph: 自然言語 key なし", test_memory_graph_output_no_natural_language_keys),
     ]
     results = []

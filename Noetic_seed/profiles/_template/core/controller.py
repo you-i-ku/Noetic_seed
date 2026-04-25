@@ -121,6 +121,12 @@ def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tool
         _x_tools = {"x_post", "x_reply", "x_timeline", "x_search", "x_quote", "x_like", "x_get_notifications"}
         allowed -= _x_tools
 
+    # 段階11-D Phase 0 Step 0.4: memory_graph affordance ガード (B2)
+    # 自発 memory_store ≥ 1 経験で candidate 解除 (Y1 確定: description は据え置き、
+    # 候補に出ても allowed_tools フィルタで弾かれる "中間状態" を試行で気づく設計)
+    if state.get("voluntary_memory_store_count", 0) < 1:
+        allowed.discard("memory_graph")
+
     return {
         "allowed_tools": allowed,
         "tool_rank": {t: round(tool_avg[t], 1) for t in ranked},

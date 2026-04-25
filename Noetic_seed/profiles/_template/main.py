@@ -729,6 +729,15 @@ def main():
                     if _p not in fw:
                         fw.append(_p)
                     save_state(state)
+            # 段階11-D Phase 0 Step 0.4: memory_graph affordance ガード (B2)
+            # 自発 memory_store ≥ 1 経験で memory_graph candidate 解除 (controller.py で gate)
+            # 失敗 memory_store は count しない (Z2 確定、森のたとえ整合性)
+            elif rec.tool_name == "memory_store":
+                if not _out_str.startswith(("Error", "エラー")):
+                    state["voluntary_memory_store_count"] = (
+                        state.get("voluntary_memory_store_count", 0) + 1
+                    )
+                    save_state(state)
 
             # WM 段階3: ツールが属する channel の activity を記録
             # internal な自作 tool (どの channel にも属さない) は silent skip
