@@ -37,8 +37,12 @@ STANDARD_TAGS: dict = {
     "opinion": {
         "learning_rules": {"beta_plus": True, "bitemporal": False},
         "display_format": "[opinion] {content} (確度:{confidence})",
-        # 段階11-A G1: reflect prompt に opinion セクションを注入するための受け皿。
-        # 段階11-B で AI が tag を自由発明する時も同構造で reflect_section を付けられる。
+        # DEPRECATED 段階11-D Phase 5 (Step 5.2): _build_reflect_sections 機構撤去済。
+        # この reflect_section dict は **dead data** として Phase 7 migration まで残置
+        # (撤去予定、PLAN §5 Phase 5 Step 5.4 + §10「段階13+ で完全撤去」)。
+        # 残置理由: ① test_memory_store_perspective.py Section 3 の存在 assert
+        # を破壊しない、② 既存 jsonl entry (network="opinion") の display_format
+        # は依然有効、③ 段階7→11-D の互換性窓を確保。
         "reflect_section": {
             "header": "OPINIONS",
             "template": "- 主張内容 (確度: 0.0-1.0)",
@@ -48,6 +52,7 @@ STANDARD_TAGS: dict = {
     "entity": {
         "learning_rules": {"beta_plus": True, "bitemporal": True, "c_gradual_source": True},
         "display_format": "[entity:{entity_name}] {content}",
+        # DEPRECATED 段階11-D Phase 5 (Step 5.2): 同上、Phase 7 migration で撤去予定。
         "reflect_section": {
             "header": "ENTITIES",
             "template": "- 対象名: 属性記述",

@@ -255,6 +255,42 @@ def memory_forget(memory_id: str) -> str:
     return f"エラー: {memory_id} が見つかりません"
 
 
+def load_all_memories() -> list:
+    """全 network (UNTAGGED 含む) の memory entry を 1 list に集めて返す。
+
+    段階11-D Phase 5 Step 5.2: cluster 推定 (estimate_clusters) の入力源。
+    Phase 6 metric 等の他 consumer でも再利用想定。
+
+    cap なし (Q2 ゆう判断 2026-04-26): 「先に固定値を決めず観察 log で
+    cap 必要性を実証判断」=PLAN §11-4「マジックナンバー 0」精神の延長。
+    OOM 安全網は cluster_estimation.estimate_clusters 内の debug print
+    (N + vectors.nbytes) と smoke 後の grep で別レイヤー確保。
+
+    Returns:
+        全 memory entry の list (順序は network 順 → 各 jsonl の新しい順)。
+    """
+    all_entries: list = []
+    networks = list(list_registered_tags()) + [UNTAGGED_NETWORK]
+    for network in networks:
+        if network != UNTAGGED_NETWORK and not is_tag_registered(network):
+            continue
+        fpath = _network_file(network)
+        if not fpath.exists():
+            continue
+        try:
+            lines = fpath.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                all_entries.append(json.loads(line))
+            except Exception:
+                continue
+    return all_entries
+
+
 def list_records(network, limit: int = 20) -> list:
     """指定ネットワークの jsonl を新しい順に読んで直近 limit 件を返す。
     WM の C-gradual 同期 (段階3) 等、検索ではなく全件走査系の消費者向け。

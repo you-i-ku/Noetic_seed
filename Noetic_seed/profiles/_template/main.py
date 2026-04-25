@@ -200,9 +200,8 @@ def main():
         result = reflect(s, call_llm)
         s["reflection_cycle"] = 0
         save_state(s)
-        opinions = result.get("opinions", [])
-        entities = result.get("entities", [])
-        return f"内省完了: {len(opinions)}件の気づき, {len(entities)}件のエンティティ更新"
+        notes = result.get("notes", [])
+        return f"内省完了: {len(notes)}件の気づき"
     TOOLS["reflect"]["func"] = _tool_reflect
 
     # pref.json 初期化

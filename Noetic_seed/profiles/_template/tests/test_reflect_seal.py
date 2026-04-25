@@ -52,7 +52,6 @@ _tr._reset_for_testing(registry_file=_tr._REGISTRY_FILE)
 
 from core.perspective import default_self_perspective, is_self_view, make_perspective
 from core.reflection import (
-    _build_reflect_sections,
     _parse_reflection,
     _split_log_by_perspective,
     reflect,
@@ -97,65 +96,20 @@ _assert(
 )
 
 
-# =========================================================================
-# Section 2: _build_reflect_sections (G1 tag_registry 駆動)
-# =========================================================================
-print("\n=== Section 2: _build_reflect_sections ===")
-
-sections = _build_reflect_sections()
-_assert("OPINIONS" in sections, "2-1 OPINIONS セクション含む")
-_assert("ENTITIES" in sections, "2-2 ENTITIES セクション含む")
-_assert(
-    "wm:" not in sections.lower() and "experience:" not in sections.lower(),
-    "2-3 wm / experience (reflect_section なし) は含まれない",
-)
-
-# 動的 tag (11-B 風) を追加 → reflect_section 組立に自動で載る
-register_tag(
-    "custom_reflect_tag",
-    learning_rules={"beta_plus": False, "bitemporal": False},
-    origin="dynamic",
-    reflect_section={
-        "header": "CUSTOM_NOTES",
-        "template": "- 自由発明形式",
-        "enabled_in_reflect": True,
-    },
-)
-sections_after = _build_reflect_sections()
-_assert(
-    "CUSTOM_NOTES" in sections_after,
-    "2-4 動的 register_tag で加えた reflect_section が即反映 (11-B 伏線)",
-)
-
-# enabled_in_reflect=False なら含まれない
-register_tag(
-    "disabled_reflect_tag",
-    learning_rules={"beta_plus": False, "bitemporal": False},
-    origin="dynamic",
-    reflect_section={
-        "header": "DISABLED_NOTES",
-        "template": "- 無効",
-        "enabled_in_reflect": False,
-    },
-)
-sections_disabled = _build_reflect_sections()
-_assert(
-    "DISABLED_NOTES" not in sections_disabled,
-    "2-5 enabled_in_reflect=False の tag は section に載らない",
-)
+# Section 2 (_build_reflect_sections G1 tag_registry 駆動) は段階11-D Phase 5
+# Step 5.2 で撤去済 (関数ごと削除、cluster 推定置換)。reflect_section data
+# 自体は tag_registry.STANDARD_TAGS に dead data として Phase 7 まで残置。
 
 
 # =========================================================================
-# Section 3: _parse_reflection SELF / ATTRIBUTED 2 セクション
+# Section 3: _parse_reflection NOTES + SELF / ATTRIBUTED 3 セクション
 # =========================================================================
-print("\n=== Section 3: _parse_reflection 2 セクション ===")
+print("\n=== Section 3: _parse_reflection 3 セクション (Phase 5: NOTES 統一) ===")
 
 mock_llm_text = """
-OPINIONS:
+NOTES:
 - 観察には視点がある (confidence: 0.8)
-
-ENTITIES:
-- name: iku_self, content: 内省を重ねる存在
+- 内省を重ねる存在として自分を捉えている (confidence: 0.6)
 
 SELF_DISPOSITION:
 - curiosity_delta: +0.05
@@ -171,9 +125,9 @@ result = _parse_reflection(mock_llm_text, state)
 
 # 戻り値構造
 _assert(
-    "opinions" in result and "entities" in result
+    "notes" in result
     and "self_disp_delta" in result and "attr_disp_delta" in result,
-    "3-1 戻り値に 4 キー (opinions / entities / self_disp_delta / attr_disp_delta)",
+    "3-1 戻り値に 3 キー (notes / self_disp_delta / attr_disp_delta)",
 )
 
 # SELF_DISPOSITION delta
@@ -257,25 +211,21 @@ _assert(
 
 
 # =========================================================================
-# Section 5: OPINIONS / ENTITIES の perspective 付与
+# Section 5: NOTES (untagged) memory entry の perspective 付与
+# 段階11-D Phase 5 Step 5.2: opinion/entity 撤去、NOTES が untagged path で
+# 保存される (network=None → _untagged.jsonl)。perspective=self/actual 付与は
+# 段階11-A 設計のまま継承。
 # =========================================================================
-print("\n=== Section 5: opinions / entities perspective ===")
+print("\n=== Section 5: notes (untagged) perspective ===")
 
-from core.memory import list_records
+from core.memory import list_records, UNTAGGED_NETWORK
 
-op_recs = list_records("opinion", limit=10)
-ent_recs = list_records("entity", limit=10)
+note_recs = list_records(UNTAGGED_NETWORK, limit=10)
 
-_assert(len(op_recs) >= 1, "5-1 opinion memory entry 1 件以上")
+_assert(len(note_recs) >= 1, "5-1 untagged note memory entry 1 件以上")
 _assert(
-    all("perspective" in r and is_self_view(r["perspective"]) for r in op_recs[:1]),
-    "5-2 opinion entry に self/actual perspective",
-)
-
-_assert(len(ent_recs) >= 1, "5-3 entity memory entry 1 件以上")
-_assert(
-    all("perspective" in r and is_self_view(r["perspective"]) for r in ent_recs[:1]),
-    "5-4 entity entry に self/actual perspective",
+    all("perspective" in r and is_self_view(r["perspective"]) for r in note_recs[:1]),
+    "5-2 note entry に self/actual perspective (Phase 5 で untagged 経路統一)",
 )
 
 

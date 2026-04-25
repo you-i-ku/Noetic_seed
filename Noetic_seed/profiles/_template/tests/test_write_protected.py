@@ -37,7 +37,6 @@ _tr._reset_for_testing(registry_file=_tr._REGISTRY_FILE)
 
 from core.memory import memory_store
 from core.perspective import default_self_perspective
-from core.reflection import _build_reflect_sections
 from core.tag_registry import (
     get_tag_rules,
     get_tags_with_rule,
@@ -141,52 +140,9 @@ _assert(
 )
 
 
-# =========================================================================
-# Section E: enabled_in_reflect=False の dynamic pseudo-tag は prompt に出ない
-# =========================================================================
-print("=== Section E: meta-section opt-in (enabled_in_reflect=False) ===")
-
-register_tag(
-    "future_meta",
-    learning_rules={"write_protected": True},
-    origin="dynamic",
-    reflect_section={
-        "header": "FUTURE META (opt-in)",
-        "template": "- (未来の affordance)",
-        "enabled_in_reflect": False,
-    },
-)
-_sections = _build_reflect_sections()
-_assert(
-    "FUTURE META" not in _sections,
-    "E-1 enabled_in_reflect=False の reflect_section は prompt に出現しない",
-)
-_assert(
-    "OPINIONS" in _sections and "ENTITIES" in _sections,
-    "E-2 既存 OPINIONS / ENTITIES は従来通り出現 (回帰ゼロ)",
-)
-
-
-# =========================================================================
-# Section F: enabled_in_reflect=True の dynamic tag は prompt に出現
-#            (将来の pseudo-tag affordance を自発 on にする機構の足場確認)
-# =========================================================================
-print("=== Section F: dynamic reflect_section ON で prompt 出現 ===")
-
-# future_meta の enabled を直接 True に切替 (iku 将来 tool 相当の内部操作)
-_entry = _tr._REGISTERED["future_meta"]
-_entry["reflect_section"]["enabled_in_reflect"] = True
-
-_sections_on = _build_reflect_sections()
-_assert(
-    "FUTURE META" in _sections_on,
-    "F-1 enabled_in_reflect=True で dynamic reflect_section が prompt に出現",
-)
-_assert(
-    "(未来の affordance)" in _sections_on,
-    "F-2 template 本文が展開される",
-)
-
+# Section E/F (meta-section opt-in via _build_reflect_sections) は段階11-D
+# Phase 5 Step 5.2 で撤去済 (関数ごと削除、cluster 推定置換)。reflect_section
+# data 自体は tag_registry.STANDARD_TAGS に dead data として Phase 7 まで残置。
 
 # =========================================================================
 print("=" * 60)

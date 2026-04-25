@@ -161,6 +161,9 @@ def estimate_clusters(
         }]
 
     vectors = np.array(vecs, dtype=np.float32)
+    # Q2 観察 log (ゆう 2026-04-26): cap ライン実証判断のための snapshot。
+    # smoke 後に raw_log を grep して N と nbytes の関係を確認、必要なら cap 導入。
+    print(f"  [cluster_estimation] N={len(memories)} vectors.nbytes={vectors.nbytes}")
     effective_k = min(n_clusters, len(memories))
     labels = _kmeans_simple(vectors, effective_k)
 

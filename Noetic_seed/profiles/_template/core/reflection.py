@@ -1,26 +1,32 @@
-"""内省モジュール v2 — 定期的な自己省察（Generative Agents + Reflexion統合）
-Nサイクルごと or 高prediction_error時に発火。
-Opinion/Entity/Dispositionを更新。
+"""内省モジュール v3 — 定期的な自己省察 (Generative Agents + Reflexion 統合)
+N サイクルごと or 高 prediction_error 時に発火。
+NOTES (raw 気づき) と Disposition を更新。
 
-段階11-A Step 4 改修 (正典 PLAN §6):
-- G1: reflect prompt を tag_registry.reflect_section 駆動化 (OPINIONS/ENTITIES
-  ハードコード撤廃、11-B の動的 tag 発明に同経路で吸収される構造)
-- G3: log 材料を log entry.perspective 属性でフロート分離 (tool 名 hardcode 排除、
-  _split_log_by_perspective)。SEAL 原理 — self_actions が自己 disposition 更新の
-  材料、observations が他者視点 (attributed) 推定の材料
-- perspective-keyed dispositions への書き込み (state["dispositions"]["self"] +
-  attributed:<viewer>)、Step 4→5 移行期間 flat state["disposition"] への dual write
-- LLM② prompt に視点概念の情報を追加 (指示ではなく知識として、原則 P2)
+段階11-D Phase 5 Step 5.2 改修 (正典 PLAN §5 Phase 5):
+- OPINIONS / ENTITIES ハードコード枠を撤去、cluster 推定 (posterior、永続化
+  しない事後整理) を prompt に挿入する構造に置換
+- _build_reflect_sections (tag_registry.reflect_section 駆動) を撤去、
+  _build_cluster_sections (estimate_clusters の結果整形) を新設
+- reflect 出力は NOTES のみ、network=None で memory_store (untagged path、
+  rules 不要、Phase 1 で開けた経路の本格運用)
+- reconciliation hook (`_state=state`) は NOTES の memory_store にも継承
+- SELF_DISPOSITION / ATTRIBUTED_DISPOSITION 経路は不変 (段階11-A 設計維持)
+- ENTITY 経路 (memory_update / memory_network_search via find_similar_facts) 撤去
+  (B1 entity 概念完全廃止と整合)
+
+段階11-A Step 4 で導入された経路 (G3 log 分離 / G1 reflect_section) のうち、
+G3 (perspective ベース log 分離) は維持、G1 は Phase 5 で撤去。
 """
 from datetime import datetime, timezone
 
-from core.memory import memory_store, memory_update, memory_network_search
+from core.cluster_estimation import estimate_clusters
+from core.memory import load_all_memories, memory_store
 from core.perspective import (
     default_self_perspective,
     is_self_view,
     make_perspective,
 )
-from core.state import load_state, save_state, append_debug_log
+from core.state import append_debug_log
 
 
 def should_reflect(state: dict, interval: int = 10) -> bool:
@@ -94,40 +100,40 @@ def _format_observations(entries: list) -> str:
 
 
 # ============================================================
-# 段階11-A Step 4: tag_registry 駆動 reflect セクション (G1)
+# 段階11-D Phase 5 Step 5.2: cluster 推定セクション
 # ============================================================
 
-def _build_reflect_sections(visibility_mode: str = "visible") -> str:
-    """tag_registry.reflect_section から reflect prompt の動的セクション組立。
+def _build_cluster_sections(clusters: list, memory_index: dict) -> str:
+    """estimate_clusters の結果を reflect prompt 用に整形。
 
-    段階11-A G1: opinion/entity セクションを tag_registry 駆動化
-    (hardcode 撤廃)。段階11-B で AI が新 tag を発明し reflect_section を
-    付けた場合も、同経路で自動的に prompt に載る (11-B 受け皿)。
+    段階11-D Phase 5 Step 5.2: tag_registry.reflect_section 駆動の旧
+    _build_reflect_sections に代わる新経路。cluster は posterior、
+    永続化せず reflect 毎に再推定 (PLAN §5 Phase 5)。
 
-    段階11-C G-lite Phase 3: visibility_mode で tag prior の可視性を切替可能。
+    各 cluster は label + 件数 + 代表 sample 2 件の content (60 字 cap) を表示。
+    LLM② が「この memory 群の整理」を見て NOTES を返す材料になる。
 
     Args:
-        visibility_mode:
-            "visible"    — 既存挙動 (デフォルト、reflect_section を全組立)
-            "cold_start" — 空文字列を返す、iku が既存 tag prior なしに reflect
-                            できる実験モード (settings.reflection.reflect_cold_start_mode
-                            から配線)。reflect_section ハードコードな OPINIONS /
-                            ENTITIES のみ影響、prompt 本体の指示文は変化なし。
-                            reflect 抽象再設計は G-full (11-D Phase 5)。
+        clusters: estimate_clusters の戻り値
+            [{"cluster_id", "label", "memory_ids", "method"}, ...]
+        memory_index: memory_id -> memory entry の dict (content 取得用)
+
+    Returns:
+        prompt に挿入する文字列。clusters 空 → 空文字列。
     """
-    if visibility_mode == "cold_start":
+    if not clusters:
         return ""
-    from core.tag_registry import list_registered_tags, get_tag_rules
-    sections = []
-    for tag in list_registered_tags():
-        rules = get_tag_rules(tag) or {}
-        sec = rules.get("reflect_section")
-        if not sec or not sec.get("enabled_in_reflect"):
-            continue
-        header = sec.get("header", tag.upper())
-        template = sec.get("template", "- (自由記述)")
-        sections.append(f"{header}:\n{template}")
-    return "\n\n".join(sections)
+    lines = ["[現在の memory cluster 推定 (posterior、永続化しない事後整理)]"]
+    for c in clusters:
+        label = c.get("label") or "(未分類)"
+        mids = c.get("memory_ids") or []
+        lines.append(f"- クラスタ「{label}」 ({len(mids)} 件):")
+        for mid in mids[:2]:
+            m = memory_index.get(mid)
+            if m:
+                content = (m.get("content") or "").replace("\n", " ")[:60]
+                lines.append(f"    · {content}")
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -162,37 +168,15 @@ def _gather_dispositions_for_prompt(state: dict) -> tuple:
 
 
 def reflect(state: dict, call_llm_fn) -> dict:
-    """内省サイクル実行。LLMに最近の経験を振り返らせる。
+    """内省サイクル実行。LLM に直近の行動 + memory cluster 整理を振り返らせる。
 
-    段階11-A Step 4: 材料を self_actions / observations に分離 (G3)、
-    OPINIONS/ENTITIES セクションを tag_registry 駆動 (G1)、
-    SELF_DISPOSITION / ATTRIBUTED_DISPOSITION 2 セクションで disposition
-    更新材料を分離 (PLAN §6-3)。
+    段階11-D Phase 5 Step 5.2: 入力に cluster 推定 (memory list 全体の
+    posterior 整理) を追加、出力枠を NOTES (raw 気づき自由形式) に統一。
+    OPINIONS / ENTITIES 固定枠は撤去 (B1 entity 廃止 + tag 廃止徹底と整合)。
 
-    戻り値: {"opinions": [...], "entities": [...],
-             "self_disp_delta": {...}, "attr_disp_delta": {...}}
+    戻り値: {"notes": [...], "self_disp_delta": {...}, "attr_disp_delta": {...}}
     """
     import json
-
-    # 段階11-B Phase 5 hotfix: reflect が生成する opinion/entity tag を未登録なら
-    # inline register (register_standard_tags() 撤去後の silent fail 対策)。
-    # iku 自発 tag 発明 (memory_store 経由) の余地を残すため wm/experience は
-    # 登録せず、reflect が実際に書き込む 2 tag のみ限定。
-    from core.tag_registry import is_tag_registered, register_tag, STANDARD_TAGS
-    for _tag in ("opinion", "entity"):
-        if not is_tag_registered(_tag):
-            _cfg = STANDARD_TAGS.get(_tag)
-            if _cfg:
-                try:
-                    register_tag(
-                        _tag,
-                        learning_rules=_cfg["learning_rules"],
-                        display_format=_cfg.get("display_format", ""),
-                        origin="standard",
-                        reflect_section=_cfg.get("reflect_section"),
-                    )
-                except ValueError:
-                    pass
 
     # 段階11-A G3: 直近 log の材料分離 (self/observation)
     recent_log = state.get("log", [])[-10:]
@@ -210,21 +194,18 @@ def reflect(state: dict, call_llm_fn) -> dict:
     pending = state.get("pending", [])
     pending_text = f"{len(pending)}件未対応" if pending else "なし"
 
-    # 段階11-A G1: tag_registry 駆動の動的セクション
-    # 段階11-C G-lite Phase 3: settings.reflection.reflect_cold_start_mode で
-    # 既存 tag prior (OPINIONS/ENTITIES section) の可視性を切替、opt-in 実験。
-    try:
-        from core.config import llm_cfg
-        _cold_start = bool(
-            (llm_cfg.get("reflection", {}) or {}).get("reflect_cold_start_mode", False)
-        )
-    except Exception:
-        _cold_start = False
-    dynamic_sections = _build_reflect_sections(
-        visibility_mode="cold_start" if _cold_start else "visible"
+    # 段階11-D Phase 5 Step 5.2: cluster 推定 (posterior、永続化しない)
+    memories = load_all_memories()
+    memory_index = {m.get("id", ""): m for m in memories if m.get("id")}
+    clusters = estimate_clusters(
+        memories,
+        method="hybrid",
+        n_clusters=None,
+        llm_call_fn=call_llm_fn,
     )
+    cluster_sections = _build_cluster_sections(clusters, memory_index)
 
-    prompt = f"""あなたは自律AIシステムの内省モジュールです。以下の直近の行動を振り返り、各項目を出力してください。
+    prompt = f"""あなたは自律AIシステムの内省モジュールです。以下の直近の行動 + memory cluster 整理を振り返り、各項目を出力してください。
 
 [自己モデル]
 {self_text}
@@ -244,15 +225,21 @@ def reflect(state: dict, call_llm_fn) -> dict:
 [未対応事項]
 {pending_text}
 
+{cluster_sections}
+
 ## 振り返りのガイド (情報提示、命令ではない)
 - 観察を記述する際、視点属性 (viewer, viewer_type) を付与できる
 - 自分視点 (自分が見た何か) と他者視点の想像 (他者がどう見てると自分が思うか) は別エントリになる
 - 自分の disposition 変化は、自分の行動と結果から判断 (他者の性質から直接変動させない)
+- cluster は posterior 推定 (永続化されない事後整理)、固定カテゴリではない
 - 書く/書かないは自由
 
-以下の形式で出力してください。直近の行動の文脈に沿った内容のみ。無関係なエンティティの更新は不要。
+以下の形式で出力してください。直近の行動と memory 整理から生まれた気づきを自由に記述。
 
-{dynamic_sections}
+NOTES:
+- 〜について〜と気づいた (confidence: 0.7)
+- 〜と〜の関連性に気づいた (confidence: 0.8)
+- (自由形式、固定カテゴリなし)
 
 SELF_DISPOSITION:
 - curiosity_delta: -0.1~+0.1 (自分の直近行動の結果から変化した自分の傾向のみ)
@@ -272,7 +259,7 @@ ATTRIBUTED_DISPOSITION:
     except Exception as e:
         print(f"  [reflection] エラー: {e}")
         return {
-            "opinions": [], "entities": [],
+            "notes": [],
             "self_disp_delta": {}, "attr_disp_delta": {},
         }
 
@@ -280,21 +267,20 @@ ATTRIBUTED_DISPOSITION:
 def _parse_reflection(text: str, state: dict) -> dict:
     """内省結果をパースして記憶・dispositionに反映。
 
-    段階11-A Step 4: SELF_DISPOSITION / ATTRIBUTED_DISPOSITION の 2 セクションを
-    別々にパース。OPINIONS / ENTITIES の memory_store 時に perspective=self を
-    明示付与。
-    disposition 反映は perspective-keyed state["dispositions"] に書き込み、
-    Step 4→5 移行期間は flat state["disposition"] にも dual write。
+    段階11-D Phase 5 Step 5.2: NOTES 単一枠 (raw 気づき自由形式) で memory_store
+    (network=None、untagged path、rules 不要)。OPINIONS / ENTITIES 固定枠は
+    撤去 (B1 entity 廃止 + tag 廃止徹底と整合)。
+    SELF_DISPOSITION / ATTRIBUTED_DISPOSITION 経路は不変 (段階11-A 設計維持)。
+    reconciliation hook (`_state=state`) は NOTES の memory_store にも継承
+    (矛盾検出 → EC 誤差、段階11-B Phase 3 設計の延長)。
     """
     import re
-    opinions = []
-    entities = []
+    notes = []
     self_disp_delta = {}        # {trait_key: delta}
     attr_disp_delta = {}        # {viewer: {trait_key: (delta, confidence)}}
 
     # セクションフラグ
-    in_opinions = False
-    in_entities = False
+    in_notes = False
     in_self_disp = False
     in_attr_disp = False
 
@@ -303,23 +289,19 @@ def _parse_reflection(text: str, state: dict) -> dict:
         # ヘッダ判定 (大文字化で順序問題なく)
         upper = stripped.upper()
         if "SELF_DISPOSITION" in upper:
-            in_opinions, in_entities = False, False
+            in_notes = False
             in_self_disp, in_attr_disp = True, False
             continue
         elif "ATTRIBUTED_DISPOSITION" in upper:
-            in_opinions, in_entities = False, False
+            in_notes = False
             in_self_disp, in_attr_disp = False, True
             continue
-        elif "OPINIONS" in upper:
-            in_opinions, in_entities = True, False
-            in_self_disp, in_attr_disp = False, False
-            continue
-        elif "ENTITIES" in upper:
-            in_opinions, in_entities = False, True
+        elif "NOTES" in upper:
+            in_notes = True
             in_self_disp, in_attr_disp = False, False
             continue
 
-        if in_opinions and stripped.startswith("-"):
+        if in_notes and stripped.startswith("-"):
             content = stripped.lstrip("- ").strip()
             confidence = 0.7
             m = re.search(r'confidence:\s*([\d.]+)', content, re.IGNORECASE)
@@ -328,43 +310,14 @@ def _parse_reflection(text: str, state: dict) -> dict:
                 content = re.sub(r'\(?\s*confidence:\s*[\d.]+\s*\)?', '', content).strip()
             if content:
                 entry = memory_store(
-                    "opinion", content, {"confidence": confidence},
+                    network=None, content=content,
+                    metadata={"confidence": confidence},
                     origin="reflection", source_context="self_inference",
                     perspective=default_self_perspective(),
                     _state=state,  # 段階11-B Phase 3: reconciliation hook (矛盾検出 → EC 誤差)
                 )
-                opinions.append(entry)
-                print(f"  [reflection] opinion: {content[:60]} (conf={confidence})")
-
-        elif in_entities and stripped.startswith("-"):
-            content = stripped.lstrip("- ").strip()
-            m = re.search(r'name:\s*([^,]+),?\s*content:\s*(.*)', content, re.IGNORECASE)
-            if m:
-                name = m.group(1).strip()
-                desc = m.group(2).strip()
-                if name and desc:
-                    from core.tag_registry import get_tags_with_rule
-                    entity_tags = get_tags_with_rule("c_gradual_source")
-                    if entity_tags:
-                        existing = memory_network_search(name, networks=entity_tags, limit=3)
-                    else:
-                        existing = []
-                    matched = [e for e in existing
-                               if e.get("metadata", {}).get("entity_name", "") == name]
-                    if matched:
-                        entry_id = matched[0].get("id", "")
-                        memory_update(entry_id, content=desc)
-                        entities.append(matched[0])
-                        print(f"  [reflection] entity update: {name} = {desc[:60]}")
-                    else:
-                        entry = memory_store(
-                            "entity", desc, {"entity_name": name},
-                            origin="reflection", source_context="self_inference",
-                            perspective=default_self_perspective(),
-                            _state=state,  # 段階11-B Phase 3: reconciliation hook (矛盾検出 → EC 誤差)
-                        )
-                        entities.append(entry)
-                        print(f"  [reflection] entity new: {name} = {desc[:60]}")
+                notes.append(entry)
+                print(f"  [reflection] note: {content[:60]} (conf={confidence})")
 
         elif in_self_disp and stripped.startswith("-"):
             m = re.search(r'(\w+)_delta:\s*([-+]?[\d.]+)', stripped)
@@ -437,8 +390,7 @@ def _parse_reflection(text: str, state: dict) -> dict:
         print(f"  [reflection] attributed_disposition delta: {attr_disp_delta}")
 
     return {
-        "opinions": opinions,
-        "entities": entities,
+        "notes": notes,
         "self_disp_delta": self_disp_delta,
         "attr_disp_delta": attr_disp_delta,
     }
