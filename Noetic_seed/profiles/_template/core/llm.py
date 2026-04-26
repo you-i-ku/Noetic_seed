@@ -278,13 +278,29 @@ def _call_lmstudio_native(prompt: str, max_tokens: int, temperature: float = 0.7
     return result.content if hasattr(result, "content") else str(result)
 
 
-def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
-             image_path: str = None, image_paths: list = None) -> str:
-    """LLM呼び出し統一インターフェース。
-    image_path (単一) / image_paths (複数) のどちらか、または両方なしで呼ぶ。
-    provider は llm_cfg から動的に読み出される（次サイクルから切替反映）。
+def _detect_repetition(text: str, ngram_size: int = 5, threshold: int = 4,
+                       tail_chars: int = 400) -> bool:
+    """末尾 tail_chars に同一 char-based n-gram が threshold 回以上出現したら True。
+
+    日本語の「として、として、として、…」のような短い反復ループを検知する。
+    通常の自然な反復 (例: 「は、」「を、」3 回) では発火しないよう、
+    ngram_size=5 / threshold=4 を default にする。
     """
-    # image_paths が未指定で image_path があれば [image_path] に昇格
+    if not text or len(text) < ngram_size * threshold:
+        return False
+    tail = text[-tail_chars:] if len(text) > tail_chars else text
+    counts: dict = {}
+    for i in range(len(tail) - ngram_size + 1):
+        ng = tail[i:i + ngram_size]
+        counts[ng] = counts.get(ng, 0) + 1
+        if counts[ng] >= threshold:
+            return True
+    return False
+
+
+def _call_llm_inner(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
+                    image_path: str = None, image_paths: list = None) -> str:
+    """LLM provider dispatch (内部実装)。call_llm が repetition guard で wrap する。"""
     if image_paths is None:
         image_paths = [image_path] if image_path else None
 
@@ -299,3 +315,25 @@ def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
     else:
         # openai, gemini 等（OpenAI互換サーバ）はREST APIが正常なのでそのまま
         return _call_openai_compat(prompt, max_tokens, temperature, image_paths=image_paths)
+
+
+def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
+             image_path: str = None, image_paths: list = None,
+             max_retry: int = 2) -> str:
+    """LLM呼び出し統一インターフェース (repetition guard 付き)。
+
+    出力に repetition loop を検知したら temperature を上げて再呼び出しする
+    (max_retry まで)。すべての retry でループが消えなければ最後の出力を
+    返す (諦め)。max_retry=0 で guard 無効化 (deterministic test 用)。
+
+    image_path (単一) / image_paths (複数) のどちらか、または両方なしで呼ぶ。
+    provider は llm_cfg から動的に読み出される（次サイクルから切替反映）。
+    """
+    out = _call_llm_inner(prompt, max_tokens, temperature, image_path, image_paths)
+    for retry in range(max_retry):
+        if not _detect_repetition(out):
+            return out
+        new_temp = min(temperature + 0.2 * (retry + 1), 1.2)
+        print(f"  [llm] repetition detected, retry {retry + 1}/{max_retry} (temp={new_temp:.2f})")
+        out = _call_llm_inner(prompt, max_tokens, new_temp, image_path, image_paths)
+    return out
