@@ -119,15 +119,14 @@ def _tool_memory_store(args):
                 print("  [memory_store] 'world' は段階7 で 'wm' に統合済。リダイレクトします。")
                 _WORLD_DEPRECATION_WARNED = True
             network = "wm"
-        # 段階7 Step 5: 未登録タグは rules 必須で inline 登録
+        # 段階11-D Phase 8 hotfix (案 b'): 未登録タグは rules 省略可、空 dict default
+        # で auto register。rules 引数は残す (bitemporal=True / write_protected=True を
+        # 指定したい場合に使う、Physarum / cluster / hybrid retrieval は rules 非参照)。
+        # beta_plus / c_gradual_source は 11-D で実用途が薄れた、段階12 で schema 縮退候補。
         if not is_tag_registered(network):
-            rules = args.get("rules")
+            rules = args.get("rules") or {}
             if not isinstance(rules, dict):
-                # 段階11-B Phase 5 Step 5.2: hint を例示表現に一般化 (schema 拡張は
-                # Phase 1 で c_gradual_source、Phase 2' で write_protected を追加済。
-                # 最小書式は beta_plus / bitemporal の 2 key、iku は必要に応じて拡張可)
-                return (f"エラー: 未登録タグ '{network}' には rules 必須 "
-                        "(例: {\"beta_plus\": bool, \"bitemporal\": bool})")
+                rules = {}  # 不正な型は空 dict にフォールバック
             display_format = args.get("display_format", "") or ""
             from core.tag_registry import register_tag
             try:

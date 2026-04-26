@@ -58,8 +58,8 @@ def test_inline_register_success(tmp_path: Path):
     ])
 
 
-def test_inline_without_rules_rejects(tmp_path: Path):
-    print("== 未登録タグ + rules なし → エラー (未登録のまま) ==")
+def test_inline_without_rules_auto_registers(tmp_path: Path):
+    print("== 未登録タグ + rules なし → auto register (11-D Phase 8 hotfix 案 b') ==")
     _setup(tmp_path)
     result = _tool_memory_store({
         "network": "dream",
@@ -67,10 +67,16 @@ def test_inline_without_rules_rejects(tmp_path: Path):
         "tool_intent": "想像",
     })
     jsonl = tmp_path / "dream.jsonl"
+    rules = tr.get_tag_rules("dream")
     return all([
-        _assert("rules 必須" in result, f"エラーメッセージ: {result[:80]}"),
-        _assert(not tr.is_tag_registered("dream"), "タグ登録されない"),
-        _assert(not jsonl.exists(), "jsonl 未書込"),
+        _assert("エラー" not in result, f"成功 (実={result[:80]})"),
+        _assert(tr.is_tag_registered("dream"), "タグ auto register 成功"),
+        _assert(jsonl.exists(), "jsonl 書込成功"),
+        _assert(rules["learning_rules"]["beta_plus"] is False,
+                "全 False default: beta_plus"),
+        _assert(rules["learning_rules"]["bitemporal"] is False,
+                "全 False default: bitemporal"),
+        _assert(rules["origin"] == "dynamic", "origin=dynamic"),
     ])
 
 
@@ -151,7 +157,7 @@ def test_preview_registered_tag_no_flag(tmp_path: Path):
 
 
 def test_preview_new_tag_without_rules(tmp_path: Path):
-    print("== 承認 preview: 新タグ + rules 未指定 → handler reject 警告 ==")
+    print("== 承認 preview: 新タグ + rules 省略 → auto register 表示 (11-D Phase 8 hotfix) ==")
     _setup(tmp_path)
     preview = _format_preview(
         "memory_store",
@@ -166,7 +172,7 @@ def test_preview_new_tag_without_rules(tmp_path: Path):
     )
     return all([
         _assert("新タグ発明" in preview, "新タグ発明 フラグ"),
-        _assert("rules 未指定" in preview, "rules 未指定 警告"),
+        _assert("auto register" in preview, "auto register 表示"),
     ])
 
 
@@ -208,7 +214,7 @@ def run_all():
         results = []
         for test_fn in [
             test_inline_register_success,
-            test_inline_without_rules_rejects,
+            test_inline_without_rules_auto_registers,
             test_existing_tag_ignores_rules,
             test_persistence_after_reload,
             test_preview_new_tag_flag,
