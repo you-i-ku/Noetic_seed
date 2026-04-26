@@ -105,6 +105,7 @@ class ConversationRuntime:
     def run_turn_with_forced_tool(
         self, forced_tool_name: str,
         user_input: Optional[str] = None,
+        forced_system_prompt: Optional[str] = None,
     ) -> TurnSummary:
         """controller が事前選定した tool を LLM に強制実行させる (X-guided モード)。
 
@@ -120,9 +121,20 @@ class ConversationRuntime:
             tool_choice 未対応 backend に依存しない。
           - Anthropic: object tool_choice が正式対応のため従来通り。
 
+        段階11-D Phase 8 hotfix ② (案 Y、ゆう原案 2026-04-26):
+          forced_system_prompt が渡された場合、iteration 0 だけ system_prompt
+          の [利用可能なツール] セクションを forced_tool 1 個に絞った prompt
+          で LLM 呼出する (function calling spec の絞り込みと prompt 本文の
+          絞り込みを同期させ、gemma 等が prompt 経路で別 tool を呼ぶ抜け道を
+          塞ぐ)。iteration 1+ では元 system_prompt + filter 解除に戻し、chain
+          micro_iter のハルシネーション多様性を確保 (= 「1 step 目: 身体の意思
+          (controller) / 2 step 目以降: 脳の探索 (LLM)」の二重構造)。
+
         Args:
             forced_tool_name: controller が選定した tool 名。
             user_input: 任意の user テキスト (候補の reason など)。
+            forced_system_prompt: iteration 0 用に override する system_prompt。
+                None で従来挙動 (全 iteration で self.system_prompt 使用)。
 
         Returns:
             TurnSummary (通常の run_turn と同形式)
@@ -131,18 +143,27 @@ class ConversationRuntime:
             self.session.push_user_text(user_input)
 
         summary = TurnSummary()
-        tool_choice = self._build_tool_choice(forced_tool_name)
+        tool_choice_forced = self._build_tool_choice(forced_tool_name)
         provider_name = getattr(self.provider, "name", "")
-        filter_names: Optional[set] = (
+        filter_forced: Optional[set] = (
             None if provider_name == "anthropic" else {forced_tool_name}
         )
 
         for i in range(self.max_iterations):
             summary.iterations = i + 1
 
-            msg = self._call_llm(
-                tool_choice=tool_choice, filter_tool_names=filter_names,
-            )
+            if i == 0:
+                # 身体の意思: controller が選んだ forced_tool 1 個に視界を絞る
+                msg = self._call_llm(
+                    tool_choice=tool_choice_forced,
+                    filter_tool_names=filter_forced,
+                    system_prompt_override=forced_system_prompt,
+                )
+            else:
+                # 脳の探索: filter / system_prompt 共に元に戻し、ハルシネー
+                # ション多様性を解放 (案 Y、ゆう原案)。tool_choice も外す。
+                msg = self._call_llm()
+
             summary.assistant_messages.append(msg)
             summary.usage = msg.usage
             self.session.push_assistant_message(msg)
@@ -177,11 +198,14 @@ class ConversationRuntime:
         self,
         tool_choice=None,
         filter_tool_names: Optional[set] = None,
+        system_prompt_override: Optional[str] = None,
     ) -> AssistantMessage:
         tool_specs = self._build_tool_specs_for_provider(filter_tool_names)
         messages = self._serialize_messages()
+        # 段階11-D Phase 8 hotfix ② (案 Y): forced_tool iteration 0 で
+        # tool 視界を絞った system_prompt に切替可能、None で self.system_prompt 既定
         req = ApiRequest(
-            system_prompt=self.system_prompt,
+            system_prompt=system_prompt_override or self.system_prompt,
             messages=messages,
             tools=tool_specs,
             max_tokens=self.max_tokens,

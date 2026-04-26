@@ -373,6 +373,175 @@ def test_forced_tool_system_prompt_passed():
 
 
 # ============================================================
+# 段階11-D Phase 8 hotfix ② (案 Y、ゆう原案 2026-04-26):
+# forced_system_prompt の二重構造 (iteration 0 = 身体の意思 /
+# iteration 1+ = 脳の探索) 検証
+# ============================================================
+
+class _MultiCallProvider(BaseProvider):
+    """複数回 stream 呼出を別 capture として list に蓄積する mock。"""
+    name = "openai_compat"
+
+    def __init__(self, msgs: list, captures: list):
+        super().__init__(model="fake", api_key="", base_url="")
+        self._msgs = list(msgs)
+        self._captures = captures
+        self._idx = 0
+
+    def stream(self, request: ApiRequest) -> AssistantMessage:
+        cap = {
+            "system_prompt": request.system_prompt,
+            "tools": list(request.tools),
+            "tool_choice": request.tool_choice,
+        }
+        self._captures.append(cap)
+        msg = self._msgs[min(self._idx, len(self._msgs) - 1)]
+        self._idx += 1
+        return msg
+
+
+def test_forced_tool_iteration_0_uses_forced_system_prompt():
+    """forced_system_prompt 渡すと iteration 0 で req.system_prompt が override される (案 Y)"""
+    print("== forced ② (案 Y): iteration 0 で forced_system_prompt が使われる ==")
+    fake_msg = AssistantMessage(
+        text="", tool_uses=[ToolUseBlock(id="c1", name="read_file",
+                                          input={"path": "x"})],
+        stop_reason="tool_use",
+    )
+    capture = {}
+    provider = _FakeProvider(fake_msg, capture)
+    reg = ToolRegistry()
+    reg.register(_spec("read_file"))
+    reg.register(_spec("other_tool"))
+    rt = ConversationRuntime(
+        provider=provider, tool_registry=reg, max_iterations=1,
+        system_prompt="DEFAULT_PROMPT_ALL_TOOLS",
+        permission_enforcer=PermissionEnforcer(
+            mode=PermissionMode.WORKSPACE_WRITE),
+    )
+    rt.run_turn_with_forced_tool(
+        forced_tool_name="read_file", user_input="x",
+        forced_system_prompt="FORCED_PROMPT_ONE_TOOL",
+    )
+    return _assert(
+        capture.get("system_prompt") == "FORCED_PROMPT_ONE_TOOL",
+        "iteration 0 で forced_system_prompt 使用",
+    )
+
+
+def test_forced_tool_no_override_uses_default():
+    """forced_system_prompt None なら従来挙動 (回帰ガード)"""
+    print("== forced ② (案 Y): forced_system_prompt None で従来挙動 ==")
+    fake_msg = AssistantMessage(
+        text="", tool_uses=[ToolUseBlock(id="c1", name="read_file",
+                                          input={"path": "x"})],
+        stop_reason="tool_use",
+    )
+    capture = {}
+    provider = _FakeProvider(fake_msg, capture)
+    reg = ToolRegistry()
+    reg.register(_spec("read_file"))
+    rt = ConversationRuntime(
+        provider=provider, tool_registry=reg, max_iterations=1,
+        system_prompt="DEFAULT_PROMPT",
+        permission_enforcer=PermissionEnforcer(
+            mode=PermissionMode.WORKSPACE_WRITE),
+    )
+    rt.run_turn_with_forced_tool(
+        forced_tool_name="read_file", user_input="x",
+    )  # forced_system_prompt 省略
+    return _assert(
+        capture.get("system_prompt") == "DEFAULT_PROMPT",
+        "forced_system_prompt 不在で self.system_prompt 維持 (回帰)",
+    )
+
+
+def test_forced_tool_iteration_1_returns_to_default():
+    """max_iterations=2 で iteration 0 が forced、iteration 1 が default (案 Y 二重構造)"""
+    print("== forced ② (案 Y): iteration 1+ で default system_prompt + filter 解除 ==")
+    msgs = [
+        AssistantMessage(
+            text="", tool_uses=[ToolUseBlock(id="c1", name="read_file",
+                                              input={"path": "x"})],
+            stop_reason="tool_use",
+        ),
+        AssistantMessage(
+            text="", tool_uses=[ToolUseBlock(id="c2", name="other_tool",
+                                              input={"y": 1})],
+            stop_reason="tool_use",
+        ),
+    ]
+    captures: list = []
+    provider = _MultiCallProvider(msgs, captures)
+    reg = ToolRegistry()
+    reg.register(_spec("read_file"))
+    reg.register(_spec("other_tool"))
+    rt = ConversationRuntime(
+        provider=provider, tool_registry=reg, max_iterations=2,
+        system_prompt="DEFAULT_PROMPT_ALL_TOOLS",
+        permission_enforcer=PermissionEnforcer(
+            mode=PermissionMode.WORKSPACE_WRITE),
+    )
+    rt.run_turn_with_forced_tool(
+        forced_tool_name="read_file", user_input="x",
+        forced_system_prompt="FORCED_PROMPT_ONE_TOOL",
+    )
+    # iteration 0: forced prompt + tool 1 個 + tool_choice="required"
+    cap0 = captures[0] if len(captures) > 0 else {}
+    cap1 = captures[1] if len(captures) > 1 else {}
+    iter0_tools = cap0.get("tools", [])
+    iter1_tools = cap1.get("tools", [])
+    return all([
+        _assert(len(captures) == 2, f"2 iterations 実行 (実={len(captures)})"),
+        _assert(cap0.get("system_prompt") == "FORCED_PROMPT_ONE_TOOL",
+                "iter 0: forced system_prompt"),
+        _assert(len(iter0_tools) == 1,
+                f"iter 0: tools 1 個 (実={len(iter0_tools)})"),
+        _assert(cap0.get("tool_choice") == "required",
+                "iter 0: tool_choice=required"),
+        _assert(cap1.get("system_prompt") == "DEFAULT_PROMPT_ALL_TOOLS",
+                "iter 1+: default system_prompt に戻る (脳の探索)"),
+        _assert(len(iter1_tools) == 2,
+                f"iter 1+: 全 tool 視界 (実={len(iter1_tools)})"),
+        _assert(cap1.get("tool_choice") is None,
+                f"iter 1+: tool_choice 解除 (実={cap1.get('tool_choice')!r})"),
+    ])
+
+
+def test_forced_tool_iteration_0_filter_active():
+    """iteration 0 で filter が forced_tool 1 個に絞られる (function calling spec 経路の確認)"""
+    print("== forced ② (案 Y): iteration 0 の tools payload も 1 個に絞られる ==")
+    fake_msg = AssistantMessage(
+        text="", tool_uses=[ToolUseBlock(id="c1", name="read_file",
+                                          input={"path": "x"})],
+        stop_reason="tool_use",
+    )
+    capture = {}
+    provider = _FakeProvider(fake_msg, capture)
+    reg = ToolRegistry()
+    reg.register(_spec("read_file"))
+    reg.register(_spec("other_tool"))
+    reg.register(_spec("third_tool"))
+    rt = ConversationRuntime(
+        provider=provider, tool_registry=reg, max_iterations=1,
+        system_prompt="DEFAULT_PROMPT",
+        permission_enforcer=PermissionEnforcer(
+            mode=PermissionMode.WORKSPACE_WRITE),
+    )
+    rt.run_turn_with_forced_tool(
+        forced_tool_name="read_file", user_input="x",
+        forced_system_prompt="FORCED_PROMPT",
+    )
+    tools = capture.get("tools", [])
+    tool_names = [t.get("function", {}).get("name") for t in tools]
+    return all([
+        _assert(len(tools) == 1, f"tools 1 個 (実={len(tools)})"),
+        _assert(tool_names == ["read_file"],
+                f"forced tool のみ (実={tool_names})"),
+    ])
+
+
+# ============================================================
 # 実行
 # ============================================================
 
@@ -388,6 +557,14 @@ if __name__ == "__main__":
         ("forced: tool 無返却", test_forced_tool_no_tool_returned),
         ("forced: hooks 発火", test_forced_tool_hooks_fired),
         ("forced: system_prompt 伝搬", test_forced_tool_system_prompt_passed),
+        ("forced ② (案Y): iter0 forced_system_prompt 使用",
+         test_forced_tool_iteration_0_uses_forced_system_prompt),
+        ("forced ② (案Y): override なし回帰",
+         test_forced_tool_no_override_uses_default),
+        ("forced ② (案Y): iter1+ default 復帰 (脳の探索)",
+         test_forced_tool_iteration_1_returns_to_default),
+        ("forced ② (案Y): iter0 tools 1 個絞り",
+         test_forced_tool_iteration_0_filter_active),
     ]
     results = []
     for _label, fn in groups:

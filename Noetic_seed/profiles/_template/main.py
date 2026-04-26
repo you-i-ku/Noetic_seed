@@ -645,10 +645,25 @@ def main():
                 user_input_parts.append(f"(前のツール結果: {prev_result[:200]})")
             user_input = " ".join(user_input_parts)
 
+            # 段階11-D Phase 8 hotfix ② (案 Y、ゆう原案): forced_tool 用に
+                # tool 視界を絞った system_prompt を生成し、iteration 0 で LLM の
+                # 視界に置く。iteration 1+ では _runtime.system_prompt (全 tool 視界)
+                # に自動的に戻り、chain micro_iter のハルシネーション多様性を確保。
+                # 「身体 (controller) の意思 → 脳 (LLM) の探索」二重構造の構造誘導。
+            forced_sp = assemble_system_prompt(
+                state=state,
+                tools_dict=TOOLS,
+                fire_cause=fire_cause,
+                allowed_tools={chain_tool},
+                world_model=state.get("world_model"),
+                registry=_rt_registry,
+            )
+
             try:
                 summary = _runtime.run_turn_with_forced_tool(
                     forced_tool_name=chain_tool,
                     user_input=user_input,
+                    forced_system_prompt=forced_sp,
                 )
             except Exception as e:
                 print(f"  LLM② run_turn エラー (chain {chain_idx+1}): {e}")
