@@ -3,6 +3,13 @@
   "model": "gemma-4-26b-a4b-it",
   "vision_max_size": 896,
   "ws_token": "iku2026",
+  "llm_sampling": {
+    "top_p": 0.95,
+    "top_k": 64,
+    "min_p": 0.0,
+    "repetition_penalty": 1.05,
+    "_comment": "Gemma 4 公式推奨ベース (top_p=0.95 / top_k=64 / min_p=0.0) + repetition_penalty 1.05 (公式 disabled=1.0 から最弱介入、LM Studio + gemma-4 26b でループ抑制慣例値)。LM Studio Python SDK には camelCase で変換して渡される (topPSampling / topKSampling / minPSampling / repeatPenalty)。section 削除で legacy 挙動 (maxTokens + temperature のみ) に戻る"
+  },
   "prompt_budget": {
     "context_window": 32768,
     "completion_reserve": 8192,

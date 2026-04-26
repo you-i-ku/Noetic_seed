@@ -262,6 +262,18 @@ def _call_lmstudio_native(prompt: str, max_tokens: int, temperature: float = 0.7
         chat.add_user_message(prompt)
 
     config = {"maxTokens": max_tokens, "temperature": temperature}
+    sampling = llm_cfg.get("llm_sampling") or {}
+    if sampling:
+        # settings.json (snake_case) → LM Studio SDK (camelCase) 変換
+        # SDK default 値は非公開のため、明示しない場合は legacy 挙動 (config に渡さない)
+        if "top_p" in sampling:
+            config["topPSampling"] = sampling["top_p"]
+        if "top_k" in sampling:
+            config["topKSampling"] = sampling["top_k"]
+        if "min_p" in sampling:
+            config["minPSampling"] = sampling["min_p"]
+        if "repetition_penalty" in sampling:
+            config["repeatPenalty"] = sampling["repetition_penalty"]
     result = model.respond(chat, config=config)
     return result.content if hasattr(result, "content") else str(result)
 
