@@ -164,7 +164,17 @@ class ClaudeCodeProvider(BaseProvider):
             # ゆう web 調査 で公式 env 変数発見)。
             # 公式 doc: CLAUDE_CODE_DISABLE_AUTO_MEMORY は他の全設定 (/memory toggle
             # / settings.json) より優先、subscription 認証は維持される。
-            "env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
+            #
+            # ENABLE_CLAUDEAI_MCP_SERVERS=false は claude.ai 連携 MCP server
+            # (Gmail/Google Calendar/Google Drive 等の authenticate / complete_authentication
+            # tool 群) の自動 inject を opt-out する公式 env。setting_sources=[] /
+            # disallowed_tools glob / mcp_servers={} では消えなかった (= CLI 側で
+            # 上流注入しているため SDK option では届かない)。
+            # 出所: claude-code v2.1.63 changelog (issue #29506 で document gap 報告済)。
+            "env": {
+                "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+            },
         }
 
         # Step 3: in-process MCP 配線 (tools 非空時のみ)
