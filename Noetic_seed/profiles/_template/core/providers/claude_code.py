@@ -20,11 +20,14 @@ Noetic 哲学:
   - max_turns=1 (1 invocation = 1 turn、Noetic max_iterations=1 と一致)
 """
 import asyncio
+import uuid
 from typing import AsyncIterator
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    create_sdk_mcp_server,
+    tool,
 )
 from claude_agent_sdk import AssistantMessage as SDKAssistantMessage
 from claude_agent_sdk import ResultMessage as SDKResultMessage
@@ -61,21 +64,52 @@ class ClaudeCodeProvider(BaseProvider):
         return asyncio.run(self._stream_async(request))
 
     async def _stream_async(self, request: ApiRequest) -> AssistantMessage:
-        # Step 3 未着手: tools がある呼出は今は不可
-        if request.tools:
-            raise NotImplementedError(
-                "claude_code provider: tool calling は Step 3 で実装予定。"
-                f" (tools={len(request.tools)} 個指定)"
-            )
-
         # Step 2: image_paths があれば _build_prompt_async_iterable 内で
         # 最後の user message content array に Anthropic native image block を注入。
+        # Step 3: tools があれば in-process MCP server に射影、handler 内で
+        # request.tool_executor 経由で Noetic ToolRegistry に dispatch する。
 
-        options = ClaudeAgentOptions(
-            model=self.model,
-            system_prompt=request.system_prompt or None,
-            max_turns=1,
-        )
+        captured_invocations: list = []
+
+        options_kwargs: dict = {
+            "model": self.model,
+            "system_prompt": request.system_prompt or None,
+            "max_turns": 1,
+            # 外部 settings (CLAUDE.md auto-discovery / .mcp.json / 既存環境の
+            # 外部 MCP server 等) の読み込みを完全無効化。Noetic は self-contained
+            # な provider として SDK に渡した mcp_servers のみ使う。
+            "setting_sources": [],
+            # Claude Code CLI の built-in tools (Bash/Read/Edit/Write/Glob/Grep/
+            # ToolSearch/WebFetch/...) を全 disable。tools 引数は whitelist 形式
+            # で、空 list = built-in 全消灯。Anthropic 側で built-in 追加されても
+            # 影響なし (= 動的解決、ハードコード list 不要、ゆう gut check 2026-04-27)。
+            "tools": [],
+        }
+
+        # Step 3: in-process MCP 配線 (tools 非空時のみ)
+        if request.tools:
+            if request.tool_executor is None:
+                raise RuntimeError(
+                    "claude_code provider: tools 指定時は ApiRequest.tool_executor "
+                    "必須 (ConversationRuntime._make_tool_executor 経由で渡される)"
+                )
+            handlers: list = []
+            tool_names: list = []
+            for tool_def in request.tools:
+                handlers.append(self._build_tool_handler(
+                    tool_def, request.tool_executor, captured_invocations,
+                ))
+                tool_names.append(tool_def["name"])
+
+            mcp_server = create_sdk_mcp_server(
+                name="noetic", version="1.0.0", tools=handlers,
+            )
+            options_kwargs["mcp_servers"] = {"noetic": mcp_server}
+            options_kwargs["allowed_tools"] = [
+                f"mcp__noetic__{n}" for n in tool_names
+            ]
+
+        options = ClaudeAgentOptions(**options_kwargs)
 
         text_parts: list = []
         usage = None
@@ -104,8 +138,49 @@ class ClaudeCodeProvider(BaseProvider):
             usage=usage,
             stop_reason=stop_reason,
             raw={"messages_count": len(raw_messages)},
-            tool_invocations=[],
+            tool_invocations=captured_invocations,
         )
+
+    @staticmethod
+    def _build_tool_handler(tool_def: dict, tool_executor, captured: list):
+        """Anthropic native tool 定義を in-process MCP @tool handler に射影。
+
+        Args:
+            tool_def: {"name": ..., "description": ..., "input_schema": ...}
+            tool_executor: (tool_id, name, input) -> (output_str, is_error)
+                ConversationRuntime._make_tool_executor で生成された callable。
+            captured: ClaudeCodeProvider._stream_async 内の list、handler 内で
+                実行した invocation を append する (AssistantMessage.tool_invocations
+                に詰める用)。
+
+        Returns:
+            @tool decorator が返す handler 関数。
+        """
+        tool_name = tool_def["name"]
+        tool_desc = tool_def.get("description", "")
+        tool_schema = tool_def.get("input_schema", {"type": "object"})
+
+        @tool(tool_name, tool_desc, tool_schema)
+        async def handler(args, _name=tool_name):
+            tool_id = f"call_{uuid.uuid4().hex[:8]}"
+            # tool_executor は同期 (Noetic ToolRegistry.execute も同期)
+            # → asyncio.to_thread で event loop を blocking しないよう非同期化
+            output, is_error = await asyncio.to_thread(
+                tool_executor, tool_id, _name, args,
+            )
+            captured.append({
+                "tool_id": tool_id,
+                "tool_name": _name,
+                "tool_input": args,
+                "output": output,
+                "is_error": is_error,
+            })
+            return {
+                "content": [{"type": "text", "text": output}],
+                "is_error": is_error,
+            }
+
+        return handler
 
     @staticmethod
     async def _build_prompt_async_iterable(

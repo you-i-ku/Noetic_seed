@@ -89,6 +89,25 @@ class ConversationRuntime:
             summary.usage = msg.usage
             self.session.push_assistant_message(msg)
 
+            # Provider 完結型 (claude_code): SDK 内 in-process MCP の handler が
+            # _make_tool_executor 経由で execute 済み (push_session=False)。
+            # ここで session に tool_result を一括 push + summary に詰めて break。
+            if msg.tool_invocations:
+                for inv in msg.tool_invocations:
+                    rec = ToolInvocationRecord(
+                        tool_id=inv["tool_id"],
+                        tool_name=inv["tool_name"],
+                        tool_input=inv["tool_input"],
+                        output=inv["output"],
+                        is_error=inv["is_error"],
+                    )
+                    summary.tool_invocations.append(rec)
+                    self.session.push_tool_result(
+                        rec.tool_id, rec.output, is_error=rec.is_error,
+                    )
+                summary.finish_reason = "completed_in_provider"
+                break
+
             if not msg.tool_uses:
                 summary.finish_reason = "completed"
                 break
@@ -185,12 +204,13 @@ class ConversationRuntime:
         """provider 固有の tool_choice 値を生成。
 
         Returns:
-            - Anthropic: {"type": "tool", "name": tool_name} (object, 正式対応)
+            - Anthropic / claude_code: {"type": "tool", "name": tool_name}
+              (object, 正式対応形式)
             - OpenAI 互換: "required" (string)。tools 側で単一 tool に絞って強制。
               object 形式は LM Studio 等で未対応のため回避。
         """
         provider_name = getattr(self.provider, "name", "")
-        if provider_name == "anthropic":
+        if provider_name in ("anthropic", "claude_code"):
             return {"type": "tool", "name": tool_name}
         return "required"
 
@@ -211,12 +231,15 @@ class ConversationRuntime:
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             tool_choice=tool_choice,
+            tool_executor=self._make_tool_executor(),
         )
         return self.provider.stream(req)
 
     def _serialize_messages(self) -> list:
         name = getattr(self.provider, "name", "")
-        if name == "anthropic":
+        # claude_code は stream-json input 経路で Anthropic native content block を
+        # 受け付ける (実機確認済み 2026-04-27) ので anthropic と同じ serializer。
+        if name in ("anthropic", "claude_code"):
             return self.session.serialize_for_anthropic()
         return self.session.serialize_for_openai()
 
@@ -227,12 +250,24 @@ class ConversationRuntime:
         if filter_names is not None:
             specs = [s for s in specs if s.name in filter_names]
         name = getattr(self.provider, "name", "")
-        if name == "anthropic":
+        # claude_code は in-process MCP に Anthropic native tool 形式 (name +
+        # description + input_schema の flat) で渡す必要があるため anthropic と統一。
+        if name in ("anthropic", "claude_code"):
             return [s.to_anthropic_format() for s in specs]
         return [s.to_openai_format() for s in specs]
 
     def _execute_tool_use(self, tool_id: str, tool_name: str,
-                          tool_input: dict) -> ToolInvocationRecord:
+                          tool_input: dict,
+                          push_session: bool = True) -> ToolInvocationRecord:
+        """tool 1 件の hook + permission + approval + execute を 1 連で行う。
+
+        push_session=True (default): Anthropic / OpenAI 経路。実行結果を
+            self.session.push_tool_result で session に積む。run_turn の
+            for tu in msg.tool_uses ループからの呼び出し前提。
+        push_session=False: claude_code provider 経路。session への push は
+            run_turn の Provider 完結型分岐で一元管理する。
+            (handler 内から _make_tool_executor 経由で呼ばれる場合)
+        """
         rec = ToolInvocationRecord(
             tool_id=tool_id, tool_name=tool_name, tool_input=tool_input,
         )
@@ -242,24 +277,28 @@ class ConversationRuntime:
         current_input = pre.updated_input or tool_input
 
         if pre.denied:
-            self._finalize(rec, "[REJECTED] denied by pre hook", is_error=True)
+            self._finalize(rec, "[REJECTED] denied by pre hook",
+                           is_error=True, push_session=push_session)
             return rec
         if pre.failed:
-            self._finalize(rec, "[REJECTED] pre hook failed", is_error=True)
+            self._finalize(rec, "[REJECTED] pre hook failed",
+                           is_error=True, push_session=push_session)
             return rec
 
         decision = self.permission_enforcer.check(tool_name, current_input)
         rec.permission_decision = decision.value
 
         if decision == PermissionDecision.DENY:
-            self._finalize(rec, "[REJECTED] permission denied", is_error=True)
+            self._finalize(rec, "[REJECTED] permission denied",
+                           is_error=True, push_session=push_session)
             return rec
 
         if decision == PermissionDecision.ASK:
             approved = self._ask_approval(tool_name, current_input,
                                           rec.pre_hook_messages)
             if not approved:
-                self._finalize(rec, "[REJECTED] approval denied", is_error=True)
+                self._finalize(rec, "[REJECTED] approval denied",
+                               is_error=True, push_session=push_session)
                 return rec
 
         try:
@@ -269,7 +308,7 @@ class ConversationRuntime:
             self.hook_runner.run_post_tool_use_failure(
                 tool_name, current_input, err
             )
-            self._finalize(rec, err, is_error=True)
+            self._finalize(rec, err, is_error=True, push_session=push_session)
             return rec
 
         post = self.hook_runner.run_post_tool_use(
@@ -278,14 +317,36 @@ class ConversationRuntime:
         rec.post_hook_messages = list(post.messages)
 
         rec.tool_input = current_input
-        self._finalize(rec, output, is_error=False)
+        self._finalize(rec, output, is_error=False,
+                       push_session=push_session)
         return rec
 
+    def _make_tool_executor(self):
+        """claude_code provider 用の tool 実行 callback を生成。
+
+        ApiRequest.tool_executor として provider に渡される。in-process MCP の
+        handler 内から `(tool_id, tool_name, tool_input) -> (output, is_error)`
+        の形で呼ばれて、ConversationRuntime の hook + permission + approval
+        ロジックを完全経由する (= Anthropic / OpenAI 経路と同じ確認手順)。
+
+        session への push は handler 内では行わない (push_session=False)。
+        Provider 完結型 (claude_code) の run_turn 分岐側で一括 push する。
+        """
+        def executor(tool_id: str, tool_name: str, tool_input: dict):
+            rec = self._execute_tool_use(
+                tool_id, tool_name, tool_input, push_session=False,
+            )
+            return rec.output, rec.is_error
+        return executor
+
     def _finalize(self, rec: ToolInvocationRecord,
-                  output: str, is_error: bool) -> None:
+                  output: str, is_error: bool,
+                  push_session: bool = True) -> None:
         rec.output = output
         rec.is_error = is_error
-        self.session.push_tool_result(rec.tool_id, output, is_error=is_error)
+        if push_session:
+            self.session.push_tool_result(rec.tool_id, output,
+                                           is_error=is_error)
 
     def _ask_approval(self, tool_name: str, tool_input: dict,
                       pre_messages: list) -> bool:
