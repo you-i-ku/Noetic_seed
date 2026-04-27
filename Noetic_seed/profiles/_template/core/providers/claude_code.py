@@ -30,6 +30,7 @@ from claude_agent_sdk import AssistantMessage as SDKAssistantMessage
 from claude_agent_sdk import ResultMessage as SDKResultMessage
 from claude_agent_sdk import TextBlock as SDKTextBlock
 
+from core.providers._image import load_image_base64
 from core.providers.base import ApiRequest, AssistantMessage, BaseProvider
 
 
@@ -67,12 +68,8 @@ class ClaudeCodeProvider(BaseProvider):
                 f" (tools={len(request.tools)} 個指定)"
             )
 
-        # Step 2 未着手: 画像は警告ログ + text-only fallback (旧 _call_claude_code 互換)
-        if request.image_paths:
-            print(
-                f"  [claude_code] image_paths が {len(request.image_paths)} 枚 "
-                f"指定されたが Step 1 では text-only — Step 2 で対応予定"
-            )
+        # Step 2: image_paths があれば _build_prompt_async_iterable 内で
+        # 最後の user message content array に Anthropic native image block を注入。
 
         options = ClaudeAgentOptions(
             model=self.model,
@@ -116,15 +113,52 @@ class ClaudeCodeProvider(BaseProvider):
     ) -> AsyncIterator[dict]:
         """ApiRequest の messages を SDK の AsyncIterable[dict] 形式に変換。
 
-        Step 1 は text-only。Step 2 で最後の user message content に
-        Anthropic native image block を注入する拡張を入れる予定。
+        Step 2: request.image_paths が非空なら最後の user message content array
+        に Anthropic native image block を注入。content が str ならまず list に
+        昇格してから image block を追加する。
 
         SDK 受付形式 (実機確認済み 2026-04-27):
-            {"type": "user", "message": {"role": "user", "content": ...}}
+            {"type": "user", "message": {"role": "user",
+              "content": [{"type":"text","text":...},
+                          {"type":"image","source":{...}}]}}
         """
-        for msg in request.messages:
+        image_paths = list(request.image_paths or [])
+        last_idx = len(request.messages) - 1
+
+        for i, msg in enumerate(request.messages):
             role = msg.get("role", "user")
-            yield {
-                "type": "user" if role == "user" else "assistant",
-                "message": msg,
-            }
+
+            # 最後の user message に image block を追加 (Step 2)
+            if i == last_idx and role == "user" and image_paths:
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    blocks = [{"type": "text", "text": content}] if content else []
+                elif isinstance(content, list):
+                    blocks = list(content)
+                else:
+                    blocks = []
+
+                for ip in image_paths:
+                    img = load_image_base64(ip)
+                    if img is None:
+                        print(f"  [claude_code] 画像読込失敗: {ip}")
+                        continue
+                    b64, media_type = img
+                    blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64,
+                        },
+                    })
+
+                yield {
+                    "type": "user",
+                    "message": {"role": role, "content": blocks},
+                }
+            else:
+                yield {
+                    "type": "user" if role == "user" else "assistant",
+                    "message": msg,
+                }
