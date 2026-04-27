@@ -170,18 +170,28 @@ def _call_claude(prompt: str, max_tokens: int, image_paths: list = None) -> str:
     resp.raise_for_status()
     return resp.json()["content"][0]["text"]
 
-def _call_claude_code(prompt: str, max_tokens: int) -> str:
-    """Claude Code CLI（claude -p）。サブスクリプション枠で動く。APIキー不要。
-    --bare: hooks/MCP/memory等をスキップして高速化
-    --system-prompt: Claude Codeのデフォルトプロンプトを完全置換（ikuのプロンプトのみ使用）
-    --output-format json: 構造化出力でresultフィールドからテキスト抽出
+def _call_claude_code(prompt: str, max_tokens: int, image_paths: list = None) -> str:
+    """Claude Code CLI（claude -p）。Claude Pro/Max subscription 枠で動く（API key 不要）。
+
+    --model: settings.json の model を渡す (alias "sonnet"/"opus"/"haiku"
+        または full ID "claude-sonnet-4-6" 等)。未指定時は "sonnet" default。
+    --bare は採用しない: OAuth/keychain を読まないため subscription 認証が
+        切れて API key 必須になる (claude --help 注記、v2.1.119 で確認)。
+        代わりに cwd=tempdir で CLAUDE.md auto-discovery を擬似的に空振りさせる。
+    image_paths: claude -p は画像非対応 (unix text-in-text-out フィルタ設計)。
+        画像が来たら警告ログ出して text のみ送信。iku 自身が「画像が見えない
+        能力プロファイル」として reflection で気づく設計 (fallback しない方針、
+        ゆう判断 2026-04-27 「Gemma 残すと本末転倒」)。
     """
     import tempfile
-    # CLAUDE.mdやmemoryが存在しないtempディレクトリで実行（文脈汚染防止）
+    if image_paths:
+        print(f"  [llm] claude_code は画像非対応 ({len(image_paths)} 枚) — text のみで送信")
+    _, _, _, model = _get_active_provider_config()
     clean_dir = tempfile.mkdtemp(prefix="iku_llm_")
     cmd = [
         "claude",
         "-p", prompt,
+        "--model", model or "sonnet",
         "--output-format", "json",
         "--system-prompt", "You are a component in an autonomous AI system. Follow the instructions in the user message exactly. Do not add explanations, greetings, or meta-commentary. Do NOT use any tools.",
         "--disallowedTools", "Bash,Read,Edit,Write,WebSearch,WebFetch",
@@ -308,7 +318,7 @@ def _call_llm_inner(prompt: str, max_tokens: int = 24000, temperature: float = 0
     if provider == "claude":
         return _call_claude(prompt, max_tokens, image_paths=image_paths)
     elif provider == "claude_code":
-        return _call_claude_code(prompt, max_tokens)  # claude_codeは画像非対応
+        return _call_claude_code(prompt, max_tokens, image_paths=image_paths)
     elif provider == "lmstudio":
         # LM Studio 経由は常に公式 SDK を使う（REST API の vision バグ #968 回避）
         return _call_lmstudio_native(prompt, max_tokens, temperature, image_paths=image_paths)
