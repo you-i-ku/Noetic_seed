@@ -80,6 +80,7 @@ from core.pending_unified import pending_prune, pending_add_response_intent
 # Phase 4 Step E-2d: ConversationRuntime 統合用 import
 from core.providers.openai_compat import OpenAIProvider
 from core.providers.anthropic import AnthropicProvider
+from core.providers.claude_code import ClaudeCodeProvider
 from core.runtime.registry import ToolRegistry
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import (
@@ -251,6 +252,13 @@ def main():
         _rt_provider = AnthropicProvider(
             model=llm_cfg.get("model", ""),
             api_key=llm_cfg.get("api_key", ""),
+        )
+    elif _provider_name_raw == "claude_code":
+        # Claude Code CLI subscription 経由 (claude-agent-sdk + in-process MCP)。
+        # LLM① ② ③ ④ 統一 provider、画像 + tool calling フル対応。
+        # 詳細: WORLD_MODEL_DESIGN/CLAUDE_CODE_UNIFIED_PROVIDER_PLAN.md
+        _rt_provider = ClaudeCodeProvider(
+            model=llm_cfg.get("model", "sonnet"),
         )
     else:
         _rt_provider = OpenAIProvider(
