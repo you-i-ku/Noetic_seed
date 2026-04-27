@@ -653,26 +653,35 @@ def main():
                 user_input_parts.append(f"(前のツール結果: {prev_result[:200]})")
             user_input = " ".join(user_input_parts)
 
-            # 段階11-D Phase 8 hotfix ② (案 Y、ゆう原案): forced_tool 用に
-                # tool 視界を絞った system_prompt を生成し、iteration 0 で LLM の
-                # 視界に置く。iteration 1+ では _runtime.system_prompt (全 tool 視界)
-                # に自動的に戻り、chain micro_iter のハルシネーション多様性を確保。
-                # 「身体 (controller) の意思 → 脳 (LLM) の探索」二重構造の構造誘導。
-            forced_sp = assemble_system_prompt(
-                state=state,
-                tools_dict=TOOLS,
-                fire_cause=fire_cause,
-                allowed_tools={chain_tool},
-                world_model=state.get("world_model"),
-                registry=_rt_registry,
-            )
-
+            # 段階11-D Step 4-2 hotfix v6 (ゆう原案 2026-04-28): chain 軸の
+            # 二段構造を導入。chain_idx==0 は controller 決定 (LLM① 選択 tool) を
+            # 必ず実行する forced 段階 (run_turn_with_forced_tool 経由)。
+            # chain_idx>=1 は LLM 自由探索として run_turn (通常版) に切替えて、
+            # tool 呼ばない選択も含む LLM のブレを多様性として受容する。
+            #
+            # Phase 8 hotfix ② の max_iterations 軸二段構造 (iter 0 = forced /
+            # iter 1+ = 自由) を chain 軸に拡張した形。chain_idx>=1 では
+            # default system_prompt (全 tool 視界) で LLM が自由に判断するため、
+            # forced_sp 生成も chain 0 のみで十分。
+            # memory/feedback_llm2_iter0_forced_contract.md 参照。
             try:
-                summary = _runtime.run_turn_with_forced_tool(
-                    forced_tool_name=chain_tool,
-                    user_input=user_input,
-                    forced_system_prompt=forced_sp,
-                )
+                if chain_idx == 0:
+                    forced_sp = assemble_system_prompt(
+                        state=state,
+                        tools_dict=TOOLS,
+                        fire_cause=fire_cause,
+                        allowed_tools={chain_tool},
+                        world_model=state.get("world_model"),
+                        registry=_rt_registry,
+                        force_tool=chain_tool,
+                    )
+                    summary = _runtime.run_turn_with_forced_tool(
+                        forced_tool_name=chain_tool,
+                        user_input=user_input,
+                        forced_system_prompt=forced_sp,
+                    )
+                else:
+                    summary = _runtime.run_turn(user_input=user_input)
             except Exception as e:
                 print(f"  LLM② run_turn エラー (chain {chain_idx+1}): {e}")
                 parse_failed = f"runtime error: {e}"

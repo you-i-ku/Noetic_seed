@@ -153,6 +153,34 @@ def build_tool_block(allowed_tools: Optional[set],
 
 
 # ============================================================
+# forced_tool 強制実行指示 (LLM② iteration 0 用)
+# ============================================================
+
+def build_force_directive(force_tool: Optional[str]) -> str:
+    """LLM② iteration 0 で controller 選択 tool の強制実行を明示する block。
+
+    視界 1 個に絞る (filter_tool_names + allowed_tools whitelist) だけでは
+    LLM が text 単独応答に逃げる余地が残るため、prompt 末尾で「必ず呼べ」を
+    宣言する。LLM① 選択 = controller 決定 を LLM が判断で覆さず必ず実行する
+    design contract を prompt 層で保証する位置づけ。
+
+    feedback_llm_as_brain は構造誘導原則 (prompt で行動ルール直指示しない) だが、
+    本指示は controller 決定の実行という contract 必然性で正当化される。詳細は
+    memory/feedback_llm2_iter0_forced_contract.md。
+    """
+    if not force_tool:
+        return ""
+    return (
+        "[強制実行指示]\n"
+        f"controller は本ターンでツール「{force_tool}」の実行を選定済みです。\n"
+        "必ずこのツールを呼び出してください。\n"
+        "tool_use ブロックを 1 つ生成し、3 フィールド (tool_intent /\n"
+        "tool_expected_outcome / message) を tool_input に含めてください。\n"
+        "text のみの応答は許可されません。"
+    )
+
+
+# ============================================================
 # 全体 assembly
 # ============================================================
 
@@ -165,8 +193,9 @@ def assemble_system_prompt(
     log_budget_tok: Optional[int] = None,
     raise_on_overbudget: bool = False,
     registry=None,
+    force_tool: Optional[str] = None,
 ) -> str:
-    """Phase 4 ConversationRuntime 用 system_prompt を 5 要素で組立。
+    """Phase 4 ConversationRuntime 用 system_prompt を 5 要素 (+ forced 時 6) で組立。
 
     Args:
         state: Noetic state (log / self / energy 等)。
@@ -177,6 +206,9 @@ def assemble_system_prompt(
         log_budget_tok: log block のトークン予算。None で _calc_log_budget。
         raise_on_overbudget: True で予算超過時 ValueError。
             False なら stderr に警告を出すだけで返す。
+        force_tool: LLM② iteration 0 用に「必ず呼べ」明示を末尾追加する。
+            None で省略 (default)、controller が選定した tool 名を渡すと
+            build_force_directive 経由で強制制約 block が末尾に挿入される。
 
     Returns:
         組立後の system_prompt 文字列。
@@ -192,6 +224,9 @@ def assemble_system_prompt(
         build_world_model_section(world_model, state=state),
         "[STM — log]\n" + build_log_block(state, log_budget_tok),
         "[利用可能なツール]\n" + build_tool_block(allowed_tools, tools_dict, registry=registry),
+        # 段階11-D Step 4-2 hotfix v4: forced 時のみ末尾に強制実行指示。空文字列は
+        # 下の "\n\n".join(s for s in sections if s) で自動除外される。
+        build_force_directive(force_tool),
     ]
     prompt = "\n\n".join(s for s in sections if s)
 

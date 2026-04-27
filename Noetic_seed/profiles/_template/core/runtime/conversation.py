@@ -187,8 +187,36 @@ class ConversationRuntime:
             summary.usage = msg.usage
             self.session.push_assistant_message(msg)
 
+            # 段階11-D Step 4-2 hotfix v5: Provider 完結型 (claude_code) は
+            # SDK 内 in-process MCP の handler が _make_tool_executor 経由で
+            # 実行済みのため msg.tool_uses は常時空、msg.tool_invocations に
+            # 記録される。run_turn (line 95-109) と同じパターンを適用して
+            # forced_violation 誤判定を回避する。
+            if msg.tool_invocations:
+                for inv in msg.tool_invocations:
+                    rec = ToolInvocationRecord(
+                        tool_id=inv["tool_id"],
+                        tool_name=inv["tool_name"],
+                        tool_input=inv["tool_input"],
+                        output=inv["output"],
+                        is_error=inv["is_error"],
+                    )
+                    summary.tool_invocations.append(rec)
+                    self.session.push_tool_result(
+                        rec.tool_id, rec.output, is_error=rec.is_error,
+                    )
+                summary.finish_reason = "completed_in_provider"
+                break
+
             if not msg.tool_uses:
-                summary.finish_reason = "no_tool"
+                # 段階11-D Step 4-2 hotfix v4: iteration 0 (forced 段階) で tool
+                # 不発火 = LLM① 選択 = controller 決定 を LLM が覆した design
+                # contract 違反。memory/feedback_llm2_iter0_forced_contract.md 参照。
+                # iteration 1+ で tool 不発火は LLM 自由探索 (案 Y 二段構造) の正常 end。
+                # claude_code 完結型は上の msg.tool_invocations 分岐で先に処理済み。
+                summary.finish_reason = (
+                    "forced_violation" if i == 0 else "no_tool"
+                )
                 break
 
             for tu in msg.tool_uses:

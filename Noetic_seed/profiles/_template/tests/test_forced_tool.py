@@ -281,8 +281,12 @@ def test_forced_tool_anthropic_choice_format():
 
 
 def test_forced_tool_no_tool_returned():
-    print("== run_turn_with_forced_tool: LLM が tool を返さなかった ==")
-    # LLM が text だけ返す場合 (tool_choice 強制しても無視するケース)
+    print("== run_turn_with_forced_tool: iteration 0 で LLM が tool 不発火 → forced_violation ==")
+    # 段階11-D Step 4-2 hotfix v4: iteration 0 で LLM が tool 呼ばずに text 応答
+    # した場合、LLM① 選択 = controller 決定 を LLM が覆した contract 違反として
+    # finish_reason="forced_violation" を返す (旧実装は "no_tool"、normal exit
+    # 扱いだったが design contract 違反として格上げ)。
+    # memory/feedback_llm2_iter0_forced_contract.md 参照。
     fake_msg = AssistantMessage(
         text="申し訳ないがツール使えない", tool_uses=[],
         stop_reason="end_turn",
@@ -298,8 +302,8 @@ def test_forced_tool_no_tool_returned():
     summary = rt.run_turn_with_forced_tool(
         forced_tool_name="read_file", user_input="x")
     return all([
-        _assert(summary.finish_reason == "no_tool",
-                f"finish_reason=no_tool (実={summary.finish_reason})"),
+        _assert(summary.finish_reason == "forced_violation",
+                f"finish_reason=forced_violation (実={summary.finish_reason})"),
         _assert(len(summary.tool_invocations) == 0, "tool 実行ゼロ"),
     ])
 
@@ -541,6 +545,52 @@ def test_forced_tool_iteration_0_filter_active():
     ])
 
 
+def test_forced_tool_provider_completed_in_provider():
+    """claude_code 完結型 (tool_invocations 非空 + tool_uses 空) で forced_violation 誤判定回避。
+
+    Step 4-2 hotfix v5 regression guard: claude_code provider は SDK 内
+    in-process MCP で tool 実行済 = msg.tool_uses 常時空、msg.tool_invocations
+    に記録される。conversation.py:190 が tool_uses だけ見ると誤って
+    forced_violation 判定する旧 bug を hotfix v5 で根治した。
+    """
+    print("== run_turn_with_forced_tool: provider 完結型 (claude_code) は forced_violation 誤判定回避 ==")
+    fake_msg = AssistantMessage(
+        text="",
+        tool_uses=[],
+        stop_reason="end_turn",
+        tool_invocations=[
+            {
+                "tool_id": "call_xyz",
+                "tool_name": "read_file",
+                "tool_input": {
+                    "path": "x", "tool_intent": "i",
+                    "tool_expected_outcome": "o", "message": "m",
+                },
+                "output": "ok",
+                "is_error": False,
+            }
+        ],
+    )
+    provider = _FakeProvider(fake_msg)
+    reg = ToolRegistry()
+    reg.register(_spec("read_file"))
+    rt = ConversationRuntime(
+        provider=provider, tool_registry=reg, max_iterations=1,
+        permission_enforcer=PermissionEnforcer(
+            mode=PermissionMode.WORKSPACE_WRITE),
+    )
+    summary = rt.run_turn_with_forced_tool(
+        forced_tool_name="read_file", user_input="x")
+    return all([
+        _assert(summary.finish_reason == "completed_in_provider",
+                f"finish_reason=completed_in_provider (実={summary.finish_reason})"),
+        _assert(summary.finish_reason != "forced_violation",
+                "forced_violation 誤判定なし (regression for v5)"),
+        _assert(len(summary.tool_invocations) == 1,
+                f"tool_invocations 1 件 (実={len(summary.tool_invocations)})"),
+    ])
+
+
 # ============================================================
 # 実行
 # ============================================================
@@ -565,6 +615,8 @@ if __name__ == "__main__":
          test_forced_tool_iteration_1_returns_to_default),
         ("forced ② (案Y): iter0 tools 1 個絞り",
          test_forced_tool_iteration_0_filter_active),
+        ("forced v5 regression: claude_code 完結型 forced_violation 誤判定回避",
+         test_forced_tool_provider_completed_in_provider),
     ]
     results = []
     for _label, fn in groups:
