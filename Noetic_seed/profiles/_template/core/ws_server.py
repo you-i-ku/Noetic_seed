@@ -160,7 +160,7 @@ async def _ws_handler(websocket):
                     try:
                         from core.auth import get_llm_provider_metadata
                         import json as _json
-                        all_providers = ["lmstudio", "claude", "openai", "gemini"]
+                        all_providers = ["lmstudio", "claude", "openai", "gemini", "claude_code"]
                         providers_info = []
                         for p in all_providers:
                             meta = get_llm_provider_metadata(p)
