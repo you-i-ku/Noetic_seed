@@ -254,15 +254,14 @@ NOTES:
 - (自由形式、固定カテゴリなし)
 
 SELF_DISPOSITION:
-- curiosity_delta: -0.1~+0.1 (自分の直近行動の結果から変化した自分の傾向のみ)
-- skepticism_delta: -0.1~+0.1
-- sociality_delta: -0.1~+0.1
+- [観点]_delta: [-0.1~+0.1 の数値]
+  ([観点]は今回の内省内容に整合する観点を自由に記述。自分の直近行動の結果から変化した傾向のみ、該当があれば書く、なければ書かない)
 
 ATTRIBUTED_DISPOSITION:
 - viewer: 対象の entity name, key: 傾向名, delta: -0.1~+0.1, confidence: 0.0-1.0
-  (観察した対象の傾向を self が推定。空でも良い)
+  (観察した対象の傾向を self が推定。該当があれば書く、なければ書かない)
 
-短く、具体的に。繰り返し禁止。"""
+短く、具体的に。各 NOTE / DISPOSITION は独立に。"""
 
     try:
         text = call_llm_fn(prompt, max_tokens=1000, temperature=0.3)

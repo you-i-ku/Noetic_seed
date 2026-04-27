@@ -85,12 +85,6 @@ E2=数値
 E3=数値
 E4=数値
 
-例:
-E1=75
-E2=80
-E3=60
-E4=90
-
 評価対象:
 意図: {intent[:500]}
 予測: {expect[:500]}
@@ -103,7 +97,7 @@ E3(予測の正確さ):
 E4(この行動の新規性):"""
 
     try:
-        resp = call_llm_fn(prompt, max_tokens=24000, temperature=0.1)
+        resp = call_llm_fn(prompt, max_tokens=50, temperature=0.3)
         # デバッグログ
         from core.state import append_debug_log
         append_debug_log("LLM3 (E-value eval)", resp)

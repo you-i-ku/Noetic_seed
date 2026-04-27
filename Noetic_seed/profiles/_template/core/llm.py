@@ -319,12 +319,21 @@ def _call_llm_inner(prompt: str, max_tokens: int = 24000, temperature: float = 0
 
 def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
              image_path: str = None, image_paths: list = None,
-             max_retry: int = 2) -> str:
-    """LLM呼び出し統一インターフェース (repetition guard 付き)。
+             max_retry: int = 0) -> str:
+    """LLM呼び出し統一インターフェース (repetition guard 関数残置、default 無効)。
 
     出力に repetition loop を検知したら temperature を上げて再呼び出しする
-    (max_retry まで)。すべての retry でループが消えなければ最後の出力を
-    返す (諦め)。max_retry=0 で guard 無効化 (deterministic test 用)。
+    (max_retry まで)。すべての retry でループが消えなければ最後の出力を返す
+    (諦め)。
+
+    2026-04-27 default max_retry=2 → 0 (retry guard 実質デッドコード化):
+      smoke 検証で全系統の retry 効果ゼロを確証 (LLM3 数値ガチャのみ /
+      Reflection は連発が retry 後も同型 / memory_store 0.0 連発が完全同型 /
+      正常 JSON 出力で false positive あり)。retry は時間ロスのみで gemma を
+      attractor から脱出させていない事実を踏まえ、default で guard 無効化。
+      _detect_repetition / retry loop は残置、必要時に呼出側で max_retry=N
+      指定で復活可能 (柔軟性確保)。詳細:
+      memory/project_v05_phase5_stage11d_phase8_retry_guard_deadcode.md
 
     image_path (単一) / image_paths (複数) のどちらか、または両方なしで呼ぶ。
     provider は llm_cfg から動的に読み出される（次サイクルから切替反映）。
