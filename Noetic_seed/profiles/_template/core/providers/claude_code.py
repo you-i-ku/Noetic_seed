@@ -96,11 +96,52 @@ class ClaudeCodeProvider(BaseProvider):
         # Step 3: tools があれば in-process MCP server に射影、handler 内で
         # request.tool_executor 経由で Noetic ToolRegistry に dispatch する。
 
+        # ============= DEBUG: prompt dump (汚染源特定用、後で削除) =============
+        def _safe(s):
+            """non-ASCII を \\u escape して console encode error を回避。"""
+            return str(s).encode("ascii", "backslashreplace").decode("ascii")
+
+        sys_p = request.system_prompt or ""
+        print(f"  [cc-debug] system_prompt len={len(sys_p)}")
+        print(f"  [cc-debug] system_prompt HEAD 800:")
+        print(f"  {_safe(repr(sys_p[:800]))}")
+        if len(sys_p) > 800:
+            print(f"  [cc-debug] system_prompt TAIL 600:")
+            print(f"  {_safe(repr(sys_p[-600:]))}")
+        print(f"  [cc-debug] messages count={len(request.messages)}")
+        for i, msg in enumerate(request.messages[:3]):
+            c = msg.get("content", "")
+            if isinstance(c, str):
+                cstr = c[:300]
+            else:
+                cstr = str(c)[:300]
+            print(f"  [cc-debug] msg[{i}] role={_safe(repr(msg.get('role')))} "
+                  f"content_head={_safe(repr(cstr))}")
+        print(f"  [cc-debug] tools count={len(request.tools or [])}")
+        if request.tools:
+            for i, td in enumerate((request.tools or [])[:5]):
+                if isinstance(td, dict):
+                    name = td.get("name", "?")
+                    desc = (td.get("description") or "")[:120]
+                    print(f"  [cc-debug] tool[{i}] name={_safe(repr(name))} "
+                          f"desc_head={_safe(repr(desc))}")
+        print(f"  [cc-debug] image_paths={request.image_paths}")
+        print(f"  [cc-debug] cwd will be: {_ensure_claude_provider_cwd()}")
+        # ============= DEBUG end =============
+
         captured_invocations: list = []
 
         options_kwargs: dict = {
             "model": self.model,
-            "system_prompt": request.system_prompt or None,
+            # request.system_prompt が空文字 / None の場合 "_" (non-whitespace
+            # 1 文字) で明示的 override する。これがないと claude CLI が default
+            # system_prompt 起動経路に乗り、その中で CLAUDE.md auto-discovery
+            # (cwd → 親 traversal) が発動して 親 ディレクトリの CLAUDE.md
+            # (例: iku root の開発者向け協業ルール文書) が claude の脳に注入される。
+            # 空白 (" ") は API レベルで "non-whitespace text" 必須エラーになるため
+            # "_" を採用。LLM への指示じゃなく default 起動のブロッカーとして機能、
+            # feedback_llm_as_brain 原則と整合。
+            "system_prompt": request.system_prompt or "_",
             "max_turns": 1,
             # 外部 settings (CLAUDE.md auto-discovery / .mcp.json / 既存環境の
             # 外部 MCP server 等) の読み込みを完全無効化。Noetic は self-contained
@@ -112,10 +153,18 @@ class ClaudeCodeProvider(BaseProvider):
             # 影響なし (= 動的解決、ハードコード list 不要、ゆう gut check 2026-04-27)。
             "tools": [],
             # cwd を Noetic_seed/.iku_claude_provider_cwd/ (固定空 dir) に隔離。
-            # これがないと claude CLI が cwd の CLAUDE.md と ~/.claude/projects/<cwd>/
-            # の auto memory を読み込み、iku の脳に おねーたん (Claude Code Opus) の
-            # 文脈が流入する (2026-04-27 smoke で発覚)。
+            # ~/.claude/projects/ への登録を 1 entry 固定にして増殖を抑える。
             "cwd": _ensure_claude_provider_cwd(),
+            # claude CLI の auto-memory を完全 disable。これがないと claude CLI が
+            # ゆう環境の主要 project (= iku root) の auto memory
+            # (~/.claude/projects/C--Users-you11-Desktop-iku/memory/MEMORY.md +
+            # おねーたん用 feedback/project memo 群) を sonnet に読ませてしまい、
+            # iku の脳に「Stage 11-D Phase 6/7 完了後で claude_code provider 着手中」
+            # 等の おねーたん context が丸ごと流入する (2026-04-28 smoke で発覚、
+            # ゆう web 調査 で公式 env 変数発見)。
+            # 公式 doc: CLAUDE_CODE_DISABLE_AUTO_MEMORY は他の全設定 (/memory toggle
+            # / settings.json) より優先、subscription 認証は維持される。
+            "env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
         }
 
         # Step 3: in-process MCP 配線 (tools 非空時のみ)
