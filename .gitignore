@@ -16,6 +16,12 @@ Noetic_seed/ikuset/
 # Noetic_seed runtime
 *.bak
 
+# Claude CLI を呼ぶための固定 cwd (グローバル 1 個、Claude Code provider 経由地)
+# claude CLI は呼出時に cwd を base64 encode して ~/.claude/projects/<encoded>/ を作る。
+# 毎呼びで別 tempdir にすると ~/.claude/projects/ が増殖、固定 cwd で entry 1 個に圧縮。
+# ゆう判断 (2026-04-27): profile ごとじゃなく Noetic_seed レベルで仕組みとして 1 個。
+Noetic_seed/.iku_claude_provider_cwd/
+
 # Android project (Noetic_seed_monitor)
 Noetic_seed_monitor/.gradle/
 Noetic_seed_monitor/build/

@@ -21,6 +21,7 @@ Noetic 哲学:
 """
 import asyncio
 import uuid
+from pathlib import Path
 from typing import AsyncIterator
 
 from claude_agent_sdk import (
@@ -35,6 +36,32 @@ from claude_agent_sdk import TextBlock as SDKTextBlock
 
 from core.providers._image import load_image_base64
 from core.providers.base import ApiRequest, AssistantMessage, BaseProvider
+
+
+# Claude CLI を呼ぶための固定 cwd (Noetic_seed root 直下、グローバル 1 個)。
+# claude CLI は呼出時に必ず cwd を base64 encode して ~/.claude/projects/<encoded>/
+# を作り、そこに session log + auto memory を置く。さらに cwd 配下の CLAUDE.md を
+# auto-discovery する。
+#
+# iku root を cwd にすると おねーたん (Claude Code Opus) の memory + iku の CLAUDE.md
+# が iku 自身の脳に流入する bug が出る (2026-04-27 smoke で発覚)。固定 tempdir に
+# 隔離することで:
+#   1. CLAUDE.md auto-discovery 空振り (固定 dir 配下に CLAUDE.md なし)
+#   2. memory_paths.auto も空 (固定 dir 配下に .claude/ なし)
+#   3. ~/.claude/projects/ への登録は 1 entry 固定 (毎回別 tempdir なら増殖、これを抑制)
+#
+# ゆう判断 (2026-04-27): profile ごとじゃなく Noetic_seed レベルで仕組みとして 1 個。
+# Claude を呼び出すための経由地に過ぎず、ここに何も依存させない設計。
+# .gitignore で除外済 (Noetic_seed/.iku_claude_provider_cwd/)。
+_CLAUDE_PROVIDER_CWD = (
+    Path(__file__).resolve().parents[4] / ".iku_claude_provider_cwd"
+)
+
+
+def _ensure_claude_provider_cwd() -> str:
+    """固定 cwd を作成 (exist_ok) し、絶対 path 文字列で返す。"""
+    _CLAUDE_PROVIDER_CWD.mkdir(exist_ok=True)
+    return str(_CLAUDE_PROVIDER_CWD)
 
 
 class ClaudeCodeProvider(BaseProvider):
@@ -84,6 +111,11 @@ class ClaudeCodeProvider(BaseProvider):
             # で、空 list = built-in 全消灯。Anthropic 側で built-in 追加されても
             # 影響なし (= 動的解決、ハードコード list 不要、ゆう gut check 2026-04-27)。
             "tools": [],
+            # cwd を Noetic_seed/.iku_claude_provider_cwd/ (固定空 dir) に隔離。
+            # これがないと claude CLI が cwd の CLAUDE.md と ~/.claude/projects/<cwd>/
+            # の auto memory を読み込み、iku の脳に おねーたん (Claude Code Opus) の
+            # 文脈が流入する (2026-04-27 smoke で発覚)。
+            "cwd": _ensure_claude_provider_cwd(),
         }
 
         # Step 3: in-process MCP 配線 (tools 非空時のみ)
