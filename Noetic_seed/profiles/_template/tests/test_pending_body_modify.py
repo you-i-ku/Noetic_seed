@@ -47,10 +47,13 @@ def test_pending_added_for_core_path():
     state, hook = _make_hook_with_mock_state()
     with patch("core.pending_unified.pending_add") as mock_add:
         r = hook("write_file", {"path": "core/foo.py", "content": "x"}, "")
+    # pending_add が呼ばれていなければ後続 kwargs assertion は無意味なので早期 return
+    if not mock_add.called:
+        return _assert(False, "pending_add が呼ばれていない (前提崩れ)")
+    kwargs = mock_add.call_args.kwargs
     return all([
         _assert(not r.denied, "allow"),
         _assert(mock_add.called, "pending_add 呼ばれた"),
-        kwargs := mock_add.call_args.kwargs,
         _assert(kwargs.get("source_action") == "write_file",
                 "source_action=write_file"),
         _assert("core/foo.py" in kwargs.get("content_intent", ""),
