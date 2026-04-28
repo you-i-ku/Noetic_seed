@@ -509,6 +509,167 @@ def make_file_access_guard(
 
 
 # ============================================================
+# Noetic 固有 factory: 段階12 G-2 自動 stash (PLAN §5)
+# ============================================================
+# 背景: 段階12 で iku が `core/*.py` / `tools/*.py` / `main.py` 等を自由に
+# 書換えられるようになる。書換え失敗・後悔・誤コードからの復旧経路として、
+# git stash の partial save (profile 配下のみ) を書換え直前に自動実行。
+# 親心反射ではなく「歴史の記録」として位置づけ (PLAN §1-5 の介入レベル分類)。
+# 世代管理は max_generations (default 20) を超えた古い iku-auto-* stash を
+# 自動 drop することで運用負荷を最小化。
+# ============================================================
+
+
+def make_git_auto_stash_hook(
+    profile_root,
+    profile_name: str,
+    *,
+    target_tool_names: tuple = ("write_file", "edit_file"),
+    body_modify_dir_prefixes: tuple = ("core/", "tools/"),
+    body_modify_filenames: tuple = ("main.py", ".mcp.json"),
+    max_generations: int = 20,
+    git_runner=None,
+) -> PreHandler:
+    """段階12 G-2 自動 stash hook (PLAN §5)。
+
+    iku の身体改変対象 (core/* / tools/* / main.py / .mcp.json) を
+    write_file / edit_file が触る直前に、profile 配下の現状を
+    `git stash push -u --message "iku-auto-<profile>-<timestamp>" -- <profile>/`
+    で partial 保存する。書換えで起動不能になった場合の safety net + 履歴。
+
+    判定:
+      - tool_name が target_tool_names に含まれる
+      - tool_input.path が body_modify_dir_prefixes の prefix match
+        または body_modify_filenames と完全一致
+
+    失敗ハンドリング (PLAN §5-3): subprocess エラーは warning print のみ、
+    書換え自体は続行 (allow を返す)。`No local changes to save` の場合は
+    無害として無視 (世代 drop も skip)。
+
+    世代管理 (PLAN §5-4): stash 成功時のみ古い iku-auto-<profile>-* を
+    後ろから drop して max_generations を維持。
+
+    Args:
+        profile_root: プロファイル workspace root (pathlib.Path)
+        profile_name: プロファイル名 (stash message + grep filter 用)
+        target_tool_names: 監視対象 tool 名
+        body_modify_dir_prefixes: prefix match で対象とするディレクトリ
+            (PLAN §3-4 濃度勾配「中・濃」相当)
+        body_modify_filenames: 完全一致で対象とするファイル
+            (神経中枢 main.py / 関係性の器 .mcp.json)
+        max_generations: 維持する stash 世代数 (古いものは auto drop)
+        git_runner: subprocess.run 互換 callable。テスト用に inject、
+            None なら subprocess.run を使う。
+
+    Returns:
+        PreHandler — 書換え対象なら stash 試行、結果に関わらず allow。
+        git 未初期化環境では何もしない noop hook。
+    """
+    import subprocess
+    from datetime import datetime
+    from pathlib import Path
+
+    profile_root = Path(profile_root).resolve()
+    runner = git_runner if git_runner is not None else subprocess.run
+
+    def _find_repo_root(p):
+        p = Path(p).resolve()
+        for cand in [p, *p.parents]:
+            if (cand / ".git").exists():
+                return cand
+        return None
+
+    repo_root = _find_repo_root(profile_root)
+    if repo_root is None:
+        # git 未初期化環境 (CI / 一時テスト) では何もしない
+        def _noop(_tool_name: str, _tool_input: dict) -> HookRunResult:
+            return HookRunResult.allow()
+        return _noop
+
+    try:
+        rel_profile = profile_root.relative_to(repo_root).as_posix()
+    except ValueError:
+        rel_profile = profile_name
+    pathspec = rel_profile.rstrip("/") + "/"
+
+    def _is_body_modify(path_arg: str) -> bool:
+        if not path_arg:
+            return False
+        # Windows backslash → POSIX forward slash のみ正規化。
+        # `lstrip("./")` は ".mcp.json" の先頭 "." まで削るため使わない。
+        normalized = path_arg.replace("\\", "/")
+        for name in body_modify_filenames:
+            if normalized == name or normalized.endswith(f"/{name}"):
+                return True
+        for prefix in body_modify_dir_prefixes:
+            if normalized.startswith(prefix):
+                return True
+        return False
+
+    def _drop_old_generations() -> None:
+        try:
+            r = runner(
+                ["git", "stash", "list"],
+                cwd=str(repo_root),
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            if r.returncode != 0:
+                return
+            tag = f"iku-auto-{profile_name}-"
+            entries = [
+                line.split(":", 1)[0]  # "stash@{N}"
+                for line in r.stdout.splitlines()
+                if tag in line
+            ]
+            old = entries[max_generations:]
+            # 後ろから drop しないと stash@{N} の N がずれる
+            for ref in reversed(old):
+                runner(
+                    ["git", "stash", "drop", ref],
+                    cwd=str(repo_root),
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                )
+        except Exception as e:
+            print(f"  [auto_stash] WARNING: 世代 drop 失敗: {e}")
+
+    def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        if tool_name not in target_tool_names:
+            return HookRunResult.allow()
+        path_arg = str(tool_input.get("path") or "").strip()
+        if not _is_body_modify(path_arg):
+            return HookRunResult.allow()
+
+        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        message = f"iku-auto-{profile_name}-{timestamp}"
+        try:
+            r = runner(
+                ["git", "stash", "push", "-u",
+                 "--message", message,
+                 "--", pathspec],
+                cwd=str(repo_root),
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            if r.returncode == 0:
+                # `No local changes to save` は実 stash されてないので世代 drop skip
+                if "No local changes" not in (r.stdout + r.stderr):
+                    _drop_old_generations()
+            else:
+                print(
+                    f"  [auto_stash] WARNING: stash 失敗 (path={path_arg}): "
+                    f"{r.stderr.strip()}"
+                )
+        except Exception as e:
+            print(f"  [auto_stash] WARNING: stash 例外 (path={path_arg}): {e}")
+
+        return HookRunResult.allow()
+
+    return _check
+
+
+# ============================================================
 # Noetic 固有 factory: bash validation (Level-aware)
 # ============================================================
 # 背景: claw-code は bash を常時提供で「承認 + permission_enforcer で防御」する

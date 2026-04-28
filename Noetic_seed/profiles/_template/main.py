@@ -93,6 +93,7 @@ from core.runtime.hooks import (
     HookRunner,
     make_bash_validation_hook,
     make_file_access_guard,
+    make_git_auto_stash_hook,
     make_pre_tool_use_approval_check,
     make_post_tool_use_evaluation,
     make_post_tool_use_failure_logger,
@@ -314,6 +315,11 @@ def main():
     # glob_search/grep_search に Noetic 固有の secrets guard + sandbox 外書込禁止
     # を Pre-hook で被せる (legacy _read_file/_write_file/_list_files の代替)
     _hook_runner.register_pre(make_file_access_guard(BASE_DIR))
+    # 段階12 Step 3 (PLAN §5): G-2 自動 stash hook。core/* / tools/* /
+    # main.py / .mcp.json への write_file / edit_file の直前に profile 配下を
+    # git stash で partial 保存、身体改変履歴の safety net + 20 世代 auto drop。
+    # git 未初期化環境では noop で安全に通過。
+    _hook_runner.register_pre(make_git_auto_stash_hook(BASE_DIR, BASE_DIR.name))
     # bash は Level-aware validation で Level 0-2 では read-only 系のみ、
     # 破壊的コマンドは Level 問わず自動拒否、WARN は承認画面に警告付き表示
     _hook_runner.register_pre(make_bash_validation_hook(
