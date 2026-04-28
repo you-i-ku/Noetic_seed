@@ -146,7 +146,7 @@ def _x_get_tweets_from_page(page, n=10):
 
 
 def _x_confirm(action: str, preview: str) -> bool:
-    """X操作は自動承認（Human-in-the-loopはexec_code/self_modifyのみ）"""
+    """X操作は自動承認（Human-in-the-loop は exec_code 等の sandbox 実行系のみ）"""
     print(f"  [X {action}] {preview[:80]}")
     return True
 

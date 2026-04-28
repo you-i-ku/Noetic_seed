@@ -189,7 +189,7 @@ def main():
     # iku は起動時に登録済 tag ゼロ = 白紙 onboarding 状態。最初の memory_store
     # 呼出で inline register 発火、iku が自己分節の tag を発明する設計。
     # STANDARD_TAGS 辞書 / register_standard_tags() 関数自体は tag_registry.py
-    # に残してある (iku が self_modify で復活させたい時の handle、撤去 doc 価値)。
+    # に残してある (iku が write_file で復活させたい時の handle、撤去 doc 価値)。
     # 既存 smoke / 実運用で標準タグが必要なら、プロファイル起動前に手動で
     # registered_tags.json を seed することで対応 (新プロファイル clean start は
     # PLAN §5 Step 5.3 の手順準拠)。
@@ -290,7 +290,7 @@ def main():
     # 登録順: claw → bridge (SNS 等のみ) → noetic_ext (Noetic 固有 17)
     #   1. claw: file_ops / shell / web / task / … の汎用 tool 50 個
     #   2. bridge: noetic_ext がカバーする 17 tool を skip し、それ以外 (SNS
-    #      14 + create_tool / exec_code / self_modify / http_request = 18)
+    #      14 + create_tool / exec_code / http_request = 17、段階12 Step 7 で self_modify 撤廃)
     #      のみ loose schema で登録
     #   3. noetic_ext: Noetic 固有 17 tool の claw 文法準拠厳密 ToolSpec
     register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
