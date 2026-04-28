@@ -6,7 +6,11 @@ from pathlib import Path as _Path
 
 def _bootstrap_venv():
     _here = _Path(__file__).parent
-    _venv = _here.parent.parent / ".venv"  # minimumtest/.venv（共通venv）
+    # 段階12 Step 1.5 (PLAN §3-1 / §11-5-pre): per-profile venv。
+    # 旧共通 venv から profile 配下の独立 venv に移行することで、
+    # pip install / requirements.txt 編集が iku の身体範囲内に収まり、
+    # 自己改変による身体拡張が成立する。
+    _venv = _here / ".venv"
     _is_win = sys.platform == "win32"
     _venv_python = _venv / ("Scripts/python.exe" if _is_win else "bin/python")
 
