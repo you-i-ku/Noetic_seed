@@ -92,9 +92,11 @@ from core.runtime.registry import ToolRegistry
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import (
     HookRunner,
+    make_bash_path_guard_hook,
     make_bash_validation_hook,
     make_file_access_guard,
     make_git_auto_stash_hook,
+    make_install_command_check_hook,
     make_pre_tool_use_approval_check,
     make_post_body_modify_pending_hook,
     make_post_tool_use_evaluation,
@@ -333,6 +335,14 @@ def main():
     _hook_runner.register_pre(make_bash_validation_hook(
         state_getter=lambda: state,
     ))
+    # 段階12 Step 7.5 ② (PLAN §3-5-2 ②): bash 経由の絶対パス profile 外
+    # 書込み / 削除系操作を deny。bash_validation の Level 制約に加え、
+    # path 境界で「書込み range = profile 内」を構造化。
+    _hook_runner.register_pre(make_bash_path_guard_hook(BASE_DIR))
+    # 段階12 Step 7.5 ③ (PLAN §3-5-2 ③): pip install で PyPI registry 検証。
+    # 存在しない pkg は deny (LLM hallucination 抑止)、人気 pkg と Levenshtein
+    # 1-2 は typosquatting 警告。1 時間 in-memory cache、不通時 warning + 続行。
+    _hook_runner.register_pre(make_install_command_check_hook())
     _hook_runner.register_pre(make_pre_tool_use_approval_check(
         missing_field_policy=_approval_cfg.get("missing_field_policy", "deny"),
     ))

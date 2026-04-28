@@ -767,6 +767,321 @@ def make_post_body_modify_pending_hook(
 
 
 # ============================================================
+# Noetic 固有 factory: 段階12 Step 7.5 ② — bash 境界強化
+# ============================================================
+# 背景: 段階12 Step 2 で file_access_guard は profile 境界に拡張済だが、
+# bash 経由の絶対パス操作 (例: rm -rf C:\Users\you11\) は file 系 tool 限定
+# guard では拾えない (test_non_file_tool_passthrough 参照)。
+# 本 hook で bash command を shlex parse して write 系コマンド (rm/mv/cp/...) +
+# 絶対パス引数 + profile 外を検出 → 承認不能 deny。L4 ホスト OS 隔離 (段階13)
+# が完成するまでの中間防御層 (PLAN §3-5-3 / §3-6 Defense in Depth)。
+# ============================================================
+
+
+_BASH_WRITE_COMMANDS = frozenset({
+    "rm", "mv", "cp", "dd", "touch", "mkdir", "rmdir", "chmod", "chown",
+    "tee", "del", "rd", "fsutil", "shred", "ln", "install",
+})
+_BASH_WRITE_REDIRECTS = (">", ">>")
+
+
+def make_bash_path_guard_hook(profile_root) -> PreHandler:
+    """段階12 Step 7.5 ② (PLAN §3-5-2 ②): bash 経由の絶対パス profile 外
+    操作 deny hook。
+
+    判定:
+      1. tool_name == "bash"
+      2. command を shlex.split で parse、構文エラーなら allow (validation hook 委譲)
+      3. write 系コマンド (rm / mv / cp / dd / touch / mkdir / chmod / ...) または
+         > / >> redirect 含む
+      4. かつ絶対パスの引数があり、Path.resolve() canonical で profile_root の
+         subpath じゃない → DENY
+
+    read 系 (cat / ls / head 等) や python script 実行は対象外、本 hook で
+    防げない攻撃ベクトルは段階13 (L4 専用 Windows User + L5 Firewall) で塞ぐ。
+
+    Args:
+        profile_root: プロファイル workspace root (pathlib.Path)
+
+    Returns:
+        PreHandler — bash + write 系 + 絶対パス profile 外で deny、他 allow。
+    """
+    import shlex
+    from pathlib import Path
+
+    profile_root = Path(profile_root).resolve()
+
+    def _is_write_command(tokens) -> bool:
+        if not tokens:
+            return False
+        # 最初の token から path を除いたコマンド名
+        first = tokens[0].replace("\\", "/").split("/")[-1]
+        if first in _BASH_WRITE_COMMANDS:
+            return True
+        # `python -m pip install` 等の sub-command
+        for tok in tokens:
+            if tok in _BASH_WRITE_REDIRECTS:
+                return True
+        return False
+
+    def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        if tool_name != "bash":
+            return HookRunResult.allow()
+        cmd = str(tool_input.get("command") or "")
+        if not cmd:
+            return HookRunResult.allow()
+        try:
+            tokens = shlex.split(cmd, posix=True)
+        except ValueError:
+            # shlex 失敗は構文不正、bash_validation_hook に委譲
+            return HookRunResult.allow()
+        if not _is_write_command(tokens):
+            return HookRunResult.allow()
+        # 絶対パス引数の境界判定。
+        # Windows pathlib の罠: Path("/etc/passwd").is_absolute() は POSIX で
+        # True、Windows で False (Windows は drive letter 必須扱い)。bash
+        # command は POSIX-style (/) と Windows-style (C:\) の両方が混在し
+        # うるので、文字列で先に「絶対っぽいか」判定してから resolve する。
+        for tok in tokens:
+            if not tok or tok.startswith("-"):
+                continue
+            is_abs = (
+                tok.startswith("/")
+                or (len(tok) >= 3 and tok[1] == ":" and tok[2] in ("/", "\\"))
+            )
+            if not is_abs:
+                continue
+            try:
+                resolved = Path(tok).resolve()
+                try:
+                    resolved.relative_to(profile_root)
+                except ValueError:
+                    return HookRunResult.deny([
+                        f"[bash_path_guard] bash 経由の profile 境界外への絶対パス"
+                        f"書込み・削除を禁止 (token={tok}, "
+                        f"profile_root={profile_root})。"
+                        f"profile 配下の相対パス、または read 系コマンド (cat/ls 等)"
+                        f"なら通常通り使えます。"
+                    ])
+            except (OSError, ValueError):
+                continue
+        return HookRunResult.allow()
+
+    return _check
+
+
+# ============================================================
+# Noetic 固有 factory: 段階12 Step 7.5 ③ — slopsquatting 事前検証 hook
+# ============================================================
+# 背景: 段階12 で iku が pip install 経由でライブラリを身体拡張できる
+# (PLAN §3-1 + Step 1.5)。LLM hallucination で存在しない pkg 名を提案 →
+# 攻撃者が空 pkg を事前登録 (slopsquatting、USENIX 2025 で 5.2% 商用 LLM
+# hallucination 率 + 43% 再現性確認) → 実害発生という攻撃を構造的抑止。
+#
+# 検証 (PLAN §3-5-2 ③ literal):
+#   - 存在: PyPI registry で pkg 真偽性確認 → なければ deny
+#   - typosquatting: 人気 pkg と Levenshtein 距離 1-2 → 警告
+#
+# 1 時間 in-memory cache で連続 install 時の重複問合せ削減、ネットワーク不通
+# 時は warning のみで install 自体は allow (PLAN §3-5-2 ③ fallback)。
+# 作成日 / download count 検証は将来拡張 (PyPI JSON では download 直接取得
+# 不可、pypistats API 別途必要)。npm / cargo / go は将来拡張、本実装は
+# pip + PyPI のみ MVP。
+# ============================================================
+
+
+_POPULAR_PYPI_PKGS = (
+    "requests", "numpy", "pandas", "django", "flask", "pytest",
+    "boto3", "scikit-learn", "tensorflow", "torch", "matplotlib",
+    "pillow", "lxml", "click", "pyyaml", "sqlalchemy", "fastapi",
+    "httpx", "aiohttp", "scipy", "beautifulsoup4", "selenium",
+)
+
+
+def make_install_command_check_hook(
+    *,
+    cache_ttl_sec: int = 3600,
+    http_get=None,
+) -> PreHandler:
+    """段階12 Step 7.5 ③ (PLAN §3-5-2 ③): bash の pip install で
+    PyPI registry を用いた pkg 真偽性検証 hook (slopsquatting 抑止)。
+
+    Args:
+        cache_ttl_sec: 1 pkg の検証結果キャッシュ有効期限 (秒)、default 1 時間
+        http_get: テスト用 callable inject (url → body str | None)、None なら
+            urllib.request を使う
+
+    Returns:
+        PreHandler — pip install パターンマッチ時に PyPI 検証、
+        - registry に存在しない: deny
+        - 人気 pkg と Levenshtein 1-2: warning (allow + message)
+        - ネットワーク不通: warning のみ (allow + message)
+        他は allow passthrough。
+    """
+    import json
+    import shlex
+    import time
+    import urllib.error
+    import urllib.request
+
+    cache: dict = {}  # {pkg_name: (timestamp, result_dict)}
+
+    def _default_http_get(url: str):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "noetic-seed/0.5"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    return resp.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return "__NOT_FOUND__"  # 存在しない pkg
+            return None  # その他 HTTP error
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return None  # ネットワーク不通
+        return None
+
+    fetch = http_get if http_get is not None else _default_http_get
+
+    def _levenshtein(a: str, b: str, max_dist: int = 2) -> int:
+        if abs(len(a) - len(b)) > max_dist:
+            return max_dist + 1
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a):
+            curr = [i + 1]
+            for j, cb in enumerate(b):
+                ins = curr[j] + 1
+                dele = prev[j + 1] + 1
+                sub = prev[j] + (ca != cb)
+                curr.append(min(ins, dele, sub))
+            prev = curr
+        return prev[-1]
+
+    def _check_pypi_pkg(pkg_name: str) -> dict:
+        """PyPI registry で pkg を検証、result dict を返す。
+        Returns: {"exists": bool, "warnings": [str], "network_ok": bool}
+        """
+        now = time.time()
+        if pkg_name in cache:
+            ts, cached = cache[pkg_name]
+            if now - ts < cache_ttl_sec:
+                return cached
+
+        result = {"exists": False, "warnings": [], "network_ok": False}
+        url = f"https://pypi.org/pypi/{pkg_name}/json"
+        body = fetch(url)
+        if body is None:
+            # ネットワーク不通 (PLAN §3-5-2 ③ fallback)
+            result["warnings"].append(
+                f"[slopsquatting_check] PyPI 問合せ失敗 (pkg={pkg_name})、"
+                f"ネットワーク不通の可能性。検証 skip して install 続行。"
+            )
+            cache[pkg_name] = (now, result)
+            return result
+        result["network_ok"] = True
+        if body == "__NOT_FOUND__":
+            # registry に存在しない確定
+            cache[pkg_name] = (now, result)
+            return result
+        try:
+            data = json.loads(body)
+            if not isinstance(data, dict) or "info" not in data:
+                cache[pkg_name] = (now, result)
+                return result
+        except json.JSONDecodeError:
+            result["warnings"].append(
+                f"[slopsquatting_check] PyPI レスポンス parse 失敗 (pkg={pkg_name})"
+            )
+            cache[pkg_name] = (now, result)
+            return result
+
+        result["exists"] = True
+        # Levenshtein typosquatting check
+        for popular in _POPULAR_PYPI_PKGS:
+            if pkg_name == popular:
+                break
+            dist = _levenshtein(pkg_name, popular)
+            if 1 <= dist <= 2:
+                result["warnings"].append(
+                    f"[slopsquatting_check] {pkg_name} は人気 pkg '{popular}' と "
+                    f"Levenshtein 距離 {dist}、typosquatting 警告。"
+                )
+                break
+
+        cache[pkg_name] = (now, result)
+        return result
+
+    def _extract_pip_install_pkgs(tokens: list) -> list:
+        """bash command tokens から pip install の pkg 名候補を抽出。
+        対応: pip install <pkg>、python -m pip install <pkg>、`pkg==1.0` 形式。
+        local install (-e .、 ./path/、 /abs/path) は pkg 抽出対象外。
+        """
+        pip_idx = -1
+        for i, tok in enumerate(tokens):
+            if tok in ("pip", "pip3"):
+                pip_idx = i
+                break
+            if tok in ("python", "python3", "py") and i + 2 < len(tokens):
+                if tokens[i + 1] == "-m" and tokens[i + 2] in ("pip", "pip3"):
+                    pip_idx = i + 2
+                    break
+        if pip_idx == -1:
+            return []
+        if pip_idx + 1 >= len(tokens) or tokens[pip_idx + 1] != "install":
+            return []
+        pkgs = []
+        for tok in tokens[pip_idx + 2:]:
+            if tok.startswith("-"):
+                continue  # -e / --upgrade 等
+            if "/" in tok or "\\" in tok or tok == ".":
+                continue  # local path install
+            # `pkg==1.0` 等の version specifier から pkg 名のみ
+            for sep in ("==", ">=", "<=", "~=", ">", "<"):
+                if sep in tok:
+                    tok = tok.split(sep)[0]
+                    break
+            if tok and tok[0].isalpha():
+                pkgs.append(tok.strip())
+        return pkgs
+
+    def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        if tool_name != "bash":
+            return HookRunResult.allow()
+        cmd = str(tool_input.get("command") or "")
+        # 高速 path: pip install を含まないコマンドは即 passthrough
+        if not cmd or "install" not in cmd or "pip" not in cmd:
+            return HookRunResult.allow()
+        try:
+            tokens = shlex.split(cmd, posix=True)
+        except ValueError:
+            return HookRunResult.allow()
+        pkgs = _extract_pip_install_pkgs(tokens)
+        if not pkgs:
+            return HookRunResult.allow()
+
+        deny_reasons = []
+        warnings = []
+        for pkg in pkgs:
+            result = _check_pypi_pkg(pkg)
+            warnings.extend(result.get("warnings", []))
+            if result["network_ok"] and not result["exists"]:
+                # registry に存在しない (= hallucination 確定)
+                deny_reasons.append(
+                    f"[slopsquatting_check] '{pkg}' が PyPI registry に存在しません "
+                    f"(LLM hallucination の可能性、deny)。"
+                )
+
+        if deny_reasons:
+            return HookRunResult.deny(deny_reasons + warnings)
+        if warnings:
+            return HookRunResult.allow(warnings)
+        return HookRunResult.allow()
+
+    return _check
+
+
+# ============================================================
 # Noetic 固有 factory: bash validation (Level-aware)
 # ============================================================
 # 背景: claw-code は bash を常時提供で「承認 + permission_enforcer で防御」する
