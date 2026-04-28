@@ -20,6 +20,8 @@ Noetic 哲学:
   - max_turns=1 (1 invocation = 1 turn、Noetic max_iterations=1 と一致)
 """
 import asyncio
+import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import AsyncIterator
@@ -97,18 +99,10 @@ class ClaudeCodeProvider(BaseProvider):
         # request.tool_executor 経由で Noetic ToolRegistry に dispatch する。
 
         captured_invocations: list = []
+        system_prompt_path: str | None = None
 
         options_kwargs: dict = {
             "model": self.model,
-            # request.system_prompt が空文字 / None の場合 "_" (non-whitespace
-            # 1 文字) で明示的 override する。これがないと claude CLI が default
-            # system_prompt 起動経路に乗り、その中で CLAUDE.md auto-discovery
-            # (cwd → 親 traversal) が発動して 親 ディレクトリの CLAUDE.md
-            # (例: iku root の開発者向け協業ルール文書) が claude の脳に注入される。
-            # 空白 (" ") は API レベルで "non-whitespace text" 必須エラーになるため
-            # "_" を採用。LLM への指示じゃなく default 起動のブロッカーとして機能、
-            # feedback_llm_as_brain 原則と整合。
-            "system_prompt": request.system_prompt or "_",
             "max_turns": 1,
             # 外部 settings (CLAUDE.md auto-discovery / .mcp.json / 既存環境の
             # 外部 MCP server 等) の読み込みを完全無効化。Noetic は self-contained
@@ -144,6 +138,30 @@ class ClaudeCodeProvider(BaseProvider):
             },
         }
 
+        # system_prompt: 空なら "_" 1 文字で default 起動経路 (CLAUDE.md
+        # auto-discovery / 親ディレクトリ traversal) をブロックする。空白 (" ")
+        # は API レベルで non-whitespace 必須エラーで弾かれるため "_" を採用、
+        # feedback_llm_as_brain 原則と整合 (LLM 指示じゃなく起動ブロッカー)。
+        # 非空なら tempfile に書き出して --system-prompt-file 経路で渡す。
+        # 直接 --system-prompt CLI 引数で全文渡すと、tool_level 1 + log 累積で
+        # Windows CreateProcessW の 32767 char 制限を超え、subprocess 起動が
+        # FileNotFoundError 経路で死亡する (SDK subprocess_cli.py L477-487 の
+        # except 分岐が OSError errno を判別せず CLINotFoundError "Claude Code
+        # not found at:" として誤表示する SDK bug で症状判別困難、2026-04-28
+        # cycle 20 micro-loop 暴走で真因特定)。
+        if request.system_prompt:
+            tf = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8",
+            )
+            tf.write(request.system_prompt)
+            tf.close()
+            system_prompt_path = tf.name
+            options_kwargs["system_prompt"] = {
+                "type": "file", "path": system_prompt_path,
+            }
+        else:
+            options_kwargs["system_prompt"] = "_"
+
         # Step 3: in-process MCP 配線 (tools 非空時のみ)
         if request.tools:
             if request.tool_executor is None:
@@ -176,19 +194,26 @@ class ClaudeCodeProvider(BaseProvider):
 
         prompt_iter = self._build_prompt_async_iterable(request)
 
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(prompt_iter)
-            async for msg in client.receive_response():
-                raw_messages.append(msg)
-                if isinstance(msg, SDKAssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, SDKTextBlock):
-                            text_parts.append(block.text)
-                elif isinstance(msg, SDKResultMessage):
-                    usage = getattr(msg, "usage", None)
-                    sr = getattr(msg, "stop_reason", None)
-                    if sr:
-                        stop_reason = sr
+        try:
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(prompt_iter)
+                async for msg in client.receive_response():
+                    raw_messages.append(msg)
+                    if isinstance(msg, SDKAssistantMessage):
+                        for block in msg.content:
+                            if isinstance(block, SDKTextBlock):
+                                text_parts.append(block.text)
+                    elif isinstance(msg, SDKResultMessage):
+                        usage = getattr(msg, "usage", None)
+                        sr = getattr(msg, "stop_reason", None)
+                        if sr:
+                            stop_reason = sr
+        finally:
+            if system_prompt_path:
+                try:
+                    os.unlink(system_prompt_path)
+                except OSError:
+                    pass
 
         return AssistantMessage(
             text="".join(text_parts),

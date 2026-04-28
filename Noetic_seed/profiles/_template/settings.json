@@ -1,6 +1,10 @@
 {
-  "provider": "lmstudio",
-  "model": "gemma-4-26b-a4b-it",
+  "provider": "claude_code",
+  "model": "sonnet",
+  "model_overrides": {
+    "_comment": "claude_code provider 限定の role 別モデル override。LLM3 (E 値評価) は scoring task で refusal が起きやすく Sonnet 過剰スペックのため Haiku に切替 (2026-04-28 smoke v7 で constraint_circumvention 等の自己観察ラベルに LLM3 refusal 連発を確認、reflect 滞留 22-30 分の主因)。他 provider (lmstudio 等) は role 引数を無視する設計のため、本機構は自動的に claude_code のときのみ有効",
+    "llm3": "haiku"
+  },
   "vision_max_size": 896,
   "ws_token": "iku2026",
   "llm_sampling": {

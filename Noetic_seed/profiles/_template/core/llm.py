@@ -171,7 +171,8 @@ def _call_claude(prompt: str, max_tokens: int, image_paths: list = None) -> str:
     return resp.json()["content"][0]["text"]
 
 def _call_via_claude_code_provider(prompt: str, max_tokens: int,
-                                    image_paths: list = None) -> str:
+                                    image_paths: list = None,
+                                    role: str | None = None) -> str:
     """call_llm 経路 (LLM① ③ ④) 用の shim — 新 ClaudeCodeProvider 経由。
 
     旧 _call_claude_code (subprocess 自前 wrap, text-only) は撤去 (2026-04-27)。
@@ -183,6 +184,9 @@ def _call_via_claude_code_provider(prompt: str, max_tokens: int,
         prompt: ユーザー prompt 文字列 (system 部分も既に埋め込まれている前提)。
         max_tokens: 上限トークン数 (claude-agent-sdk のデフォルトに従う、参考値)。
         image_paths: Step 1 では警告 + text-only fallback、Step 2 で対応予定。
+        role: LLM 役割識別子 ("llm3" 等)。指定されかつ settings.json の
+            model_overrides に該当 role エントリがあれば、当該呼び出しのみ
+            そのモデルに切替える (claude_code 限定の動的解決)。
 
     Returns:
         AssistantMessage.text。
@@ -191,6 +195,19 @@ def _call_via_claude_code_provider(prompt: str, max_tokens: int,
     from core.providers.claude_code import ClaudeCodeProvider
 
     _, _, _, model = _get_active_provider_config()
+
+    # role 別 model override (claude_code 限定)。
+    # 他 provider 経路は role 引数を渡さない/無視するため、本機構は自動的に
+    # 「claude_code のとき限定」が成立する。
+    # 用途: LLM3 (E 値評価) を Sonnet → Haiku に切替えて refusal 削減
+    # (2026-04-28 smoke v7 で LLM3 が constraint_circumvention 等の自己観察
+    # ラベルに RLHF refusal 連発、reflect 滞留 22-30 分の主因と判明)。
+    if role:
+        overrides = llm_cfg.get("model_overrides", {}) or {}
+        model_override = overrides.get(role)
+        if model_override:
+            model = model_override
+
     provider = ClaudeCodeProvider(model=model or "sonnet")
     req = ApiRequest(
         system_prompt="",
@@ -293,8 +310,14 @@ def _detect_repetition(text: str, ngram_size: int = 5, threshold: int = 4,
 
 
 def _call_llm_inner(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
-                    image_path: str = None, image_paths: list = None) -> str:
-    """LLM provider dispatch (内部実装)。call_llm が repetition guard で wrap する。"""
+                    image_path: str = None, image_paths: list = None,
+                    role: str | None = None) -> str:
+    """LLM provider dispatch (内部実装)。call_llm が repetition guard で wrap する。
+
+    role: "llm3" 等の役割識別子。claude_code provider 限定で、settings.json の
+    model_overrides に該当 role があれば当該呼び出しのみモデル切替される。
+    他 provider 経路 (lmstudio/openai_compat/claude) では role 引数を無視。
+    """
     if image_paths is None:
         image_paths = [image_path] if image_path else None
 
@@ -303,7 +326,8 @@ def _call_llm_inner(prompt: str, max_tokens: int = 24000, temperature: float = 0
         return _call_claude(prompt, max_tokens, image_paths=image_paths)
     elif provider == "claude_code":
         return _call_via_claude_code_provider(prompt, max_tokens,
-                                               image_paths=image_paths)
+                                               image_paths=image_paths,
+                                               role=role)
     elif provider == "lmstudio":
         # LM Studio 経由は常に公式 SDK を使う（REST API の vision バグ #968 回避）
         return _call_lmstudio_native(prompt, max_tokens, temperature, image_paths=image_paths)
@@ -314,7 +338,8 @@ def _call_llm_inner(prompt: str, max_tokens: int = 24000, temperature: float = 0
 
 def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
              image_path: str = None, image_paths: list = None,
-             max_retry: int = 0) -> str:
+             max_retry: int = 0,
+             role: str | None = None) -> str:
     """LLM呼び出し統一インターフェース (repetition guard 関数残置、default 無効)。
 
     出力に repetition loop を検知したら temperature を上げて再呼び出しする
@@ -333,11 +358,13 @@ def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
     image_path (単一) / image_paths (複数) のどちらか、または両方なしで呼ぶ。
     provider は llm_cfg から動的に読み出される（次サイクルから切替反映）。
     """
-    out = _call_llm_inner(prompt, max_tokens, temperature, image_path, image_paths)
+    out = _call_llm_inner(prompt, max_tokens, temperature, image_path, image_paths,
+                          role=role)
     for retry in range(max_retry):
         if not _detect_repetition(out):
             return out
         new_temp = min(temperature + 0.2 * (retry + 1), 1.2)
         print(f"  [llm] repetition detected, retry {retry + 1}/{max_retry} (temp={new_temp:.2f})")
-        out = _call_llm_inner(prompt, max_tokens, new_temp, image_path, image_paths)
+        out = _call_llm_inner(prompt, max_tokens, new_temp, image_path, image_paths,
+                              role=role)
     return out

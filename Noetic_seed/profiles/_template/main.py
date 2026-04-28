@@ -58,6 +58,7 @@ import uuid
 import math
 import copy
 import json
+from functools import partial
 from datetime import datetime
 
 # DualLoggerの設定（printをファイルにも書き出す）
@@ -314,10 +315,16 @@ def main():
         missing_field_policy=_approval_cfg.get("missing_field_policy", "deny"),
     ))
 
+    # eval (LLM3 / E 値評価) は claude_code provider 経由なら settings.json
+    # の model_overrides で role 別モデル切替が効く。partial で role="llm3"
+    # bound 版を渡すことで eval.py / hooks.py 等の call site 側を変えずに
+    # settings から制御できる (2026-04-28 hotfix、Sonnet が
+    # constraint_circumvention 等の自己観察ラベルに refusal 連発する問題への対策。
+    # 他 provider 経路では role 引数自体を伝播しないため自動的に無視される)。
     _base_post_hook = make_post_tool_use_evaluation(
         state=state,
         get_state_before=lambda: _hook_ctx["state_before"],
-        call_llm_fn=call_llm,
+        call_llm_fn=partial(call_llm, role="llm3"),
         get_cycle_id=lambda: state.get("cycle_id", 0),
         get_recent_intents=lambda: [
             e.get("intent", "") for e in state.get("log", [])[-3:]

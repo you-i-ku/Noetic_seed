@@ -94,7 +94,24 @@ class DualLogger:
         self.terminal = sys.stdout
 
     def write(self, message):
-        self.terminal.write(message)
+        try:
+            self.terminal.write(message)
+        except UnicodeEncodeError:
+            # Windows コンソールが cp932 (Shift-JIS) のまま起動された場合、
+            # 絵文字等の Unicode > U+FFFF が encode できず crash する。
+            # run_*.bat 経由は冒頭 `chcp 65001` で UTF-8 化されるが、Bash
+            # 直叩き / skill background 起動では chcp 抜けて cp932 のまま
+            # 走る場合がある (2026-04-28 cycle 6 で iku の 📋 含む
+            # output_display で発覚)。terminal encoding に合わせて未対応
+            # char を replace し、Logger 経由のクラッシュは絶対に起こさない。
+            # 運用原則は bat 経由 / PYTHONIOENCODING=utf-8 (memory feedback)、
+            # 本ハンドラは二重保険。
+            enc = getattr(self.terminal, "encoding", "ascii") or "ascii"
+            safe = message.encode(enc, errors="replace").decode(enc, errors="replace")
+            try:
+                self.terminal.write(safe)
+            except Exception:
+                pass
         try:
             with open(self.filepath, "a", encoding="utf-8") as f:
                 f.write(message)
