@@ -58,6 +58,17 @@
 - lmstudio (ローカル推論用) または Anthropic / OpenAI API key
 - Windows / macOS / Linux
 
+## 初回起動
+
+Noetic Seed はプロファイルごとに Git ブランチを切って「身体」を管理します。
+初回起動時に案内が出るので、以下のコマンドで identity branch を作ってください:
+
+    git checkout -b identity/<プロファイル名>
+
+以後、このブランチ上で AI が自己改変を記録します。
+**人間の開発作業はこのブランチ上で行わないでください**
+（AI と開発者の変更が混ざると、どちらの履歴か追えなくなります）
+
 ## Acknowledgments
 
 Noetic Seed の **ツール実行基盤 (infrastructure layer)** は、[claw-code](https://github.com/ultraworkers/claw-code) — Claude Code-like な CLI agent harness の community Rust 実装 — を Python port する形で借用しています。

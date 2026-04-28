@@ -1,0 +1,10 @@
+# Auto-detect text files and normalize line endings to LF.
+# 段階12 Step 1 (PLAN §6 / §13): identity branch 上で iku が自動 stash を
+# 連発する運用に向けて、Windows の core.autocrlf に依存せず改行コードを固定する。
+* text=auto eol=lf
+
+# Windows shell scripts must keep CRLF or `chcp` / `setlocal` may break
+# under some Windows versions. Tracked: run.bat / run_server.bat / setup.bat /
+# Noetic_seed_monitor/gradlew.bat。
+*.bat text eol=crlf
+*.cmd text eol=crlf

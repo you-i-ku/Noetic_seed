@@ -68,6 +68,7 @@ from core.config import (
 )
 sys.stdout = DualLogger(RAW_LOG_FILE)
 
+from core.identity_branch import enforce_identity_branch
 from core.state import load_state, save_state, load_pref, save_pref, append_debug_log
 from core.llm import call_llm, _get_active_provider_config
 from core.embedding import _init_vector, _compare_expect_result
@@ -162,6 +163,9 @@ def _wm_log(event_type: str, payload: dict):
 # === メインループ ===
 def main():
     print("=== Noetic_seed ===")
+    # 段階12 Step 1 (PLAN §7): identity branch ガード。state load より前。
+    # 期待 branch (identity/<profile>) 未作成 / 別 branch 上なら案内 + sys.exit(0)。
+    enforce_identity_branch(profile_name=BASE_DIR.name, base_dir=BASE_DIR)
     _p, _base, _k, _model = _get_active_provider_config()
     print(f"LLM: {_model or llm_cfg.get('model','?')} @ {_base} [{_p}]")
     print(f"state: {STATE_FILE}")
