@@ -403,17 +403,21 @@ def make_file_access_guard(
     secrets_json_name: str = "secrets.json",
     guarded_write_tools: tuple = ("write_file", "edit_file"),
     guarded_read_tools: tuple = ("read_file", "edit_file", "glob_search", "grep_search"),
-    require_write_in_sandbox: bool = True,
 ) -> PreHandler:
     """ファイル系 tool のアクセスガード PreHandler を生成。
 
-    判定:
+    判定 (段階12 Step 2 で profile 境界に拡張、PLAN §3-2):
       1. path が `<workspace_root>/<sandbox_dir_name>/<secrets_subdir>/` 以下
          → read/write 問わず DENY (secret_read / secret_write 経由に誘導)
       2. path が `<workspace_root>/<secrets_json_name>` と一致
          → read/write 問わず DENY (auth_profile_info に誘導)
-      3. tool が guarded_write_tools に含まれ、require_write_in_sandbox=True
-         かつ path が sandbox/ 以下でない → DENY (sandbox 外書込禁止)
+      3. write 系 tool かつ target_resolved が profile_root の subpath でない
+         → DENY (profile 外への書込禁止)。symbolic link / .. / ジャンクション
+         抜けも `Path.resolve()` で canonical 化してから判定するため網羅。
+
+    旧仕様の `sandbox/` 限定書込制限は撤去 (段階12 で profile 配下すべてを
+    身体として再定義、PLAN §3-1)。`.venv/` も profile_root subpath として
+    自動 ALLOW (per-profile venv 経由の身体拡張)。
 
     path の取得: tool_input の "path" フィールド (read_file/write_file/
     edit_file)、または "pattern"/"query" (glob_search/grep_search)。
@@ -425,8 +429,6 @@ def make_file_access_guard(
         secrets_json_name: 保護対象 JSON ファイル名 (default "secrets.json")
         guarded_write_tools: 書込系 tool 名 tuple
         guarded_read_tools: 読取系 tool 名 tuple
-        require_write_in_sandbox: True で write_file/edit_file の対象を
-            sandbox/ 以下に限定
 
     Returns:
         PreHandler (tool_name, tool_input) → HookRunResult
@@ -435,7 +437,6 @@ def make_file_access_guard(
 
     root = Path(workspace_root).resolve()
     secrets_dir = (root / sandbox_dir_name / secrets_subdir).resolve()
-    sandbox_root = (root / sandbox_dir_name).resolve()
     secrets_json = (root / secrets_json_name).resolve()
 
     def _resolve(path_str: str):
@@ -491,21 +492,16 @@ def make_file_access_guard(
                 f"{redirect} を使って {action} (引数は name=<secret名>)。"
             ])
 
-        # 3. 書込系 tool は sandbox/ 以下限定 (self_modify が legacy 経由で
-        #    main.py/pref.json を更新するのは別経路なので影響なし)
-        if is_write and require_write_in_sandbox:
-            if not _is_inside(target, sandbox_root):
-                # 失敗パスから sandbox/ 以下への誘導パス例を構築
-                try:
-                    suggested = f"sandbox/{Path(path_arg).name}"
-                except Exception:
-                    suggested = "sandbox/memo.md"
-                return HookRunResult.deny([
-                    f"[file_guard] {tool_name} は sandbox/ 以下にのみ書き込めます "
-                    f"(指定パス: {path_arg})。"
-                    f"パスを sandbox/ 配下に変更してください "
-                    f"(例: {suggested}, sandbox/identity/draft.md, sandbox/notes/)。"
-                ])
+        # 3. 段階12 Step 2 (PLAN §3-2): write 系 tool は profile 境界内のみ
+        #    許可。target は既に resolve() 済 (canonical 化されてる) ため、
+        #    symbolic link / .. / ジャンクション抜けも relative_to で網羅判定。
+        if is_write and not _is_inside(target, root):
+            return HookRunResult.deny([
+                f"[file_guard] {tool_name} はプロファイル境界外への書込みを"
+                f"禁止しています (指定パス: {path_arg}, profile_root: {root})。"
+                f"パスを profile 配下に変更してください "
+                f"(例: sandbox/<file>, core/<file>, tools/<file>, etc.)。"
+            ])
 
         return HookRunResult.allow()
 
