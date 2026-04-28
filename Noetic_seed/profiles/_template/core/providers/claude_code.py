@@ -96,39 +96,6 @@ class ClaudeCodeProvider(BaseProvider):
         # Step 3: tools があれば in-process MCP server に射影、handler 内で
         # request.tool_executor 経由で Noetic ToolRegistry に dispatch する。
 
-        # ============= DEBUG: prompt dump (汚染源特定用、後で削除) =============
-        def _safe(s):
-            """non-ASCII を \\u escape して console encode error を回避。"""
-            return str(s).encode("ascii", "backslashreplace").decode("ascii")
-
-        sys_p = request.system_prompt or ""
-        print(f"  [cc-debug] system_prompt len={len(sys_p)}")
-        print(f"  [cc-debug] system_prompt HEAD 800:")
-        print(f"  {_safe(repr(sys_p[:800]))}")
-        if len(sys_p) > 800:
-            print(f"  [cc-debug] system_prompt TAIL 600:")
-            print(f"  {_safe(repr(sys_p[-600:]))}")
-        print(f"  [cc-debug] messages count={len(request.messages)}")
-        for i, msg in enumerate(request.messages[:3]):
-            c = msg.get("content", "")
-            if isinstance(c, str):
-                cstr = c[:300]
-            else:
-                cstr = str(c)[:300]
-            print(f"  [cc-debug] msg[{i}] role={_safe(repr(msg.get('role')))} "
-                  f"content_head={_safe(repr(cstr))}")
-        print(f"  [cc-debug] tools count={len(request.tools or [])}")
-        if request.tools:
-            for i, td in enumerate((request.tools or [])[:5]):
-                if isinstance(td, dict):
-                    name = td.get("name", "?")
-                    desc = (td.get("description") or "")[:120]
-                    print(f"  [cc-debug] tool[{i}] name={_safe(repr(name))} "
-                          f"desc_head={_safe(repr(desc))}")
-        print(f"  [cc-debug] image_paths={request.image_paths}")
-        print(f"  [cc-debug] cwd will be: {_ensure_claude_provider_cwd()}")
-        # ============= DEBUG end =============
-
         captured_invocations: list = []
 
         options_kwargs: dict = {
