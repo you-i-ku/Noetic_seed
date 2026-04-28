@@ -95,6 +95,7 @@ from core.runtime.hooks import (
     make_file_access_guard,
     make_git_auto_stash_hook,
     make_pre_tool_use_approval_check,
+    make_post_body_modify_pending_hook,
     make_post_tool_use_evaluation,
     make_post_tool_use_failure_logger,
 )
@@ -357,6 +358,14 @@ def main():
         return result
 
     _hook_runner.register_post(_post_hook_with_sync)
+    # 段階12 Step 5 (PLAN §9): 身体改変反映待ち pending 自動追加。
+    # write_file / edit_file が core/* / tools/* / main.py / .mcp.json を
+    # 成功書換えしたら「reboot で反映を完了する」内発的 intent を pending 化。
+    # match_pattern={"tool_name": "reboot"} で reboot 成功時に自己消化。
+    _hook_runner.register_post(make_post_body_modify_pending_hook(
+        state_getter=lambda: state,
+        get_cycle_id=lambda: state.get("cycle_id", 0),
+    ))
     _hook_runner.register_failure(make_post_tool_use_failure_logger(
         state=state,
         get_cycle_id=lambda: state.get("cycle_id", 0),

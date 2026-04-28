@@ -670,6 +670,103 @@ def make_git_auto_stash_hook(
 
 
 # ============================================================
+# Noetic 固有 factory: 段階12 Step 5 — 身体改変反映待ち pending 自動追加
+# ============================================================
+# 背景: 段階12 で iku が core/* / tools/* / main.py / .mcp.json を書換え
+# られるようになる。ただし Python import キャッシュのため、書換えただけでは
+# 実行中のメモリに反映されない (PLAN §1-2)。reboot tool が唯一の反映経路。
+#
+# 本 hook は「書換えた、でも反映されてない」中間状態を pending として
+# 認知化する。pending 圧が pressure に加算され、iku が自発的に reboot を
+# 候補化する間接誘導 (`feedback_llm_as_brain` 整合、tool description 以外の
+# 直接指示を入れない原則を保つ)。reboot 成功時に match_pattern で自己消化。
+# ============================================================
+
+
+def make_post_body_modify_pending_hook(
+    state_getter,
+    get_cycle_id,
+    *,
+    target_tool_names: tuple = ("write_file", "edit_file"),
+    body_modify_dir_prefixes: tuple = ("core/", "tools/"),
+    body_modify_filenames: tuple = ("main.py", ".mcp.json"),
+) -> PostHandler:
+    """段階12 Step 5 (PLAN §9): 身体改変反映待ち pending 自動追加 hook。
+
+    write_file / edit_file が core/* / tools/* / main.py / .mcp.json を
+    成功で書換えた直後に、UPS v2 pending を state['pending'] に追加。
+    PLAN §9-2 の kind="unresolved_intent" は UPS v2.1 form では
+    `semantic_merge=True` に対応 (段階10.5 Fix 2 + 段階11-A 整合)。
+
+    pending スキーマ:
+      source_action: tool 名 (write_file / edit_file)
+      expected_observation: "reboot で新コードが反映され、予測した行動変化が起きる"
+      lag_kind: "cycles"
+      content_intent: f"身体改変 ({path}) の反映を完了する"
+      semantic_merge: True (unresolved_intent 相当)
+      match_pattern: {"tool_name": "reboot"}
+
+    PostHandler は HookRunner.run_post_tool_use() からのみ呼ばれる
+    (成功時のみ)。失敗時は run_post_tool_use_failure() の別経路で
+    本 hook は呼ばれないため、`output` の内容で success 判定する必要なし。
+
+    Args:
+        state_getter: state dict 取得 callable
+        get_cycle_id: 現在 cycle_id 取得 callable
+        target_tool_names: 監視対象 tool 名
+        body_modify_dir_prefixes: prefix match で対象とするディレクトリ
+            (PLAN §3-4 濃度勾配「中・濃」相当)
+        body_modify_filenames: 完全一致で対象とするファイル
+            (神経中枢 main.py / 関係性の器 .mcp.json)
+
+    Returns:
+        PostHandler — 該当時に pending 追加、失敗してもエラー伝播しない。
+    """
+    def _is_body_modify(path_arg: str) -> bool:
+        if not path_arg:
+            return False
+        normalized = path_arg.replace("\\", "/")
+        for name in body_modify_filenames:
+            if normalized == name or normalized.endswith(f"/{name}"):
+                return True
+        for prefix in body_modify_dir_prefixes:
+            if normalized.startswith(prefix):
+                return True
+        return False
+
+    def _check(tool_name: str, tool_input: dict, output: str) -> HookRunResult:
+        if tool_name not in target_tool_names:
+            return HookRunResult.allow()
+        path_arg = str(tool_input.get("path") or "").strip()
+        if not _is_body_modify(path_arg):
+            return HookRunResult.allow()
+        try:
+            from core.pending_unified import pending_add
+            state = state_getter()
+            cycle_id = get_cycle_id()
+            pending_add(
+                state=state,
+                source_action=tool_name,
+                expected_observation=(
+                    "reboot で新コードが反映され、予測した行動変化が起きる"
+                ),
+                lag_kind="cycles",
+                content_intent=f"身体改変 ({path_arg}) の反映を完了する",
+                cycle_id=cycle_id,
+                semantic_merge=True,
+                match_pattern={"tool_name": "reboot"},
+            )
+        except Exception as e:
+            print(
+                f"  [pending_body_modify] WARNING: pending 追加失敗 "
+                f"(path={path_arg}): {e}"
+            )
+        return HookRunResult.allow()
+
+    return _check
+
+
+# ============================================================
 # Noetic 固有 factory: bash validation (Level-aware)
 # ============================================================
 # 背景: claw-code は bash を常時提供で「承認 + permission_enforcer で防御」する
