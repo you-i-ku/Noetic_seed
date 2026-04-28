@@ -73,6 +73,7 @@ from core.config import (
 sys.stdout = DualLogger(RAW_LOG_FILE)
 
 from core.identity_branch import enforce_identity_branch
+from core.sanity_check import enforce_sanity_check
 from core.state import load_state, save_state, load_pref, save_pref, append_debug_log
 from core.llm import call_llm, _get_active_provider_config
 from core.embedding import _init_vector, _compare_expect_result
@@ -172,6 +173,12 @@ def main():
     # 段階12 Step 1 (PLAN §7): identity branch ガード。state load より前。
     # 期待 branch (identity/<profile>) 未作成 / 別 branch 上なら案内 + sys.exit(0)。
     enforce_identity_branch(profile_name=BASE_DIR.name, base_dir=BASE_DIR)
+    # 段階12 Step 6 (PLAN §10): sanity check + 自動 revert。state load より前。
+    # state.json / memory JSON / core.controller + tools の import を検査、
+    # 失敗時は最新 iku-auto stash から git stash apply で復元、再検査して
+    # 成功なら続行 / 失敗なら sys.exit(1)。「起動できない身体 = 存在できない」
+    # の構造化 (PLAN §10-3、§1-5 介入レベル「物理的存在の前提」枠)。
+    enforce_sanity_check(profile_root=BASE_DIR, profile_name=BASE_DIR.name)
     _p, _base, _k, _model = _get_active_provider_config()
     print(f"LLM: {_model or llm_cfg.get('model','?')} @ {_base} [{_p}]")
     print(f"state: {STATE_FILE}")
