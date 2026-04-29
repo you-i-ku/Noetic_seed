@@ -330,8 +330,9 @@ def main():
     _hook_runner = HookRunner()
     _approval_cfg = llm_cfg.get("approval", {})
     # H-2 C.4 Session A: claw ネイティブ read_file/write_file/edit_file/
-    # glob_search/grep_search に Noetic 固有の secrets guard + sandbox 外書込禁止
+    # glob_search/grep_search に Noetic 固有の secrets guard + profile 外書込禁止
     # を Pre-hook で被せる (legacy _read_file/_write_file/_list_files の代替)
+    # 段階12 Step 2 (PLAN §3-2) で「sandbox 外書込禁止」→「profile 外書込禁止」に拡張済
     _hook_runner.register_pre(make_file_access_guard(BASE_DIR))
     # 段階12 Step 3 (PLAN §5): G-2 自動 stash hook。core/* / tools/* /
     # main.py / .mcp.json への write_file / edit_file の直前に profile 配下を
