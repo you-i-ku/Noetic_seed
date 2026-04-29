@@ -1,0 +1,41 @@
+# 段階12 Step 1.5 / PLAN §3-1, §3-3 ：
+# iku の身体仕様 (= 必要な Python ライブラリ) を宣言する single source of truth。
+#
+# - main.py:_bootstrap_venv() がこのファイルから venv を構築する
+# - iku 自身が編集 → reboot で身体拡張が成立する (no_individual_tools 整合)
+# - version 無印 = latest 追従 (autopoiesis、身体が時代と共に進化)
+
+# core / runtime
+httpx
+psutil
+numpy
+websockets
+sqlalchemy
+aiosqlite
+
+# embedding / vector
+onnxruntime
+tokenizers
+huggingface-hub
+
+# audio / vision
+faster-whisper
+soundfile
+Pillow
+
+# web / scraping
+beautifulsoup4
+
+# token counting (compaction)
+tiktoken
+
+# tools (browser automation)
+playwright
+
+# LLM providers
+lmstudio
+mcp
+claude-agent-sdk
+
+# self-test (iku の自己診断経路)
+pytest

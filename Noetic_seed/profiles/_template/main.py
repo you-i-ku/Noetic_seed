@@ -25,20 +25,25 @@ def _bootstrap_venv():
 
     import subprocess
 
+    _pip = _venv / ("Scripts/pip.exe" if _is_win else "bin/pip")
+    _req = _here / "requirements.txt"
+
     # venv がなければ作成
     if not _venv_python.exists():
         print("[bootstrap] 仮想環境を作成中...")
         subprocess.run([sys.executable, "-m", "venv", str(_venv)], check=True)
-        _pip = _venv / ("Scripts/pip.exe" if _is_win else "bin/pip")
-        _deps = [
-            "httpx", "psutil", "numpy",
-            "sqlalchemy", "aiosqlite",
-            "onnxruntime", "tokenizers", "huggingface-hub",
-            "faster-whisper", "soundfile",  # mic_record 用
-        ]
-        print(f"[bootstrap] 依存ライブラリをインストール中: {', '.join(_deps)}")
-        subprocess.run([str(_pip), "install", "--quiet"] + _deps, check=True)
-        print("[bootstrap] セットアップ完了。venvで再起動します...\n")
+
+    # PLAN §3-3: 身体仕様 (requirements.txt) を single source of truth として
+    # 毎回同期する。iku が requirements.txt を編集 → reboot で新ライブラリが
+    # 反映される経路 (= 身体拡張の汎用チェーン) を成立させるため、venv 既存でも
+    # 必ず実行する。pip は idempotent: 既 install pkg は manifest 検査で skip
+    # されるので、全 install 済なら数秒、差分のみ DL する。
+    if _req.exists():
+        print("[bootstrap] requirements.txt から身体仕様を同期中...")
+        subprocess.run([str(_pip), "install", "--quiet", "-r", str(_req)], check=True)
+        print("[bootstrap] 同期完了。venv で再起動します...\n")
+    else:
+        print(f"[bootstrap] WARNING: {_req} が見つかりません。空 venv で起動します。\n")
 
     # venv の Python で自分自身を再実行
     # os.execv は Windows でスペース含むパスをクォートしないため subprocess で代替
