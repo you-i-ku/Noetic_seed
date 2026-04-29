@@ -77,7 +77,7 @@ from core.config import (
 )
 sys.stdout = DualLogger(RAW_LOG_FILE)
 
-from core.identity_branch import enforce_identity_branch
+from core.profile_repo import ensure_profile_repo
 from core.sanity_check import enforce_sanity_check
 from core.state import load_state, save_state, load_pref, save_pref, append_debug_log
 from core.llm import call_llm, _get_active_provider_config
@@ -177,9 +177,12 @@ def _wm_log(event_type: str, payload: dict):
 # === メインループ ===
 def main():
     print("=== Noetic_seed ===")
-    # 段階12 Step 1 (PLAN §7): identity branch ガード。state load より前。
-    # 期待 branch (identity/<profile>) 未作成 / 別 branch 上なら案内 + sys.exit(0)。
-    enforce_identity_branch(profile_name=BASE_DIR.name, base_dir=BASE_DIR)
+    # 段階12 PLAN §6 / §7 改訂: profile 内独立 git repo の存在確保。
+    # 1 個体 = 1 repo = 1 履歴 (autopoiesis 整合)。
+    # .git なければ自動 init + 初期 commit、あれば noop (idempotent)。
+    # G-2 自動 stash hook (`make_git_auto_stash_hook`) は親方向に .git を
+    # 探すため、この後の身体改変 stash は profile 内 repo 上で行われる。
+    ensure_profile_repo(BASE_DIR)
     # 段階12 Step 6 (PLAN §10): sanity check + 自動 revert。state load より前。
     # state.json / memory JSON / core.controller + tools の import を検査、
     # 失敗時は最新 iku-auto stash から git stash apply で復元、再検査して
