@@ -286,8 +286,42 @@ def _call_lmstudio_native(prompt: str, max_tokens: int, temperature: float = 0.7
             config["minPSampling"] = sampling["min_p"]
         if "repetition_penalty" in sampling:
             config["repeatPenalty"] = sampling["repetition_penalty"]
-    result = model.respond(chat, config=config)
-    return result.content if hasattr(result, "content") else str(result)
+
+    # 段階12 補足-3 改 (2026-04-29): reasoning model fragment 分離。
+    # SDK は fragment 単位で reasoning_type tag を付けて emit するが、
+    # result.content は reasoning + 最終応答を全部混ぜて連結する。
+    # on_prediction_fragment callback で reasoning_type を見て自前で振り分け、
+    # 最終応答だけを return する。reasoning は debug log に保存して観察
+    # 手段を確保する (autopoiesis 整合: 内的状態の永続化を捨てない)。
+    # 対象 model: Qwen3 系 / DeepSeek-R1 系 / その他 reasoning enabled モデル。
+    _content_parts: list = []
+    _reasoning_parts: list = []
+    _REASONING_TYPES = {"reasoning", "reasoningStartTag", "reasoningEndTag"}
+
+    def _on_fragment(fragment):
+        rtype = getattr(fragment, "reasoning_type", None)
+        text = getattr(fragment, "content", "") or ""
+        if rtype in _REASONING_TYPES:
+            _reasoning_parts.append(text)
+        else:
+            _content_parts.append(text)
+
+    result = model.respond(chat, config=config, on_prediction_fragment=_on_fragment)
+
+    # reasoning が分離されたら debug log に保存 (think 観察維持)
+    if _reasoning_parts:
+        try:
+            from core.state import append_debug_log
+            append_debug_log("lmstudio (reasoning)", "".join(_reasoning_parts))
+        except Exception:
+            pass
+
+    # fragment が一切来なかった場合 (古い SDK / 非 streaming server) は
+    # legacy behavior に fallback (result.content をそのまま返す)。
+    if not _content_parts and not _reasoning_parts:
+        return result.content if hasattr(result, "content") else str(result)
+
+    return "".join(_content_parts)
 
 
 def _detect_repetition(text: str, ngram_size: int = 5, threshold: int = 4,
