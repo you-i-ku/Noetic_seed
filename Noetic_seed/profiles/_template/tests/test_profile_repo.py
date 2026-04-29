@@ -125,9 +125,92 @@ def test_idempotent_second_call_no_change():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_half_init_repair():
+    """.git 存在 + initial commit 0 の半完成状態 → repair で commit 作成。
+
+    段階12 補足-3 改までの実装で warning + return で .git だけ残った
+    profile が発生していた問題への 2026-04-29 hotfix の repair flow。
+    """
+    if not _git_available():
+        print("  [SKIP] git CLI 不在、test_half_init_repair を skip")
+        return
+
+    tmp = Path(tempfile.mkdtemp(prefix="noetic_profile_repo_halfinit_"))
+    try:
+        # 何か add 対象を作る + git init だけ済ませて commit を作らない状態を再現
+        (tmp / "main.py").write_text('print("half init")', encoding="utf-8")
+        subprocess.run(
+            ["git", "init"], cwd=str(tmp),
+            capture_output=True, text=True,
+        )
+
+        # 前提: .git あり、HEAD 解決不能 (commit なし)
+        _assert((tmp / ".git").exists(), "前提: .git あり")
+        rev = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(tmp),
+            capture_output=True, text=True,
+        )
+        _assert(rev.returncode != 0, "前提: HEAD 解決不能 (commit なし)")
+
+        # ensure_profile_repo が repair を実行
+        from core.profile_repo import ensure_profile_repo
+        ensure_profile_repo(tmp)
+
+        # repair 後: HEAD 解決可 (initial commit 作成済)
+        rev2 = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(tmp),
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        _assert(
+            rev2.returncode == 0 and rev2.stdout.strip(),
+            f"repair 後: initial commit 作成済 (HEAD: {rev2.stdout.strip()[:8]})",
+        )
+
+        log = subprocess.run(
+            ["git", "log", "--oneline"], cwd=str(tmp),
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        _assert(
+            "initial:" in log.stdout,
+            f"repair commit message に 'initial:' (log: {log.stdout.strip()[:80]})",
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_git_helper_returns_stderr():
+    """_git ヘルパーが stderr を 3 要素 tuple に含めて返す (2026-04-29 hotfix)。
+
+    旧版は stderr を捨てていて真因不明だった。新版は failure 時に warning と
+    一緒に stderr を表示できるよう戻り値に含める。
+    """
+    if not _git_available():
+        print("  [SKIP] git CLI 不在、test_git_helper_returns_stderr を skip")
+        return
+
+    from core.profile_repo import _git
+
+    tmp = Path(tempfile.mkdtemp(prefix="noetic_profile_repo_stderr_"))
+    try:
+        # git 未初期化 dir で `git rev-parse HEAD` を呼ぶ → stderr に
+        # "not a git repository" エラーが入る
+        code, stdout, stderr = _git("rev-parse", "HEAD", cwd=tmp)
+        _assert(code != 0, "git 未初期化 dir で rev-parse: returncode != 0")
+        _assert(
+            "not a git repository" in stderr.lower() or "fatal" in stderr.lower(),
+            f"stderr に診断情報が入る (stderr: {stderr[:80]!r})",
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("=== test_profile_repo ===")
     test_no_repo_creates_init_with_initial_commit()
     test_existing_repo_is_noop()
     test_idempotent_second_call_no_change()
+    test_half_init_repair()
+    test_git_helper_returns_stderr()
     print("=== all green ===")
