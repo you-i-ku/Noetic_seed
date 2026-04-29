@@ -2,6 +2,7 @@
 クレデンシャルは core.auth.get_llm_credentials から動的に取得する。
 settings.json の provider/model は呼び出し直前に再読み込み（次サイクルからの切替対応）。"""
 import httpx
+import re
 import subprocess
 import json
 import base64
@@ -362,9 +363,57 @@ def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
                           role=role)
     for retry in range(max_retry):
         if not _detect_repetition(out):
-            return out
+            return _post_process_response(out)
         new_temp = min(temperature + 0.2 * (retry + 1), 1.2)
         print(f"  [llm] repetition detected, retry {retry + 1}/{max_retry} (temp={new_temp:.2f})")
         out = _call_llm_inner(prompt, max_tokens, new_temp, image_path, image_paths,
                               role=role)
-    return out
+    return _post_process_response(out)
+
+
+# ============================================================
+# Reasoning model (Qwen3 / DeepSeek-R1 系) の <think> tag 対応
+# ============================================================
+# 2026-04-29: Qwen3 系 / DeepSeek-R1 系の reasoning model は内部思考を
+# `<think>...</think>` で囲んで返す。tool 呼出 JSON / [TOOL:...] や
+# 自然言語の最終応答は </think> 後に出る前提だが、parser がそのまま
+# tag 入り text を受け取ると tool 検出失敗 / 自然言語結果に think 混入
+# が起きる。
+#
+# 対処は二段構え (X 改良案):
+#   ① raw (think 込み) を append_debug_log 経由で `llm_debug.log` に保存
+#      → think 内容の観察手段は別 layer で完全に保たれる
+#   ② <think> 区間を strip して return
+#      → caller (parser / 自然言語 description 経路) は綺麗な text を受け取る
+#
+# autopoiesis 哲学整合: 内的状態 (think) の永続化を捨てず、parse 用 text
+# だけ「邪魔な部分を取り除く」として扱う (memory `feedback_action_observation_unified`
+# 系譜、内的・外的を独立 layer で持つ設計)。
+# ============================================================
+
+_THINK_PATTERN = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
+
+
+def _strip_think(text: str) -> str:
+    """`<think>...</think>` 区間を除去 (閉じ tag のある区間のみ)。
+
+    未閉じ <think> が残った場合はそのまま (parse 失敗で発覚 → debug)。
+    None / 空 text はそのまま透過。
+    """
+    if not text:
+        return text
+    return _THINK_PATTERN.sub('', text)
+
+
+def _post_process_response(raw: str) -> str:
+    """call_llm の最終 return 直前の post-process。
+
+    raw (think 込み) を `llm_debug.log` に保存しつつ <think> を strip して
+    返す。append_debug_log の i/o 失敗は無害扱い (return 値には影響させない)。
+    """
+    try:
+        from core.state import append_debug_log
+        append_debug_log("call_llm (raw)", raw)
+    except Exception:
+        pass
+    return _strip_think(raw)
