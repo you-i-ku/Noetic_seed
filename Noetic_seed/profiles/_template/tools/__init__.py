@@ -47,7 +47,7 @@ TOOLS = {
     "secret_read":  {"desc": "sandbox/secrets/ に保存された秘密情報を読む（承認不要）。引数: name=secret名【name= を使う。read_file の path= と混同しないこと】", "func": secret_read},
     "secret_write": {"desc": "sandbox/secrets/ に秘密情報を書き込む（承認必要）。引数: name=secret名 content=内容 intent=目的 [message=外部への説明]", "func": secret_write},
     "auth_profile_info": {"desc": "認証プロファイルのメタ情報を取得。name未指定で一覧、name指定で詳細（機密フィールドtoken/key/secret等は隠される）。引数: [name=プロファイル名]", "func": auth_profile_info},
-    "memory_graph": {"desc": "memory entry と self を node とした graph 構造を JSON で返す。引数: [view=ego (default)] [depth=2 (default)]", "func": _memory_graph},
+    "memory_graph": {"desc": "memory entry と self を node とした graph 構造を JSON で返す。view=ego (self 中心 + edges)、global (cluster + topology summary)、both (両方の重畳)。引数: [view=ego/global/both default=ego] [depth=2 (default)]", "func": _memory_graph},
     "reboot":       {"desc": "プロセスを再起動して書換えた身体 (core/* / tools/* / main.py / .mcp.json) をメモリに反映する。state / memory / WM は引き継がれる。Python import キャッシュの罠を avoid するための唯一の経路。引数: [message=外部への説明]", "func": _reboot},
 }
 
