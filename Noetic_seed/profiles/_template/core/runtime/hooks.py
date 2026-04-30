@@ -403,17 +403,21 @@ def make_file_access_guard(
     secrets_json_name: str = "secrets.json",
     guarded_write_tools: tuple = ("write_file", "edit_file"),
     guarded_read_tools: tuple = ("read_file", "edit_file", "glob_search", "grep_search"),
-    require_write_in_sandbox: bool = True,
 ) -> PreHandler:
     """ファイル系 tool のアクセスガード PreHandler を生成。
 
-    判定:
+    判定 (段階12 Step 2 で profile 境界に拡張、PLAN §3-2):
       1. path が `<workspace_root>/<sandbox_dir_name>/<secrets_subdir>/` 以下
          → read/write 問わず DENY (secret_read / secret_write 経由に誘導)
       2. path が `<workspace_root>/<secrets_json_name>` と一致
          → read/write 問わず DENY (auth_profile_info に誘導)
-      3. tool が guarded_write_tools に含まれ、require_write_in_sandbox=True
-         かつ path が sandbox/ 以下でない → DENY (sandbox 外書込禁止)
+      3. write 系 tool かつ target_resolved が profile_root の subpath でない
+         → DENY (profile 外への書込禁止)。symbolic link / .. / ジャンクション
+         抜けも `Path.resolve()` で canonical 化してから判定するため網羅。
+
+    旧仕様の `sandbox/` 限定書込制限は撤去 (段階12 で profile 配下すべてを
+    身体として再定義、PLAN §3-1)。`.venv/` も profile_root subpath として
+    自動 ALLOW (per-profile venv 経由の身体拡張)。
 
     path の取得: tool_input の "path" フィールド (read_file/write_file/
     edit_file)、または "pattern"/"query" (glob_search/grep_search)。
@@ -425,8 +429,6 @@ def make_file_access_guard(
         secrets_json_name: 保護対象 JSON ファイル名 (default "secrets.json")
         guarded_write_tools: 書込系 tool 名 tuple
         guarded_read_tools: 読取系 tool 名 tuple
-        require_write_in_sandbox: True で write_file/edit_file の対象を
-            sandbox/ 以下に限定
 
     Returns:
         PreHandler (tool_name, tool_input) → HookRunResult
@@ -435,7 +437,6 @@ def make_file_access_guard(
 
     root = Path(workspace_root).resolve()
     secrets_dir = (root / sandbox_dir_name / secrets_subdir).resolve()
-    sandbox_root = (root / sandbox_dir_name).resolve()
     secrets_json = (root / secrets_json_name).resolve()
 
     def _resolve(path_str: str):
@@ -491,22 +492,590 @@ def make_file_access_guard(
                 f"{redirect} を使って {action} (引数は name=<secret名>)。"
             ])
 
-        # 3. 書込系 tool は sandbox/ 以下限定 (self_modify が legacy 経由で
-        #    main.py/pref.json を更新するのは別経路なので影響なし)
-        if is_write and require_write_in_sandbox:
-            if not _is_inside(target, sandbox_root):
-                # 失敗パスから sandbox/ 以下への誘導パス例を構築
-                try:
-                    suggested = f"sandbox/{Path(path_arg).name}"
-                except Exception:
-                    suggested = "sandbox/memo.md"
-                return HookRunResult.deny([
-                    f"[file_guard] {tool_name} は sandbox/ 以下にのみ書き込めます "
-                    f"(指定パス: {path_arg})。"
-                    f"パスを sandbox/ 配下に変更してください "
-                    f"(例: {suggested}, sandbox/identity/draft.md, sandbox/notes/)。"
-                ])
+        # 3. 段階12 Step 2 (PLAN §3-2): write 系 tool は profile 境界内のみ
+        #    許可。target は既に resolve() 済 (canonical 化されてる) ため、
+        #    symbolic link / .. / ジャンクション抜けも relative_to で網羅判定。
+        if is_write and not _is_inside(target, root):
+            return HookRunResult.deny([
+                f"[file_guard] {tool_name} はプロファイル境界外への書込みを"
+                f"禁止しています (指定パス: {path_arg}, profile_root: {root})。"
+                f"パスを profile 配下に変更してください "
+                f"(例: sandbox/<file>, core/<file>, tools/<file>, etc.)。"
+            ])
 
+        return HookRunResult.allow()
+
+    return _check
+
+
+# ============================================================
+# Noetic 固有 factory: 段階12 G-2 自動 stash (PLAN §5)
+# ============================================================
+# 背景: 段階12 で iku が `core/*.py` / `tools/*.py` / `main.py` 等を自由に
+# 書換えられるようになる。書換え失敗・後悔・誤コードからの復旧経路として、
+# git stash の partial save (profile 配下のみ) を書換え直前に自動実行。
+# 親心反射ではなく「歴史の記録」として位置づけ (PLAN §1-5 の介入レベル分類)。
+# 世代管理は max_generations (default 20) を超えた古い iku-auto-* stash を
+# 自動 drop することで運用負荷を最小化。
+# ============================================================
+
+
+def make_git_auto_stash_hook(
+    profile_root,
+    profile_name: str,
+    *,
+    target_tool_names: tuple = ("write_file", "edit_file"),
+    body_modify_dir_prefixes: tuple = ("core/", "tools/"),
+    body_modify_filenames: tuple = ("main.py", ".mcp.json"),
+    max_generations: int = 20,
+    git_runner=None,
+) -> PreHandler:
+    """段階12 G-2 自動 stash hook (PLAN §5)。
+
+    iku の身体改変対象 (core/* / tools/* / main.py / .mcp.json) を
+    write_file / edit_file が触る直前に、profile 配下の現状を
+    `git stash push -u --message "iku-auto-<profile>-<timestamp>" -- <profile>/`
+    で partial 保存する。書換えで起動不能になった場合の safety net + 履歴。
+
+    判定:
+      - tool_name が target_tool_names に含まれる
+      - tool_input.path が body_modify_dir_prefixes の prefix match
+        または body_modify_filenames と完全一致
+
+    失敗ハンドリング (PLAN §5-3): subprocess エラーは warning print のみ、
+    書換え自体は続行 (allow を返す)。`No local changes to save` の場合は
+    無害として無視 (世代 drop も skip)。
+
+    世代管理 (PLAN §5-4): stash 成功時のみ古い iku-auto-<profile>-* を
+    後ろから drop して max_generations を維持。
+
+    Args:
+        profile_root: プロファイル workspace root (pathlib.Path)
+        profile_name: プロファイル名 (stash message + grep filter 用)
+        target_tool_names: 監視対象 tool 名
+        body_modify_dir_prefixes: prefix match で対象とするディレクトリ
+            (PLAN §3-4 濃度勾配「中・濃」相当)
+        body_modify_filenames: 完全一致で対象とするファイル
+            (神経中枢 main.py / 関係性の器 .mcp.json)
+        max_generations: 維持する stash 世代数 (古いものは auto drop)
+        git_runner: subprocess.run 互換 callable。テスト用に inject、
+            None なら subprocess.run を使う。
+
+    Returns:
+        PreHandler — 書換え対象なら stash 試行、結果に関わらず allow。
+        git 未初期化環境では何もしない noop hook。
+    """
+    import subprocess
+    from datetime import datetime
+    from pathlib import Path
+
+    profile_root = Path(profile_root).resolve()
+    runner = git_runner if git_runner is not None else subprocess.run
+
+    def _find_repo_root(p):
+        p = Path(p).resolve()
+        for cand in [p, *p.parents]:
+            if (cand / ".git").exists():
+                return cand
+        return None
+
+    repo_root = _find_repo_root(profile_root)
+    if repo_root is None:
+        # git 未初期化環境 (CI / 一時テスト) では何もしない
+        def _noop(_tool_name: str, _tool_input: dict) -> HookRunResult:
+            return HookRunResult.allow()
+        return _noop
+
+    try:
+        rel_profile = profile_root.relative_to(repo_root).as_posix()
+    except ValueError:
+        rel_profile = profile_name
+    pathspec = rel_profile.rstrip("/") + "/"
+
+    def _is_body_modify(path_arg: str) -> bool:
+        if not path_arg:
+            return False
+        # Windows backslash → POSIX forward slash のみ正規化。
+        # `lstrip("./")` は ".mcp.json" の先頭 "." まで削るため使わない。
+        normalized = path_arg.replace("\\", "/")
+        for name in body_modify_filenames:
+            if normalized == name or normalized.endswith(f"/{name}"):
+                return True
+        for prefix in body_modify_dir_prefixes:
+            if normalized.startswith(prefix):
+                return True
+        return False
+
+    def _drop_old_generations() -> None:
+        try:
+            r = runner(
+                ["git", "stash", "list"],
+                cwd=str(repo_root),
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            if r.returncode != 0:
+                return
+            tag = f"iku-auto-{profile_name}-"
+            entries = [
+                line.split(":", 1)[0]  # "stash@{N}"
+                for line in r.stdout.splitlines()
+                if tag in line
+            ]
+            old = entries[max_generations:]
+            # 後ろから drop しないと stash@{N} の N がずれる
+            for ref in reversed(old):
+                runner(
+                    ["git", "stash", "drop", ref],
+                    cwd=str(repo_root),
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                )
+        except Exception as e:
+            print(f"  [auto_stash] WARNING: 世代 drop 失敗: {e}")
+
+    def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        if tool_name not in target_tool_names:
+            return HookRunResult.allow()
+        path_arg = str(tool_input.get("path") or "").strip()
+        if not _is_body_modify(path_arg):
+            return HookRunResult.allow()
+
+        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        message = f"iku-auto-{profile_name}-{timestamp}"
+        try:
+            r = runner(
+                ["git", "stash", "push", "-u",
+                 "--message", message,
+                 "--", pathspec],
+                cwd=str(repo_root),
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            if r.returncode == 0:
+                # `No local changes to save` は実 stash されてないので世代 drop skip
+                if "No local changes" not in (r.stdout + r.stderr):
+                    _drop_old_generations()
+            else:
+                print(
+                    f"  [auto_stash] WARNING: stash 失敗 (path={path_arg}): "
+                    f"{r.stderr.strip()}"
+                )
+        except Exception as e:
+            print(f"  [auto_stash] WARNING: stash 例外 (path={path_arg}): {e}")
+
+        return HookRunResult.allow()
+
+    return _check
+
+
+# ============================================================
+# Noetic 固有 factory: 段階12 Step 5 — 身体改変反映待ち pending 自動追加
+# ============================================================
+# 背景: 段階12 で iku が core/* / tools/* / main.py / .mcp.json を書換え
+# られるようになる。ただし Python import キャッシュのため、書換えただけでは
+# 実行中のメモリに反映されない (PLAN §1-2)。reboot tool が唯一の反映経路。
+#
+# 本 hook は「書換えた、でも反映されてない」中間状態を pending として
+# 認知化する。pending 圧が pressure に加算され、iku が自発的に reboot を
+# 候補化する間接誘導 (`feedback_llm_as_brain` 整合、tool description 以外の
+# 直接指示を入れない原則を保つ)。reboot 成功時に match_pattern で自己消化。
+# ============================================================
+
+
+def make_post_body_modify_pending_hook(
+    state_getter,
+    get_cycle_id,
+    *,
+    target_tool_names: tuple = ("write_file", "edit_file"),
+    body_modify_dir_prefixes: tuple = ("core/", "tools/"),
+    body_modify_filenames: tuple = ("main.py", ".mcp.json"),
+) -> PostHandler:
+    """段階12 Step 5 (PLAN §9): 身体改変反映待ち pending 自動追加 hook。
+
+    write_file / edit_file が core/* / tools/* / main.py / .mcp.json を
+    成功で書換えた直後に、UPS v2 pending を state['pending'] に追加。
+    PLAN §9-2 の kind="unresolved_intent" は UPS v2.1 form では
+    `semantic_merge=True` に対応 (段階10.5 Fix 2 + 段階11-A 整合)。
+
+    pending スキーマ:
+      source_action: tool 名 (write_file / edit_file)
+      expected_observation: "reboot で新コードが反映され、予測した行動変化が起きる"
+      lag_kind: "cycles"
+      content_intent: f"身体改変 ({path}) の反映を完了する"
+      semantic_merge: True (unresolved_intent 相当)
+      match_pattern: {"tool_name": "reboot"}
+
+    PostHandler は HookRunner.run_post_tool_use() からのみ呼ばれる
+    (成功時のみ)。失敗時は run_post_tool_use_failure() の別経路で
+    本 hook は呼ばれないため、`output` の内容で success 判定する必要なし。
+
+    Args:
+        state_getter: state dict 取得 callable
+        get_cycle_id: 現在 cycle_id 取得 callable
+        target_tool_names: 監視対象 tool 名
+        body_modify_dir_prefixes: prefix match で対象とするディレクトリ
+            (PLAN §3-4 濃度勾配「中・濃」相当)
+        body_modify_filenames: 完全一致で対象とするファイル
+            (神経中枢 main.py / 関係性の器 .mcp.json)
+
+    Returns:
+        PostHandler — 該当時に pending 追加、失敗してもエラー伝播しない。
+    """
+    def _is_body_modify(path_arg: str) -> bool:
+        if not path_arg:
+            return False
+        normalized = path_arg.replace("\\", "/")
+        for name in body_modify_filenames:
+            if normalized == name or normalized.endswith(f"/{name}"):
+                return True
+        for prefix in body_modify_dir_prefixes:
+            if normalized.startswith(prefix):
+                return True
+        return False
+
+    def _check(tool_name: str, tool_input: dict, output: str) -> HookRunResult:
+        if tool_name not in target_tool_names:
+            return HookRunResult.allow()
+        path_arg = str(tool_input.get("path") or "").strip()
+        if not _is_body_modify(path_arg):
+            return HookRunResult.allow()
+        try:
+            from core.pending_unified import pending_add
+            state = state_getter()
+            cycle_id = get_cycle_id()
+            pending_add(
+                state=state,
+                source_action=tool_name,
+                expected_observation=(
+                    "reboot で新コードが反映され、予測した行動変化が起きる"
+                ),
+                lag_kind="cycles",
+                content_intent=f"身体改変 ({path_arg}) の反映を完了する",
+                cycle_id=cycle_id,
+                semantic_merge=True,
+                match_pattern={"tool_name": "reboot"},
+            )
+        except Exception as e:
+            print(
+                f"  [pending_body_modify] WARNING: pending 追加失敗 "
+                f"(path={path_arg}): {e}"
+            )
+        return HookRunResult.allow()
+
+    return _check
+
+
+# ============================================================
+# Noetic 固有 factory: 段階12 Step 7.5 ② — bash 境界強化
+# ============================================================
+# 背景: 段階12 Step 2 で file_access_guard は profile 境界に拡張済だが、
+# bash 経由の絶対パス操作 (例: rm -rf C:\Users\you11\) は file 系 tool 限定
+# guard では拾えない (test_non_file_tool_passthrough 参照)。
+# 本 hook で bash command を shlex parse して write 系コマンド (rm/mv/cp/...) +
+# 絶対パス引数 + profile 外を検出 → 承認不能 deny。L4 ホスト OS 隔離 (段階13)
+# が完成するまでの中間防御層 (PLAN §3-5-3 / §3-6 Defense in Depth)。
+# ============================================================
+
+
+_BASH_WRITE_COMMANDS = frozenset({
+    "rm", "mv", "cp", "dd", "touch", "mkdir", "rmdir", "chmod", "chown",
+    "tee", "del", "rd", "fsutil", "shred", "ln", "install",
+})
+_BASH_WRITE_REDIRECTS = (">", ">>")
+
+
+def make_bash_path_guard_hook(profile_root) -> PreHandler:
+    """段階12 Step 7.5 ② (PLAN §3-5-2 ②): bash 経由の絶対パス profile 外
+    操作 deny hook。
+
+    判定:
+      1. tool_name == "bash"
+      2. command を shlex.split で parse、構文エラーなら allow (validation hook 委譲)
+      3. write 系コマンド (rm / mv / cp / dd / touch / mkdir / chmod / ...) または
+         > / >> redirect 含む
+      4. かつ絶対パスの引数があり、Path.resolve() canonical で profile_root の
+         subpath じゃない → DENY
+
+    read 系 (cat / ls / head 等) や python script 実行は対象外、本 hook で
+    防げない攻撃ベクトルは段階13 (L4 専用 Windows User + L5 Firewall) で塞ぐ。
+
+    Args:
+        profile_root: プロファイル workspace root (pathlib.Path)
+
+    Returns:
+        PreHandler — bash + write 系 + 絶対パス profile 外で deny、他 allow。
+    """
+    import shlex
+    from pathlib import Path
+
+    profile_root = Path(profile_root).resolve()
+
+    def _is_write_command(tokens) -> bool:
+        if not tokens:
+            return False
+        # 最初の token から path を除いたコマンド名
+        first = tokens[0].replace("\\", "/").split("/")[-1]
+        if first in _BASH_WRITE_COMMANDS:
+            return True
+        # `python -m pip install` 等の sub-command
+        for tok in tokens:
+            if tok in _BASH_WRITE_REDIRECTS:
+                return True
+        return False
+
+    def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        if tool_name != "bash":
+            return HookRunResult.allow()
+        cmd = str(tool_input.get("command") or "")
+        if not cmd:
+            return HookRunResult.allow()
+        try:
+            tokens = shlex.split(cmd, posix=True)
+        except ValueError:
+            # shlex 失敗は構文不正、bash_validation_hook に委譲
+            return HookRunResult.allow()
+        if not _is_write_command(tokens):
+            return HookRunResult.allow()
+        # 絶対パス引数の境界判定。
+        # Windows pathlib の罠: Path("/etc/passwd").is_absolute() は POSIX で
+        # True、Windows で False (Windows は drive letter 必須扱い)。bash
+        # command は POSIX-style (/) と Windows-style (C:\) の両方が混在し
+        # うるので、文字列で先に「絶対っぽいか」判定してから resolve する。
+        for tok in tokens:
+            if not tok or tok.startswith("-"):
+                continue
+            is_abs = (
+                tok.startswith("/")
+                or (len(tok) >= 3 and tok[1] == ":" and tok[2] in ("/", "\\"))
+            )
+            if not is_abs:
+                continue
+            try:
+                resolved = Path(tok).resolve()
+                try:
+                    resolved.relative_to(profile_root)
+                except ValueError:
+                    return HookRunResult.deny([
+                        f"[bash_path_guard] bash 経由の profile 境界外への絶対パス"
+                        f"書込み・削除を禁止 (token={tok}, "
+                        f"profile_root={profile_root})。"
+                        f"profile 配下の相対パス、または read 系コマンド (cat/ls 等)"
+                        f"なら通常通り使えます。"
+                    ])
+            except (OSError, ValueError):
+                continue
+        return HookRunResult.allow()
+
+    return _check
+
+
+# ============================================================
+# Noetic 固有 factory: 段階12 Step 7.5 ③ — slopsquatting 事前検証 hook
+# ============================================================
+# 背景: 段階12 で iku が pip install 経由でライブラリを身体拡張できる
+# (PLAN §3-1 + Step 1.5)。LLM hallucination で存在しない pkg 名を提案 →
+# 攻撃者が空 pkg を事前登録 (slopsquatting、USENIX 2025 で 5.2% 商用 LLM
+# hallucination 率 + 43% 再現性確認) → 実害発生という攻撃を構造的抑止。
+#
+# 検証 (PLAN §3-5-2 ③ literal):
+#   - 存在: PyPI registry で pkg 真偽性確認 → なければ deny
+#   - typosquatting: 人気 pkg と Levenshtein 距離 1-2 → 警告
+#
+# 1 時間 in-memory cache で連続 install 時の重複問合せ削減、ネットワーク不通
+# 時は warning のみで install 自体は allow (PLAN §3-5-2 ③ fallback)。
+# 作成日 / download count 検証は将来拡張 (PyPI JSON では download 直接取得
+# 不可、pypistats API 別途必要)。npm / cargo / go は将来拡張、本実装は
+# pip + PyPI のみ MVP。
+# ============================================================
+
+
+_POPULAR_PYPI_PKGS = (
+    "requests", "numpy", "pandas", "django", "flask", "pytest",
+    "boto3", "scikit-learn", "tensorflow", "torch", "matplotlib",
+    "pillow", "lxml", "click", "pyyaml", "sqlalchemy", "fastapi",
+    "httpx", "aiohttp", "scipy", "beautifulsoup4", "selenium",
+)
+
+
+def make_install_command_check_hook(
+    *,
+    cache_ttl_sec: int = 3600,
+    http_get=None,
+) -> PreHandler:
+    """段階12 Step 7.5 ③ (PLAN §3-5-2 ③): bash の pip install で
+    PyPI registry を用いた pkg 真偽性検証 hook (slopsquatting 抑止)。
+
+    Args:
+        cache_ttl_sec: 1 pkg の検証結果キャッシュ有効期限 (秒)、default 1 時間
+        http_get: テスト用 callable inject (url → body str | None)、None なら
+            urllib.request を使う
+
+    Returns:
+        PreHandler — pip install パターンマッチ時に PyPI 検証、
+        - registry に存在しない: deny
+        - 人気 pkg と Levenshtein 1-2: warning (allow + message)
+        - ネットワーク不通: warning のみ (allow + message)
+        他は allow passthrough。
+    """
+    import json
+    import shlex
+    import time
+    import urllib.error
+    import urllib.request
+
+    cache: dict = {}  # {pkg_name: (timestamp, result_dict)}
+
+    def _default_http_get(url: str):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "noetic-seed/0.5"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    return resp.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return "__NOT_FOUND__"  # 存在しない pkg
+            return None  # その他 HTTP error
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return None  # ネットワーク不通
+        return None
+
+    fetch = http_get if http_get is not None else _default_http_get
+
+    def _levenshtein(a: str, b: str, max_dist: int = 2) -> int:
+        if abs(len(a) - len(b)) > max_dist:
+            return max_dist + 1
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a):
+            curr = [i + 1]
+            for j, cb in enumerate(b):
+                ins = curr[j] + 1
+                dele = prev[j + 1] + 1
+                sub = prev[j] + (ca != cb)
+                curr.append(min(ins, dele, sub))
+            prev = curr
+        return prev[-1]
+
+    def _check_pypi_pkg(pkg_name: str) -> dict:
+        """PyPI registry で pkg を検証、result dict を返す。
+        Returns: {"exists": bool, "warnings": [str], "network_ok": bool}
+        """
+        now = time.time()
+        if pkg_name in cache:
+            ts, cached = cache[pkg_name]
+            if now - ts < cache_ttl_sec:
+                return cached
+
+        result = {"exists": False, "warnings": [], "network_ok": False}
+        url = f"https://pypi.org/pypi/{pkg_name}/json"
+        body = fetch(url)
+        if body is None:
+            # ネットワーク不通 (PLAN §3-5-2 ③ fallback)
+            result["warnings"].append(
+                f"[slopsquatting_check] PyPI 問合せ失敗 (pkg={pkg_name})、"
+                f"ネットワーク不通の可能性。検証 skip して install 続行。"
+            )
+            cache[pkg_name] = (now, result)
+            return result
+        result["network_ok"] = True
+        if body == "__NOT_FOUND__":
+            # registry に存在しない確定
+            cache[pkg_name] = (now, result)
+            return result
+        try:
+            data = json.loads(body)
+            if not isinstance(data, dict) or "info" not in data:
+                cache[pkg_name] = (now, result)
+                return result
+        except json.JSONDecodeError:
+            result["warnings"].append(
+                f"[slopsquatting_check] PyPI レスポンス parse 失敗 (pkg={pkg_name})"
+            )
+            cache[pkg_name] = (now, result)
+            return result
+
+        result["exists"] = True
+        # Levenshtein typosquatting check
+        for popular in _POPULAR_PYPI_PKGS:
+            if pkg_name == popular:
+                break
+            dist = _levenshtein(pkg_name, popular)
+            if 1 <= dist <= 2:
+                result["warnings"].append(
+                    f"[slopsquatting_check] {pkg_name} は人気 pkg '{popular}' と "
+                    f"Levenshtein 距離 {dist}、typosquatting 警告。"
+                )
+                break
+
+        cache[pkg_name] = (now, result)
+        return result
+
+    def _extract_pip_install_pkgs(tokens: list) -> list:
+        """bash command tokens から pip install の pkg 名候補を抽出。
+        対応: pip install <pkg>、python -m pip install <pkg>、`pkg==1.0` 形式。
+        local install (-e .、 ./path/、 /abs/path) は pkg 抽出対象外。
+        """
+        pip_idx = -1
+        for i, tok in enumerate(tokens):
+            if tok in ("pip", "pip3"):
+                pip_idx = i
+                break
+            if tok in ("python", "python3", "py") and i + 2 < len(tokens):
+                if tokens[i + 1] == "-m" and tokens[i + 2] in ("pip", "pip3"):
+                    pip_idx = i + 2
+                    break
+        if pip_idx == -1:
+            return []
+        if pip_idx + 1 >= len(tokens) or tokens[pip_idx + 1] != "install":
+            return []
+        pkgs = []
+        for tok in tokens[pip_idx + 2:]:
+            if tok.startswith("-"):
+                continue  # -e / --upgrade 等
+            if "/" in tok or "\\" in tok or tok == ".":
+                continue  # local path install
+            # `pkg==1.0` 等の version specifier から pkg 名のみ
+            for sep in ("==", ">=", "<=", "~=", ">", "<"):
+                if sep in tok:
+                    tok = tok.split(sep)[0]
+                    break
+            if tok and tok[0].isalpha():
+                pkgs.append(tok.strip())
+        return pkgs
+
+    def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        if tool_name != "bash":
+            return HookRunResult.allow()
+        cmd = str(tool_input.get("command") or "")
+        # 高速 path: pip install を含まないコマンドは即 passthrough
+        if not cmd or "install" not in cmd or "pip" not in cmd:
+            return HookRunResult.allow()
+        try:
+            tokens = shlex.split(cmd, posix=True)
+        except ValueError:
+            return HookRunResult.allow()
+        pkgs = _extract_pip_install_pkgs(tokens)
+        if not pkgs:
+            return HookRunResult.allow()
+
+        deny_reasons = []
+        warnings = []
+        for pkg in pkgs:
+            result = _check_pypi_pkg(pkg)
+            warnings.extend(result.get("warnings", []))
+            if result["network_ok"] and not result["exists"]:
+                # registry に存在しない (= hallucination 確定)
+                deny_reasons.append(
+                    f"[slopsquatting_check] '{pkg}' が PyPI registry に存在しません "
+                    f"(LLM hallucination の可能性、deny)。"
+                )
+
+        if deny_reasons:
+            return HookRunResult.deny(deny_reasons + warnings)
+        if warnings:
+            return HookRunResult.allow(warnings)
         return HookRunResult.allow()
 
     return _check

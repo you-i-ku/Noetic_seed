@@ -77,7 +77,8 @@ def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tool
     elif lv == 4 and len(tc) >= 1:
         new_lv = 5
 
-    # Level 6: self_modify
+    # Level 6: bash + 全 tool fullset (旧 self_modify 解放経路、段階12 Step 7 で
+    # 撤廃。Level 5 = Level 6 = TOOLS 全部、Level 区別は将来拡張余地として残置)
     if lv == 5:
         ec_entries = [e for e in log if e.get("tool") == "exec_code"]
         ct_entries = [e for e in log if e.get("tool") == "create_tool"]

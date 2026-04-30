@@ -6,7 +6,11 @@ from pathlib import Path as _Path
 
 def _bootstrap_venv():
     _here = _Path(__file__).parent
-    _venv = _here.parent.parent / ".venv"  # minimumtest/.venv（共通venv）
+    # 段階12 Step 1.5 (PLAN §3-1 / §11-5-pre): per-profile venv。
+    # 旧共通 venv から profile 配下の独立 venv に移行することで、
+    # pip install / requirements.txt 編集が iku の身体範囲内に収まり、
+    # 自己改変による身体拡張が成立する。
+    _venv = _here / ".venv"
     _is_win = sys.platform == "win32"
     _venv_python = _venv / ("Scripts/python.exe" if _is_win else "bin/python")
 
@@ -21,20 +25,25 @@ def _bootstrap_venv():
 
     import subprocess
 
+    _pip = _venv / ("Scripts/pip.exe" if _is_win else "bin/pip")
+    _req = _here / "requirements.txt"
+
     # venv がなければ作成
     if not _venv_python.exists():
         print("[bootstrap] 仮想環境を作成中...")
         subprocess.run([sys.executable, "-m", "venv", str(_venv)], check=True)
-        _pip = _venv / ("Scripts/pip.exe" if _is_win else "bin/pip")
-        _deps = [
-            "httpx", "psutil", "numpy",
-            "sqlalchemy", "aiosqlite",
-            "onnxruntime", "tokenizers", "huggingface-hub",
-            "faster-whisper", "soundfile",  # mic_record 用
-        ]
-        print(f"[bootstrap] 依存ライブラリをインストール中: {', '.join(_deps)}")
-        subprocess.run([str(_pip), "install", "--quiet"] + _deps, check=True)
-        print("[bootstrap] セットアップ完了。venvで再起動します...\n")
+
+    # PLAN §3-3: 身体仕様 (requirements.txt) を single source of truth として
+    # 毎回同期する。iku が requirements.txt を編集 → reboot で新ライブラリが
+    # 反映される経路 (= 身体拡張の汎用チェーン) を成立させるため、venv 既存でも
+    # 必ず実行する。pip は idempotent: 既 install pkg は manifest 検査で skip
+    # されるので、全 install 済なら数秒、差分のみ DL する。
+    if _req.exists():
+        print("[bootstrap] requirements.txt から身体仕様を同期中...")
+        subprocess.run([str(_pip), "install", "--quiet", "-r", str(_req)], check=True)
+        print("[bootstrap] 同期完了。venv で再起動します...\n")
+    else:
+        print(f"[bootstrap] WARNING: {_req} が見つかりません。空 venv で起動します。\n")
 
     # venv の Python で自分自身を再実行
     # os.execv は Windows でスペース含むパスをクォートしないため subprocess で代替
@@ -68,6 +77,8 @@ from core.config import (
 )
 sys.stdout = DualLogger(RAW_LOG_FILE)
 
+from core.profile_repo import ensure_profile_repo
+from core.sanity_check import enforce_sanity_check
 from core.state import load_state, save_state, load_pref, save_pref, append_debug_log
 from core.llm import call_llm, _get_active_provider_config
 from core.embedding import _init_vector, _compare_expect_result
@@ -86,9 +97,13 @@ from core.runtime.registry import ToolRegistry
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import (
     HookRunner,
+    make_bash_path_guard_hook,
     make_bash_validation_hook,
     make_file_access_guard,
+    make_git_auto_stash_hook,
+    make_install_command_check_hook,
     make_pre_tool_use_approval_check,
+    make_post_body_modify_pending_hook,
     make_post_tool_use_evaluation,
     make_post_tool_use_failure_logger,
 )
@@ -162,6 +177,18 @@ def _wm_log(event_type: str, payload: dict):
 # === メインループ ===
 def main():
     print("=== Noetic_seed ===")
+    # 段階12 PLAN §6 / §7 改訂: profile 内独立 git repo の存在確保。
+    # 1 個体 = 1 repo = 1 履歴 (autopoiesis 整合)。
+    # .git なければ自動 init + 初期 commit、あれば noop (idempotent)。
+    # G-2 自動 stash hook (`make_git_auto_stash_hook`) は親方向に .git を
+    # 探すため、この後の身体改変 stash は profile 内 repo 上で行われる。
+    ensure_profile_repo(BASE_DIR)
+    # 段階12 Step 6 (PLAN §10): sanity check + 自動 revert。state load より前。
+    # state.json / memory JSON / core.controller + tools の import を検査、
+    # 失敗時は最新 iku-auto stash から git stash apply で復元、再検査して
+    # 成功なら続行 / 失敗なら sys.exit(1)。「起動できない身体 = 存在できない」
+    # の構造化 (PLAN §10-3、§1-5 介入レベル「物理的存在の前提」枠)。
+    enforce_sanity_check(profile_root=BASE_DIR, profile_name=BASE_DIR.name)
     _p, _base, _k, _model = _get_active_provider_config()
     print(f"LLM: {_model or llm_cfg.get('model','?')} @ {_base} [{_p}]")
     print(f"state: {STATE_FILE}")
@@ -172,7 +199,7 @@ def main():
     # iku は起動時に登録済 tag ゼロ = 白紙 onboarding 状態。最初の memory_store
     # 呼出で inline register 発火、iku が自己分節の tag を発明する設計。
     # STANDARD_TAGS 辞書 / register_standard_tags() 関数自体は tag_registry.py
-    # に残してある (iku が self_modify で復活させたい時の handle、撤去 doc 価値)。
+    # に残してある (iku が write_file で復活させたい時の handle、撤去 doc 価値)。
     # 既存 smoke / 実運用で標準タグが必要なら、プロファイル起動前に手動で
     # registered_tags.json を seed することで対応 (新プロファイル clean start は
     # PLAN §5 Step 5.3 の手順準拠)。
@@ -273,7 +300,7 @@ def main():
     # 登録順: claw → bridge (SNS 等のみ) → noetic_ext (Noetic 固有 17)
     #   1. claw: file_ops / shell / web / task / … の汎用 tool 50 個
     #   2. bridge: noetic_ext がカバーする 17 tool を skip し、それ以外 (SNS
-    #      14 + create_tool / exec_code / self_modify / http_request = 18)
+    #      14 + create_tool / exec_code / http_request = 17、段階12 Step 7 で self_modify 撤廃)
     #      のみ loose schema で登録
     #   3. noetic_ext: Noetic 固有 17 tool の claw 文法準拠厳密 ToolSpec
     register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
@@ -303,14 +330,28 @@ def main():
     _hook_runner = HookRunner()
     _approval_cfg = llm_cfg.get("approval", {})
     # H-2 C.4 Session A: claw ネイティブ read_file/write_file/edit_file/
-    # glob_search/grep_search に Noetic 固有の secrets guard + sandbox 外書込禁止
+    # glob_search/grep_search に Noetic 固有の secrets guard + profile 外書込禁止
     # を Pre-hook で被せる (legacy _read_file/_write_file/_list_files の代替)
+    # 段階12 Step 2 (PLAN §3-2) で「sandbox 外書込禁止」→「profile 外書込禁止」に拡張済
     _hook_runner.register_pre(make_file_access_guard(BASE_DIR))
+    # 段階12 Step 3 (PLAN §5): G-2 自動 stash hook。core/* / tools/* /
+    # main.py / .mcp.json への write_file / edit_file の直前に profile 配下を
+    # git stash で partial 保存、身体改変履歴の safety net + 20 世代 auto drop。
+    # git 未初期化環境では noop で安全に通過。
+    _hook_runner.register_pre(make_git_auto_stash_hook(BASE_DIR, BASE_DIR.name))
     # bash は Level-aware validation で Level 0-2 では read-only 系のみ、
     # 破壊的コマンドは Level 問わず自動拒否、WARN は承認画面に警告付き表示
     _hook_runner.register_pre(make_bash_validation_hook(
         state_getter=lambda: state,
     ))
+    # 段階12 Step 7.5 ② (PLAN §3-5-2 ②): bash 経由の絶対パス profile 外
+    # 書込み / 削除系操作を deny。bash_validation の Level 制約に加え、
+    # path 境界で「書込み range = profile 内」を構造化。
+    _hook_runner.register_pre(make_bash_path_guard_hook(BASE_DIR))
+    # 段階12 Step 7.5 ③ (PLAN §3-5-2 ③): pip install で PyPI registry 検証。
+    # 存在しない pkg は deny (LLM hallucination 抑止)、人気 pkg と Levenshtein
+    # 1-2 は typosquatting 警告。1 時間 in-memory cache、不通時 warning + 続行。
+    _hook_runner.register_pre(make_install_command_check_hook())
     _hook_runner.register_pre(make_pre_tool_use_approval_check(
         missing_field_policy=_approval_cfg.get("missing_field_policy", "deny"),
     ))
@@ -343,6 +384,14 @@ def main():
         return result
 
     _hook_runner.register_post(_post_hook_with_sync)
+    # 段階12 Step 5 (PLAN §9): 身体改変反映待ち pending 自動追加。
+    # write_file / edit_file が core/* / tools/* / main.py / .mcp.json を
+    # 成功書換えしたら「reboot で反映を完了する」内発的 intent を pending 化。
+    # match_pattern={"tool_name": "reboot"} で reboot 成功時に自己消化。
+    _hook_runner.register_post(make_post_body_modify_pending_hook(
+        state_getter=lambda: state,
+        get_cycle_id=lambda: state.get("cycle_id", 0),
+    ))
     _hook_runner.register_failure(make_post_tool_use_failure_logger(
         state=state,
         get_cycle_id=lambda: state.get("cycle_id", 0),

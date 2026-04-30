@@ -73,13 +73,13 @@ _NOETIC_FILE_HINTS = {
         "その他の workspace 配下は自由に読めます。"
     ),
     "write_file": (
-        "[Noetic 制約] 書込先は sandbox/ 以下のみ (例: sandbox/memo.md, "
-        "sandbox/identity/draft.md)。sandbox/secrets/ は secret_write を使用。"
-        "sandbox/ 外への書込はガードで拒否されます。"
+        "[Noetic 制約] 書込先は profile 配下 (= 自分の身体、PLAN §3-1)。"
+        "secrets.json / sandbox/secrets/ は secret_write を使用。"
+        "profile 外への書込はガードで拒否されます。"
     ),
     "edit_file": (
-        "[Noetic 制約] 編集対象は sandbox/ 以下のみ。"
-        "sandbox/secrets/ は secret_write を使用。"
+        "[Noetic 制約] 編集対象は profile 配下。"
+        "secrets.json / sandbox/secrets/ は secret_write を使用。"
     ),
     "glob_search": (
         "[Noetic 制約] sandbox/secrets/ と secrets.json は検索対象から除外されます。"
@@ -131,8 +131,8 @@ def ensure_noetic_file_hints(registry: ToolRegistry) -> int:
 
     claw 本家の description は claw-code の純粋 file_ops 仕様を説明するだけで、
     Noetic の make_file_access_guard (hooks.py) が敷く追加制約
-    (sandbox/ 外書込禁止、secrets 保護) は LLM に知らされない。
-    LLM が sandbox/ 外への書込で deny を食らってから学習するより、
+    (profile 外書込禁止、secrets 保護) は LLM に知らされない。
+    LLM が profile 外への書込で deny を食らってから学習するより、
     事前に description で制約を知らせる方がサイクル効率が良い。
 
     claw 本家ソースには触らず、registry 登録後に ToolSpec.description を

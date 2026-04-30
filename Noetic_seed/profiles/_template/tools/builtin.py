@@ -11,7 +11,7 @@ from core.state import load_state, save_state
 
 # AIから見えないファイル
 _HIDDEN_ALWAYS = {"raw_log.txt", "llm_debug.log", "setup.bat", "_setup.py", "run.bat", "requirements.txt", "settings.json"}
-_HIDDEN_UNTIL_LV6 = set()  # state.json/pref.jsonは読取可（書込はsandbox/制限で保護済み）
+_HIDDEN_UNTIL_LV6 = set()  # state.json/pref.jsonは読取可（書込は file_access_guard で保護済み）
 
 def _is_hidden(name: str, state: dict | None = None) -> bool:
     """AIから隠すべきファイルかどうか。pref.json/state.jsonはLevel6で解放。"""

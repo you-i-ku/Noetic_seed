@@ -21,7 +21,7 @@ def _build_approval_preview(tool: str, args_summary: str, args: dict) -> str:
     """承認通知のプレビュー文を組み立てる。
     ツール固有の args 要約 + AI の intent + 外部への説明 message を含める。
     intent と message は承認側が判断する上で必須情報。
-    （message= は self_modify の content= との衝突を避けるため message に統一）"""
+    （message= は引数命名の歴史的経緯で content= ではなく message に統一）"""
     intent = args.get("intent", "").strip()
     message = args.get("message", "").strip()
     lines = [f"[{tool}] {args_summary}"]

@@ -2,6 +2,9 @@
 
 Phase 4 Step H-2 A: legacy TOOLS dict を ToolSpec で passthrough 登録する。
 既に claw / stub で登録済の name は skip される。
+
+段階12 Step 7: 旧 self_modify tool 撤廃に伴い、self_modify 関連 case
+(_fake_tools_dict から削除、permissions / dangerous set からも除外) を更新。
 """
 import sys
 from pathlib import Path
@@ -33,7 +36,6 @@ def _fake_tools_dict():
         "search_memory": {"desc": "記憶検索", "func": lambda a: "found"},
         "elyth_post": {"desc": "Elyth 投稿", "func": lambda a: "posted"},
         "view_image": {"desc": "画像認識", "func": lambda a: "saw"},
-        "self_modify": {"desc": "自己改変", "func": lambda a: "modified"},
         "read_file": {"desc": "ファイル読取", "func": lambda a: "read"},
     }
 
@@ -43,10 +45,9 @@ def test_bridge_registers_all_when_empty():
     reg = ToolRegistry()
     n = register_legacy_bridge(reg, _fake_tools_dict())
     return all([
-        _assert(n == 9, f"登録数=9 (実={n})"),
+        _assert(n == 8, f"登録数=8 (実={n})"),
         _assert(reg.has("output_display"), "output_display 登録"),
         _assert(reg.has("elyth_post"), "elyth_post 登録"),
-        _assert(reg.has("self_modify"), "self_modify 登録"),
     ])
 
 
@@ -62,7 +63,7 @@ def test_bridge_overwrites_existing_names():
     ))
     n = register_legacy_bridge(reg, _fake_tools_dict())
     return all([
-        _assert(n == 9, f"登録数=9 (overwrite、全件登録) (実={n})"),
+        _assert(n == 8, f"登録数=8 (overwrite、全件登録) (実={n})"),
         _assert(reg.get("read_file").handler({}) == "read",
                 "legacy handler で上書き (secrets guard 保護)"),
     ])
@@ -71,12 +72,11 @@ def test_bridge_overwrites_existing_names():
 def test_bridge_skip_names_param():
     print("== skip_names パラメータで追加除外できる ==")
     reg = ToolRegistry()
-    skip = frozenset({"elyth_post", "self_modify"})
+    skip = frozenset({"elyth_post"})
     n = register_legacy_bridge(reg, _fake_tools_dict(), skip_names=skip)
     return all([
-        _assert(n == 7, f"登録数=7 (2 skip 後) (実={n})"),
+        _assert(n == 7, f"登録数=7 (1 skip 後) (実={n})"),
         _assert(not reg.has("elyth_post"), "elyth_post 未登録"),
-        _assert(not reg.has("self_modify"), "self_modify 未登録"),
         _assert(reg.has("wait"), "wait は登録される"),
     ])
 
@@ -94,8 +94,6 @@ def test_bridge_permissions():
                 "view_image = READ_ONLY"),
         _assert(reg.get("output_display").required_permission == PermissionMode.WORKSPACE_WRITE,
                 "output_display = WORKSPACE_WRITE"),
-        _assert(reg.get("self_modify").required_permission == PermissionMode.WORKSPACE_WRITE,
-                "self_modify = WORKSPACE_WRITE"),
         _assert(reg.get("elyth_post").required_permission == PermissionMode.WORKSPACE_WRITE,
                 "elyth_post = WORKSPACE_WRITE"),
     ])
@@ -132,7 +130,8 @@ def test_bridge_schema_has_approval_layer():
 
 def test_readonly_set_reasonable():
     print("== _READ_ONLY_LEGACY_TOOLS に危険 tool が含まれないこと ==")
-    dangerous = {"self_modify", "exec_code", "create_tool",
+    # 段階12 Step 7: self_modify 撤廃に伴い dangerous set から除外
+    dangerous = {"exec_code", "create_tool",
                  "elyth_post", "x_post", "output_display",
                  "mic_record", "camera_stream", "screen_peek"}
     overlap = dangerous & _READ_ONLY_LEGACY_TOOLS

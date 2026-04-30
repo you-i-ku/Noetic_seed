@@ -6,6 +6,9 @@ __pycache__/
 venv/
 .venv/
 
+# Per-profile venv (段階12 Step 1.5、_template から copy された profile が独立 venv を持つ)
+Noetic_seed/profiles/*/.venv/
+
 # Noetic_seed profiles (_template only tracked)
 Noetic_seed/profiles/*
 !Noetic_seed/profiles/_template/
