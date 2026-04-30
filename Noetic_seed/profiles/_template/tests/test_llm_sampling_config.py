@@ -29,7 +29,7 @@ class _StubModel:
     def __init__(self, capture: dict):
         self._capture = capture
 
-    def respond(self, chat, config=None):
+    def respond(self, chat, config=None, on_prediction_fragment=None):
         self._capture["config"] = config
 
         class _Result:

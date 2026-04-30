@@ -85,7 +85,7 @@ def test_call_llm_no_repetition_no_retry():
     from core import llm
     call_history: list = []
 
-    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths):
+    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths, role=None):
         call_history.append({"temperature": temperature})
         return "健全な応答です。"
 
@@ -104,7 +104,7 @@ def test_call_llm_repetition_triggers_retry_with_higher_temp():
     call_history: list = []
     bad_output = "として、" * 20
 
-    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths):
+    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths, role=None):
         call_history.append({"temperature": temperature})
         if len(call_history) == 1:
             return bad_output
@@ -127,7 +127,7 @@ def test_call_llm_max_retry_exhaustion_returns_last():
     call_history: list = []
     bad_output = "として、" * 20
 
-    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths):
+    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths, role=None):
         call_history.append({"temperature": temperature})
         return bad_output
 
@@ -146,7 +146,7 @@ def test_call_llm_max_retry_zero_disables_guard():
     call_history: list = []
     bad_output = "として、" * 20
 
-    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths):
+    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths, role=None):
         call_history.append({"temperature": temperature})
         return bad_output
 
@@ -164,7 +164,7 @@ def test_call_llm_temperature_capped_at_1_2():
     call_history: list = []
     bad_output = "として、" * 20
 
-    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths):
+    def _stub_inner(prompt, max_tokens, temperature, image_path, image_paths, role=None):
         call_history.append({"temperature": temperature})
         return bad_output
 
