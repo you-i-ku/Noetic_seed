@@ -222,7 +222,7 @@ def assemble_system_prompt(
         build_fire_cause_section(fire_cause),
         # 段階10.5 Fix 4 δ': state 経由で opinions / dispositions を渡し構造化自己認識を完成
         build_world_model_section(world_model, state=state),
-        "[STM — log]\n" + build_log_block(state, log_budget_tok),
+        "[log]\n" + build_log_block(state, log_budget_tok),
         "[利用可能なツール]\n" + build_tool_block(allowed_tools, tools_dict, registry=registry),
         # 段階11-D Step 4-2 hotfix v4: forced 時のみ末尾に強制実行指示。空文字列は
         # 下の "\n\n".join(s for s in sections if s) で自動除外される。

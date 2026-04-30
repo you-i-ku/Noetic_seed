@@ -166,7 +166,7 @@ def test_gap_zero_treated_as_resolved():
     state = _fresh_state(pending=[p])
     prompt = build_prompt_propose(state, _ctrl(), _tools())
     # 未対応セクションに出ないことを確認
-    u_section_end = prompt.find("[STM")
+    u_section_end = prompt.find("[現在の状況]")
     u_section = prompt[:u_section_end]
     return _assert("[pending " not in u_section, "gap=0.0 は未対応に出ない")
 

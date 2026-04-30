@@ -199,7 +199,7 @@ def test_assemble_contains_all_five_sections():
         _assert("Approval Protocol" in prompt, "① 承認プロトコル"),
         _assert("発火原因: threshold breach" in prompt, "② 発火原因"),
         _assert("世界モデル" in prompt, "③ 世界モデル section heading"),
-        _assert("STM — log" in prompt, "④ log block heading"),
+        _assert("[log]" in prompt, "④ log block heading"),
         _assert("read_file" in prompt, "④ log 中身"),
         _assert("利用可能なツール" in prompt, "⑤ tool 一覧 heading"),
     ])
@@ -222,7 +222,7 @@ def test_assemble_section_order():
     i_approval = prompt.find("Approval Protocol")
     i_fire = prompt.find("発火原因")
     i_wm = prompt.find("世界モデル")
-    i_log = prompt.find("STM — log")
+    i_log = prompt.find("[log]")
     i_tools = prompt.find("利用可能なツール")
     return all([
         _assert(i_approval < i_fire, "Approval < 発火原因"),

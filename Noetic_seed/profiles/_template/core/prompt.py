@@ -341,13 +341,13 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 
     return f"""[{now}]{fire_cause_line}
 
-[LTM — 自己モデル]
+[自己モデル]
 {self_text}
 
 [未対応事項]
 {pending_text}{stream_status_line}
 {f'{chr(10)}[関連記憶]{chr(10)}{memory_text}{chr(10)}' if memory_text else ''}
-[STM — 現在の状況]
+[現在の状況]
 {f'summaries:{chr(10)}{summary_text}{chr(10)}' if summary_text else ''}log:
 {log_text}
 
@@ -355,7 +355,7 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 {tool_lines}
 
 [候補生成プロトコル]
-LTM（自己モデル）と STM（現在の状況）を参照し、次にとりうる行動候補を【5個】列挙してください。
+自己モデルと現在の状況を参照し、次にとりうる行動候補を【5個】列挙してください。
 
 ※ log の result 欄に「[表示上 N/M字。ツール実行時は完全取得済]」と付いているのは、
   コンテキスト予算の都合で表示を縮めているだけです。そのツール実行時は完全な結果を
