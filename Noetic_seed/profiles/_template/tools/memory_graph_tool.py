@@ -1,16 +1,21 @@
-"""memory_graph — 段階11-D Phase 0 Step 0.2: ego view MVP (案 ③: pure virtualization).
+"""memory_graph — 段階11-D Phase 0 Step 0.2 + 段階13 軽減 2: ego/global/both view.
 
 self / memory を unified node とした graph 構造 tool。
 self virtual entries は state.self を描画時に on-the-fly で生成 (永続化なし)。
 self ↔ memory edges は描画時に similarity 計算 (永続化なし)。
 memory ↔ memory edges は memory_links.jsonl の永続 link を参照。
 
-5 層スキーマ (Step 0.2 範囲):
+5 層スキーマ:
   nodes   : self (continuous, id 不変) + memory (kind 区別)
   edges   : memory↔memory (永続) + self↔memory (on-the-fly, similarity only)
-  clusters: Phase 5 で本実装、Step 0.2 では section 出さない
-  frontier: Phase 4 で本実装、Step 0.2 では section 出さない
+  clusters: cluster_estimation 経由 (Phase 5 既実装、global/both view で表示)
+  frontier: Phase 4 で本実装、現状 section 出さない
   trace   : 直近 memory / link 総数 (簡易 MVP)
+
+view:
+  ego    : self 中心 (self facets + edges_self_to_memory + edges_memory_to_memory)
+  global : graph 全体俯瞰 (memory_total + clusters + topology summary)
+  both   : ego + global の重畳
 
 channel は描画対象外 (channel = 界面 layer、self/memory = internal layer、layer 違反回避)。
 channel 永続化廃止論点は reserved memo に温存。
@@ -156,6 +161,48 @@ def _compute_trace(all_memory: list, memory_edges: list) -> dict:
     }
 
 
+def _compute_clusters_with_label(all_memory: list) -> list:
+    """全 graph cluster 推定 (Phase 5 cluster_estimation 経由、label LLM 生成)。
+
+    軽減 2 (段階13 着手前 base 整備) で配線完成。estimate_clusters の graceful
+    fallback (numpy / vector_ready / embed 失敗時に 1 cluster) に依存、tool 側で
+    例外処理は持たない。
+    """
+    from core.cluster_estimation import estimate_clusters
+    from core.llm import call_llm
+
+    raw = estimate_clusters(all_memory, method="hybrid", llm_call_fn=call_llm)
+    return [
+        {
+            "cluster_id": c["cluster_id"],
+            "label": c.get("label", ""),
+            "memory_ids": c["memory_ids"],
+            "size": len(c["memory_ids"]),
+            "method": c["method"],
+        }
+        for c in raw
+    ]
+
+
+def _compute_topology_summary(memory_edges: list) -> dict:
+    """全 link の集計 (link_total / by_relation / avg_confidence)。
+
+    edges 詳細は ego/both view で出るので、global view では量を抑えて summary のみ。
+    """
+    by_relation: dict = {}
+    confidence_sum = 0.0
+    for e in memory_edges:
+        rel = e.get("relation", "unknown")
+        by_relation[rel] = by_relation.get(rel, 0) + 1
+        confidence_sum += float(e.get("confidence", 0.0))
+    avg_conf = (confidence_sum / len(memory_edges)) if memory_edges else 0.0
+    return {
+        "link_total": len(memory_edges),
+        "by_relation": by_relation,
+        "avg_confidence": round(avg_conf, 3),
+    }
+
+
 def _memory_graph(args: dict) -> str:
     """memory_graph tool 本体。出力は JSON 構造化 text (中立、自然言語ゼロ).
 
@@ -172,38 +219,36 @@ def _memory_graph(args: dict) -> str:
     except (ValueError, TypeError):
         depth = DEFAULT_DEPTH
 
-    # Step 0.3 (b'): PLAN §6-6 signature 互換の placeholder 引数。Step 0.2 範囲では
-    # 未使用だが受け取りだけして reject しない。view=global/both と同時降臨予定の
-    # main payload (cluster: Phase 5 / frontier: Phase 4) で実際に使われる。
+    # PLAN §6-6 signature 互換の placeholder 引数 (受取のみ、reject しない)。
     args.get("focus_node")
     args.get("cluster_count")
     args.get("frontier_count")
 
-    if view != "ego":
+    if view not in ("ego", "global", "both"):
         return json.dumps({
-            "error": (
-                f"view={view} は未対応。global は Phase 5 cluster 推定本実装と"
-                f"同時降臨予定、both は両 view 完成後に descended する設計。"
-            ),
-            "supported_views": ["ego"],
-            "future_views": ["global", "both"],
+            "error": f"view={view} は未対応",
+            "supported_views": ["ego", "global", "both"],
         }, ensure_ascii=False, indent=2)
 
     state = load_state()
-    virtual_entries = _self_to_virtual_entries(state)
-    self_node = _build_self_node(state, virtual_entries)
     all_memory = _list_all_memory_entries()
+    memory_edges = _compute_memory_edges()
+    trace = _compute_trace(all_memory, memory_edges)
 
-    edges_self_to_memory = _compute_self_to_memory_edges(virtual_entries, all_memory)
-    edges_memory_to_memory = _compute_memory_edges()
-    trace = _compute_trace(all_memory, edges_memory_to_memory)
+    output: dict = {"view": view, "depth": depth}
 
-    output = {
-        "view": "ego",
-        "depth": depth,
-        "self": self_node,
-        "edges_self_to_memory": edges_self_to_memory,
-        "edges_memory_to_memory": edges_memory_to_memory,
-        "trace_recent": trace,
-    }
+    if view in ("ego", "both"):
+        virtual_entries = _self_to_virtual_entries(state)
+        self_node = _build_self_node(state, virtual_entries)
+        output["self"] = self_node
+        output["edges_self_to_memory"] = _compute_self_to_memory_edges(
+            virtual_entries, all_memory)
+        output["edges_memory_to_memory"] = memory_edges
+
+    if view in ("global", "both"):
+        output["memory_total"] = len(all_memory)
+        output["clusters"] = _compute_clusters_with_label(all_memory)
+        output["topology"] = _compute_topology_summary(memory_edges)
+
+    output["trace_recent"] = trace
     return json.dumps(output, ensure_ascii=False, indent=2)

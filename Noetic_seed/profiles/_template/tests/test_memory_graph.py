@@ -247,9 +247,9 @@ def test_memory_graph_default_view():
     return _assert(data.get("view") == "ego", "default view=ego")
 
 
-def test_memory_graph_unsupported_view_error():
-    print("== _memory_graph: view=global / both で error response (Step 0.3 b' future_views 含む) ==")
-    for v in ["global", "both", "invalid"]:
+def test_memory_graph_invalid_view_error():
+    print("== _memory_graph: 不正 view 値で error response (ego/global/both 以外) ==")
+    for v in ["invalid", "ezo", "world"]:
         result = _memory_graph({"view": v})
         try:
             data = json.loads(result)
@@ -259,16 +259,61 @@ def test_memory_graph_unsupported_view_error():
             return _assert(False, f"view={v} で error key なし")
         if "supported_views" not in data:
             return _assert(False, f"view={v} で supported_views なし")
-    # Step 0.3 b': future_views slot で Phase 4/5 降臨予定を明示
-    result_global = json.loads(_memory_graph({"view": "global"}))
-    result_both = json.loads(_memory_graph({"view": "both"}))
+    result_invalid = json.loads(_memory_graph({"view": "invalid"}))
     return all([
-        _assert("future_views" in result_global, "global error に future_views"),
-        _assert("global" in result_global.get("future_views", []),
-                "future_views に global 含む"),
-        _assert("both" in result_global.get("future_views", []),
-                "future_views に both 含む"),
-        _assert("future_views" in result_both, "both error にも future_views"),
+        _assert("ego" in result_invalid.get("supported_views", []),
+                "supported_views に ego 含む"),
+        _assert("global" in result_invalid.get("supported_views", []),
+                "supported_views に global 含む (軽減 2 配線済)"),
+        _assert("both" in result_invalid.get("supported_views", []),
+                "supported_views に both 含む (軽減 2 配線済)"),
+    ])
+
+
+def test_memory_graph_global_view_shape():
+    print("== _memory_graph: view=global で必須 key (memory_total / clusters / topology) ==")
+    result = _memory_graph({"view": "global"})
+    try:
+        data = json.loads(result)
+    except Exception as e:
+        return _assert(False, f"JSON parse 失敗: {e}")
+    return all([
+        _assert(data.get("view") == "global", "view=global"),
+        _assert("error" not in data, "error なし (軽減 2 配線完了)"),
+        _assert("memory_total" in data, "memory_total key"),
+        _assert("clusters" in data, "clusters key"),
+        _assert("topology" in data, "topology key"),
+        _assert("trace_recent" in data, "trace_recent key"),
+        _assert("self" not in data, "self key なし (global は self 中心ではない)"),
+        _assert(isinstance(data.get("clusters"), list), "clusters が list"),
+        _assert(isinstance(data.get("topology"), dict), "topology が dict"),
+        _assert("link_total" in data.get("topology", {}), "topology.link_total"),
+        _assert("by_relation" in data.get("topology", {}), "topology.by_relation"),
+        _assert("avg_confidence" in data.get("topology", {}), "topology.avg_confidence"),
+    ])
+
+
+def test_memory_graph_both_view_shape():
+    print("== _memory_graph: view=both で ego payload + global payload 両方 ==")
+    result = _memory_graph({"view": "both"})
+    try:
+        data = json.loads(result)
+    except Exception as e:
+        return _assert(False, f"JSON parse 失敗: {e}")
+    return all([
+        _assert(data.get("view") == "both", "view=both"),
+        _assert("error" not in data, "error なし (軽減 2 配線完了)"),
+        # ego payload
+        _assert("self" in data, "self key (ego payload)"),
+        _assert("edges_self_to_memory" in data, "edges_self_to_memory key"),
+        _assert("edges_memory_to_memory" in data, "edges_memory_to_memory key"),
+        # global payload
+        _assert("memory_total" in data, "memory_total key (global payload)"),
+        _assert("clusters" in data, "clusters key (global payload)"),
+        _assert("topology" in data, "topology key (global payload)"),
+        # 共通
+        _assert("trace_recent" in data, "trace_recent key"),
+        _assert(data["self"].get("id") == "self", "self.id='self'"),
     ])
 
 
@@ -449,7 +494,9 @@ if __name__ == "__main__":
         ("_compute_trace: 総数", test_compute_trace_basic),
         ("_memory_graph: ego view shape", test_memory_graph_ego_view_shape),
         ("_memory_graph: default view", test_memory_graph_default_view),
-        ("_memory_graph: 未対応 view で error", test_memory_graph_unsupported_view_error),
+        ("_memory_graph: 不正 view で error", test_memory_graph_invalid_view_error),
+        ("_memory_graph: global view shape (軽減 2)", test_memory_graph_global_view_shape),
+        ("_memory_graph: both view shape (軽減 2)", test_memory_graph_both_view_shape),
         ("_memory_graph: placeholder args (Step 0.3 b')", test_memory_graph_placeholder_args_accepted),
         ("_memory_graph: depth 引数", test_memory_graph_depth_arg),
         ("Step 0.4: state initial voluntary_memory_store_count=0", test_state_initial_has_voluntary_count),
