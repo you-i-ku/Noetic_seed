@@ -276,13 +276,13 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
                 ch_tag = f" ch={ch}" if ch else ""
                 origin = p.get("origin_cycle", "?")
                 pending_lines.append(
-                    f"  [pending dismiss_id={p_id} src={source} lag={lag} g={gap_pct}% x{attempts}{ch_tag}] {content} (cycle {origin}〜)"
+                    f"  [pending dismiss={p_id} src={source} lag={lag} g={gap_pct}% x{attempts}{ch_tag}] {content} (cycle {origin}〜)"
                 )
             else:
                 # 旧形式 fallback (migration 期間 safety; Phase 5 iku 再生成後は消える)
                 p_ch = p.get("channel", "")
                 ch_tag = f" ch={p_ch}" if p_ch else ""
-                pending_lines.append(f"  [{p_type} dismiss_id={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
+                pending_lines.append(f"  [{p_type} dismiss={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
 
         # 段階9 fix 1: 副次セクション。直近 3 件の消化済を参考表示し、
         # LLM に「これは完了したこと」を構造的に認識させる。

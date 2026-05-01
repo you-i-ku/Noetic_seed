@@ -293,6 +293,7 @@ def main():
             model=llm_cfg.get("model", "gemma-4-26b-a4b-it"),
             api_key=llm_cfg.get("api_key", ""),
             base_url=llm_cfg.get("base_url", "http://localhost:1234/v1"),
+            strict_tools=llm_cfg.get("tool_use", {}).get("strict_mode", False),
         )
 
     # ToolRegistry: claw-code 50 tool + noetic stub 5 個
