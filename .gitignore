@@ -121,6 +121,13 @@ Noetic_seed/profiles/*/sandbox/secrets/
 Noetic_seed/profiles/_template/secrets.json
 Noetic_seed/profiles/_template/sandbox/secrets/
 
+# _template に紛れ込む log (smoke profile で生成されるべきだが、なぜか
+# 無印 _template にも出力される — 原因要調査、当面 ignore で対処)
+Noetic_seed/profiles/_template/*.log
+
+# project root に動的生成される sandbox dir (発生経路要調査、当面 ignore で対処)
+/sandbox/
+
 # MCP bridge (段階6-C) - 個人環境の実設定とランタイムバッファ
 # .mcp.json.example は _template 配下で追跡、実 .mcp.json は個人環境依存なのでどこに置かれても除外
 # (.mcp.json.example はパターンに当たらないので明示除外不要)

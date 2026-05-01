@@ -655,6 +655,23 @@ def make_git_auto_stash_hook(
             if r.returncode == 0:
                 # `No local changes to save` は実 stash されてないので世代 drop skip
                 if "No local changes" not in (r.stdout + r.stderr):
+                    # Fix 5 (Issue 6 対応, 2026-05-02): `git stash push` は
+                    # working tree を HEAD に戻す副作用があり、在席 hotfix や
+                    # iku の前 cycle 改変が消えていた。直後 apply で履歴のみ
+                    # 保存して working tree を保持する
+                    # (memory/project_v05_phase5_stage12_structural_issues.md)。
+                    apply_r = runner(
+                        ["git", "stash", "apply", "stash@{0}"],
+                        cwd=str(repo_root),
+                        capture_output=True, text=True,
+                        encoding="utf-8", errors="replace",
+                    )
+                    if apply_r.returncode != 0:
+                        print(
+                            f"  [auto_stash] WARNING: stash apply 失敗 "
+                            f"(working tree 退避状態のまま): "
+                            f"{apply_r.stderr.strip()}"
+                        )
                     _drop_old_generations()
             else:
                 print(
