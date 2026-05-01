@@ -3,7 +3,10 @@ import json
 import re
 from core.config import MEMORY_DIR
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
-from core.memory import memory_store, memory_update, memory_forget, memory_network_search
+from core.memory import (
+    memory_store, memory_update, memory_forget, memory_network_search,
+    UNTAGGED_NETWORK,
+)
 from core.state import load_state
 from core.tag_registry import is_tag_registered, list_registered_tags
 
@@ -95,39 +98,47 @@ def _search_memory(args):
 
 
 def _tool_memory_store(args):
-    """記憶を保存する。段階7: 未登録タグは rules 付きで inline 登録。"""
+    """記憶を保存する。段階7: 未登録タグは rules 付きで inline 登録。
+
+    段階11-D Phase 1 (Step 1.1-1.2): network 引数 optional 化。
+    network 未指定 (空文字 or 省略) → untagged として `_untagged.jsonl` に保存
+    (rules 不要、tag_registry に登録しない)。tag 廃止移行の主要 path。
+    """
     global _WORLD_DEPRECATION_WARNED
     network = args.get("network", "").strip()
     content = args.get("content", "").strip()
-    if not network or not content:
-        return "エラー: networkとcontentを指定してください"
-    # 段階7 Step 6: world → wm リダイレクト (back-compat、段階8 で削除)
-    if network == "world":
-        if not _WORLD_DEPRECATION_WARNED:
-            print("  [memory_store] 'world' は段階7 で 'wm' に統合済。リダイレクトします。")
-            _WORLD_DEPRECATION_WARNED = True
-        network = "wm"
-    # 段階7 Step 5: 未登録タグは rules 必須で inline 登録
-    if not is_tag_registered(network):
-        rules = args.get("rules")
-        if not isinstance(rules, dict):
-            # 段階11-B Phase 5 Step 5.2: hint を例示表現に一般化 (schema 拡張は
-            # Phase 1 で c_gradual_source、Phase 2' で write_protected を追加済。
-            # 最小書式は beta_plus / bitemporal の 2 key、iku は必要に応じて拡張可)
-            return (f"エラー: 未登録タグ '{network}' には rules 必須 "
-                    "(例: {\"beta_plus\": bool, \"bitemporal\": bool})")
-        display_format = args.get("display_format", "") or ""
-        from core.tag_registry import register_tag
-        try:
-            register_tag(
-                network,
-                learning_rules=rules,
-                display_format=display_format,
-                origin="dynamic",
-                intent=args.get("tool_intent"),
-            )
-        except ValueError as e:
-            return f"エラー: タグ登録失敗 ({e})"
+    if not content:
+        return "エラー: contentを指定してください"
+    # 段階11-D Phase 1: network 空 → untagged として保存
+    if not network:
+        network = None
+    else:
+        # 段階7 Step 6: world → wm リダイレクト (back-compat、段階8 で削除)
+        if network == "world":
+            if not _WORLD_DEPRECATION_WARNED:
+                print("  [memory_store] 'world' は段階7 で 'wm' に統合済。リダイレクトします。")
+                _WORLD_DEPRECATION_WARNED = True
+            network = "wm"
+        # 段階11-D Phase 8 hotfix (案 b'): 未登録タグは rules 省略可、空 dict default
+        # で auto register。rules 引数は残す (bitemporal=True / write_protected=True を
+        # 指定したい場合に使う、Physarum / cluster / hybrid retrieval は rules 非参照)。
+        # beta_plus / c_gradual_source は 11-D で実用途が薄れた、段階12 で schema 縮退候補。
+        if not is_tag_registered(network):
+            rules = args.get("rules") or {}
+            if not isinstance(rules, dict):
+                rules = {}  # 不正な型は空 dict にフォールバック
+            display_format = args.get("display_format", "") or ""
+            from core.tag_registry import register_tag
+            try:
+                register_tag(
+                    network,
+                    learning_rules=rules,
+                    display_format=display_format,
+                    origin="dynamic",
+                    intent=args.get("tool_intent"),
+                )
+            except ValueError as e:
+                return f"エラー: タグ登録失敗 ({e})"
 
     metadata = {}
     if network == "opinion":
@@ -157,7 +168,9 @@ def _tool_memory_store(args):
                          _state=state)
     # 段階10 Step 4 付帯 D: Fix 5 精神で content truncation 撤去。
     # iku が保存した記憶内容を「60 字で切れた」と次 cycle で誤認するリスク回避。
-    return f"記憶保存完了: [{network}] {content} (id={entry['id']})"
+    # 段階11-D Phase 1: entry["network"] (UNTAGGED_NETWORK 含む) で表示し、
+    # network=None でも `[_untagged]` 表示が崩れない。
+    return f"記憶保存完了: [{entry['network']}] {content} (id={entry['id']})"
 
 
 def _tool_memory_update(args):
@@ -192,7 +205,9 @@ def _tool_search_memory(args):
     networks = None
     net_str = args.get("networks", "")
     if net_str:
-        networks = [n.strip() for n in net_str.split(",") if is_tag_registered(n.strip())]
+        # 段階11-D Phase 1 (Step 1.1): UNTAGGED_NETWORK も filter 候補に許可
+        networks = [n.strip() for n in net_str.split(",")
+                    if is_tag_registered(n.strip()) or n.strip() == UNTAGGED_NETWORK]
     limit = min(int(args.get("max_results", "") or "5"), 20)
 
     results = memory_network_search(query, networks=networks, limit=limit)

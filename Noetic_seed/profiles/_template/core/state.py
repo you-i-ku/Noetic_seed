@@ -89,6 +89,10 @@ def load_state() -> dict:
                 data["cycle_id"] = 0
             if "tool_level" not in data:
                 data["tool_level"] = 0
+            # 段階11-D Phase 0 Step 0.4: memory_graph affordance ガード (B2)
+            # 自発 memory_store 経験 counter (失敗は count しない、Z2)
+            if "voluntary_memory_store_count" not in data:
+                data["voluntary_memory_store_count"] = 0
             if "files_read" not in data:
                 data["files_read"] = []
             if "files_written" not in data:
@@ -114,11 +118,6 @@ def load_state() -> dict:
             if "world_model" not in data:
                 from core.world_model import init_world_model
                 data["world_model"] = init_world_model()
-            else:
-                # 段階2 entity に段階3 追加 field (aliases/channels/last_seen) を補完
-                from core.world_model import migrate_entity_fields
-                for _ent in data["world_model"].get("entities", {}).values():
-                    migrate_entity_fields(_ent)
             # 段階10 柱 B: Predictor 自己学習の state 拡張
             if "predictor_confidence" not in data:
                 data["predictor_confidence"] = {}
@@ -132,7 +131,7 @@ def load_state() -> dict:
         except json.JSONDecodeError:
             pass
     from core.world_model import init_world_model
-    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
+    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
 
 
 def save_state(state: dict):

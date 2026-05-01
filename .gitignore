@@ -6,6 +6,9 @@ __pycache__/
 venv/
 .venv/
 
+# Per-profile venv (段階12 Step 1.5、_template から copy された profile が独立 venv を持つ)
+Noetic_seed/profiles/*/.venv/
+
 # Noetic_seed profiles (_template only tracked)
 Noetic_seed/profiles/*
 !Noetic_seed/profiles/_template/
@@ -15,6 +18,23 @@ Noetic_seed/ikuset/
 
 # Noetic_seed runtime
 *.bak
+
+# Smoke 運用 CLI (個人運用、_template_smoke hardcode、cp932 crash は config.py 防御で根治済)
+Noetic_seed/run_smoke.bat
+Noetic_seed/approve_cli.bat
+Noetic_seed/approve_cli.py
+Noetic_seed/send_to_device.bat
+Noetic_seed/send_to_device.py
+Noetic_seed/watch_llm.bat
+
+# 一時調査スクリプト (ファイル冒頭に「commit 対象外」明記済)
+Noetic_seed/simulate_*.py
+
+# Claude CLI を呼ぶための固定 cwd (グローバル 1 個、Claude Code provider 経由地)
+# claude CLI は呼出時に cwd を base64 encode して ~/.claude/projects/<encoded>/ を作る。
+# 毎呼びで別 tempdir にすると ~/.claude/projects/ が増殖、固定 cwd で entry 1 個に圧縮。
+# ゆう判断 (2026-04-27): profile ごとじゃなく Noetic_seed レベルで仕組みとして 1 個。
+Noetic_seed/.iku_claude_provider_cwd/
 
 # Android project (Noetic_seed_monitor)
 Noetic_seed_monitor/.gradle/
@@ -64,20 +84,28 @@ documents/
 expalanationsumple/
 UIイメージ/
 WORLD_MODEL_DESIGN/
+参考文献/
 DESIGN_ORCHESTRATION.md
 DESIGN_CLAUDE_CODE_MIGRATION.md
 V0_ARCHITECTURE.md
 V0_5_ARCHITECTURE.md
 CLAWCODE_CAPABILITY_INVENTORY.md
+観測logs/
+現ドキュメント/
+旧ドキュメント*/
+めも.txt
+*サイクル*.md
 
 # External reference projects (not part of Noetic Seed)
 claw-code/
+repos/
 
 # Test / debug scripts at root
 test_vision_*.py
 test_x_tab.py
 coordinate_check.png
 スクリーンショット*.png
+raw_log_*.txt
 
 # Secrets
 .env
@@ -92,6 +120,13 @@ Noetic_seed/profiles/*/secrets.json
 Noetic_seed/profiles/*/sandbox/secrets/
 Noetic_seed/profiles/_template/secrets.json
 Noetic_seed/profiles/_template/sandbox/secrets/
+
+# _template に紛れ込む log (smoke profile で生成されるべきだが、なぜか
+# 無印 _template にも出力される — 原因要調査、当面 ignore で対処)
+Noetic_seed/profiles/_template/*.log
+
+# project root に動的生成される sandbox dir (発生経路要調査、当面 ignore で対処)
+/sandbox/
 
 # MCP bridge (段階6-C) - 個人環境の実設定とランタイムバッファ
 # .mcp.json.example は _template 配下で追跡、実 .mcp.json は個人環境依存なのでどこに置かれても除外

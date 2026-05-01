@@ -1,8 +1,19 @@
 {
   "provider": "lmstudio",
-  "model": "gemma-4-26b-a4b-it",
+  "model": "gemma-4-31b-it",
+  "model_overrides": {
+    "_comment": "claude_code provider 限定の role 別モデル override。LLM3 (E 値評価) は scoring task で refusal が起きやすく Sonnet 過剰スペックのため Haiku に切替 (2026-04-28 smoke v7 で constraint_circumvention 等の自己観察ラベルに LLM3 refusal 連発を確認、reflect 滞留 22-30 分の主因)。他 provider (lmstudio 等) は role 引数を無視する設計のため、本機構は自動的に claude_code のときのみ有効",
+    "llm3": "haiku"
+  },
   "vision_max_size": 896,
   "ws_token": "iku2026",
+  "llm_sampling": {
+    "top_p": 0.95,
+    "top_k": 64,
+    "min_p": 0.0,
+    "repetition_penalty": 1.05,
+    "_comment": "Gemma 4 公式推奨ベース (top_p=0.95 / top_k=64 / min_p=0.0) + repetition_penalty 1.05 (公式 disabled=1.0 から最弱介入、LM Studio + gemma-4 26b でループ抑制慣例値)。LM Studio Python SDK には camelCase で変換して渡される (topPSampling / topKSampling / minPSampling / repeatPenalty)。section 削除で legacy 挙動 (maxTokens + temperature のみ) に戻る"
+  },
   "prompt_budget": {
     "context_window": 32768,
     "completion_reserve": 8192,
@@ -34,7 +45,15 @@
     "pause_on_await": true,
     "missing_field_policy": "deny",
     "auto_fill_on_missing": false,
-    "auto_approve_all": false
+    "auto_approve_all": true
+  },
+  "tool_use": {
+    "strict_mode": true,
+    "_comment": "tools[].function.strict=true を OpenAI 互換 provider (LM Studio 等) に渡し、required field を grammar 強制させる。LM Studio docs では tools 経路の strict 明記なしのため smoke 実証中。ignore 時も無害、副作用観測されたら false に切替"
+  },
+  "x_login": {
+    "skip_prompt": true,
+    "_comment": "true で起動時 / Level 3 到達時の input('Xにログインする？') を skip (= 自動 'n' 扱い)。smoke 中の stdin tty ハング回避用。本番 HITL 維持なら false に切替"
   },
   "prompt": {
     "observation_label_format": "structured_compact"

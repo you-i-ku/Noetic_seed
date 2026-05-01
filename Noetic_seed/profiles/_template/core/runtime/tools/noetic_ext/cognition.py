@@ -115,8 +115,8 @@ def _build_specs(tools_dict: dict) -> list:
                             "却下する pending の ID (省略時は単純待機)。"
                             "必ず 'p_' から始まる ID を指定する "
                             "(例: p_30c4d130_0008_listen_a_123)。"
-                            "[未対応事項] 欄に dismiss_id=... として表示されているものを使う。"
-                            "[STM log] 欄の log ID (prefix なしの {session}_{cycle} 形式) は "
+                            "[未対応事項] 欄に dismiss=... として表示されているものを使う。"
+                            "[log] 欄の log ID (prefix なしの {session}_{cycle} 形式) は "
                             "dismiss に渡してはいけない。"
                         ),
                     },

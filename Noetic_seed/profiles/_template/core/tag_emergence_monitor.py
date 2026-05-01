@@ -306,6 +306,13 @@ def log_cycle_metrics(cycle_idx: int,
     link_topo = _compute_link_graph_metrics(links, mem_count)
     tag_dep = _compute_tag_dependency_metrics(tag_usage)
 
+    # 段階11-D Phase 6 Step 6.1: small-world index (毎 cycle 計算、観察のみ)
+    small_world = _compute_small_world_metrics(links, mem_count)
+
+    # 段階11-D Phase 6 Step 6.2: 直近 reflect の cluster MI を state から拾う
+    # (reflect 時のみ更新、cycle 間は前値継続。reflect なし cycle は前回値が log)
+    phase6_state = (state or {}).get("phase6_metrics", {}) if state is not None else {}
+
     metrics = {
         "cycle": int(cycle_idx),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -319,6 +326,12 @@ def log_cycle_metrics(cycle_idx: int,
         **link_topo,   # link_density / avg_degree / clustering_coefficient / degree_distribution
         **tag_dep,     # opinion_entity_count / other_tag_count / opinion_entity_ratio /
                        # dynamic_origin_ratio / new_tag_usage_ratio
+        # 段階11-D Phase 6 新規 (small-world は毎 cycle、cluster_* は reflect 時に state 経由 update)
+        **small_world, # avg_path_length / small_world_sigma / small_world_C_random / small_world_L_random
+        "cluster_mi": phase6_state.get("cluster_mi", 0.0),
+        "cluster_inter_ratio": phase6_state.get("cluster_inter_ratio", 0.0),
+        "cluster_link_pairs": phase6_state.get("last_cluster_link_pairs", 0),
+        "phase6_last_reflect_cycle": phase6_state.get("last_reflect_cycle"),
     }
 
     target_file = log_file if log_file is not None else _default_emergence_log_file()
@@ -327,3 +340,231 @@ def log_cycle_metrics(cycle_idx: int,
         f.write(json.dumps(metrics, ensure_ascii=False) + "\n")
 
     return metrics
+
+
+# ============================================================
+# 段階11-D Phase 6: small-world index + cluster MI (観察のみ)
+# (§5 Phase 6 Step 6.1 + 6.2、Step 6.3 power-law fit は v1.2 で drop)
+# 設計参照:
+#   - Watts-Strogatz 1998 (small-world index σ)
+#   - Broido & Clauset 2019 (line 149-151 で power-law fit を排除済、v1.2 で PLAN 整合)
+# ============================================================
+
+
+def _compute_average_shortest_path(adj: dict) -> float:
+    """BFS で全 pair shortest path 平均 (disconnected pair は除外)。
+
+    Args:
+        adj: {node_id: set(neighbor_ids)} 無向隣接 dict
+
+    Returns:
+        average shortest path length。node 数 < 2 → 0.0、全 disconnected → 0.0。
+    """
+    nodes = list(adj.keys())
+    n = len(nodes)
+    if n < 2:
+        return 0.0
+    total_dist = 0
+    pair_count = 0
+    for src in nodes:
+        # BFS
+        dist = {src: 0}
+        queue = [src]
+        head = 0
+        while head < len(queue):
+            cur = queue[head]
+            head += 1
+            for nxt in adj.get(cur, set()):
+                if nxt not in dist:
+                    dist[nxt] = dist[cur] + 1
+                    queue.append(nxt)
+        for tgt, d in dist.items():
+            if tgt != src:
+                total_dist += d
+                pair_count += 1
+    return total_dist / pair_count if pair_count > 0 else 0.0
+
+
+def _generate_random_graph_metrics(node_count: int, edge_count: int) -> dict:
+    """Erdős-Renyi G(n, m) ランダムグラフの C_random / L_random 解析近似。
+
+    Watts-Strogatz 1998 の正統手法: ランダムグラフの解析式を使い、実 graph と
+    同じ node 数 / edge 数で比較 (新マジックナンバー追加なし、Watts-Strogatz
+    1998 reference)。
+
+    Args:
+        node_count: ノード数 (= memory_count)
+        edge_count: 有向 link を無向視した edge 数
+
+    Returns:
+        {"C_random": float, "L_random": float}
+        avg_degree < 1 -> disconnected expected、L_random=0.0
+    """
+    if node_count < 2 or edge_count < 1:
+        return {"C_random": 0.0, "L_random": 0.0}
+    avg_degree = 2.0 * edge_count / node_count
+    # ER graph: C_random = p ~ <k>/(n-1)
+    C_random = avg_degree / max(1, node_count - 1)
+    # ER graph: L_random ~ ln(n) / ln(<k>)、avg_degree > 1 のみ妥当
+    if avg_degree > 1.0:
+        L_random = math.log(node_count) / math.log(avg_degree)
+    else:
+        L_random = 0.0
+    return {"C_random": C_random, "L_random": L_random}
+
+
+def _compute_small_world_metrics(links: list, memory_count: int) -> dict:
+    """Watts-Strogatz small-world index sigma = (C/C_random) / (L/L_random)。
+
+    Phase 6 Step 6.1 (PLAN §5 Phase 6)。観察のみ、強制なし。
+    sigma > 1 で small-world、ただし判定 threshold は持たない
+    (`feedback_drift_is_not_developer_error`)。
+
+    Args:
+        links: list_links() の戻り値
+        memory_count: 全 memory 件数
+
+    Returns:
+        {
+            "avg_path_length": float,         # L (実 graph)
+            "small_world_sigma": float,       # sigma (>1 で small-world)
+            "small_world_C_random": float,    # C_random (ER 解析近似)
+            "small_world_L_random": float,    # L_random (ER 解析近似)
+        }
+    """
+    if memory_count < 2 or not links:
+        return {
+            "avg_path_length": 0.0,
+            "small_world_sigma": 0.0,
+            "small_world_C_random": 0.0,
+            "small_world_L_random": 0.0,
+        }
+    # 無向隣接構築 (link_type=none 除外、_compute_link_graph_metrics と同方式)
+    adj: dict = {}
+    valid_link_count = 0
+    for link in links:
+        if link.get("link_type", "none") == "none":
+            continue
+        from_id = link.get("from_id")
+        to_id = link.get("to_id")
+        if not from_id or not to_id or from_id == to_id:
+            continue
+        adj.setdefault(from_id, set()).add(to_id)
+        adj.setdefault(to_id, set()).add(from_id)
+        valid_link_count += 1
+
+    L = _compute_average_shortest_path(adj)
+
+    # C 計算 (_compute_link_graph_metrics と同じロジック、独立計算)
+    total_cc = 0.0
+    cc_node_count = 0
+    for neighbors in adj.values():
+        k = len(neighbors)
+        if k < 2:
+            continue
+        possible_pairs = k * (k - 1) / 2
+        nbrs = list(neighbors)
+        actual_pairs = 0
+        for i in range(len(nbrs)):
+            ni_adj = adj.get(nbrs[i], set())
+            for j in range(i + 1, len(nbrs)):
+                if nbrs[j] in ni_adj:
+                    actual_pairs += 1
+        total_cc += actual_pairs / possible_pairs
+        cc_node_count += 1
+    C = total_cc / cc_node_count if cc_node_count > 0 else 0.0
+
+    rand = _generate_random_graph_metrics(memory_count, valid_link_count)
+    C_rand = rand["C_random"]
+    L_rand = rand["L_random"]
+
+    if C_rand > 0 and L_rand > 0 and L > 0:
+        sigma = (C / C_rand) / (L / L_rand)
+    else:
+        sigma = 0.0
+
+    return {
+        "avg_path_length": L,
+        "small_world_sigma": sigma,
+        "small_world_C_random": C_rand,
+        "small_world_L_random": L_rand,
+    }
+
+
+def compute_cluster_mutual_information(clusters: list, links: list) -> dict:
+    """cluster membership と link 構造の相互情報量 (Phase 6 Step 6.2)。
+
+    無向 link 集合に対し X = link 片端の cluster / Y = 他端の cluster と定義、
+    両方向カウントで I(X;Y) = sum p(x,y) log2(p(x,y)/(p(x)p(y))) 計算。
+
+    Phase 5 estimate_clusters の出力を入力にする (reflect 時のみ呼出)。
+    高 MI = cluster 構造と link 構造が強相関、低 MI = cluster と link が独立。
+    観察のみ、強制なし。
+
+    Args:
+        clusters: estimate_clusters の戻り値
+                  [{"cluster_id": str, "memory_ids": [...], ...}, ...]
+        links: list_links() の戻り値
+
+    Returns:
+        {
+            "cluster_mi": float,            # MI (bit、>=0、数値誤差で負は 0 clamp)
+            "cluster_link_pairs": int,      # 集計対象 link 数 (両端 cluster 既知)
+            "cluster_inter_ratio": float,   # cluster 跨ぎ link 比率
+        }
+    """
+    if not clusters or not links:
+        return {"cluster_mi": 0.0, "cluster_link_pairs": 0, "cluster_inter_ratio": 0.0}
+
+    # memory_id -> cluster_id mapping
+    mem_to_cluster: dict = {}
+    for cluster in clusters:
+        cid = cluster.get("cluster_id", "")
+        for mid in cluster.get("memory_ids", []):
+            mem_to_cluster[mid] = cid
+
+    if not mem_to_cluster:
+        return {"cluster_mi": 0.0, "cluster_link_pairs": 0, "cluster_inter_ratio": 0.0}
+
+    joint: dict = {}            # {(c_a, c_b): count} ordered pair (両方向カウント)
+    cluster_marginal: dict = {} # {cluster_id: total_endpoint_count}
+    inter_count = 0
+    valid_pairs = 0
+    for link in links:
+        if link.get("link_type", "none") == "none":
+            continue
+        from_id = link.get("from_id")
+        to_id = link.get("to_id")
+        if not from_id or not to_id or from_id == to_id:
+            continue
+        ca = mem_to_cluster.get(from_id)
+        cb = mem_to_cluster.get(to_id)
+        if ca is None or cb is None:
+            continue
+        if ca != cb:
+            inter_count += 1
+        valid_pairs += 1
+        # 無向化: 両方向カウント
+        for x, y in ((ca, cb), (cb, ca)):
+            joint[(x, y)] = joint.get((x, y), 0) + 1
+            cluster_marginal[x] = cluster_marginal.get(x, 0) + 1
+
+    if valid_pairs == 0:
+        return {"cluster_mi": 0.0, "cluster_link_pairs": 0, "cluster_inter_ratio": 0.0}
+
+    total = sum(joint.values())  # = 2 * valid_pairs
+    mi = 0.0
+    for (x, y), n_xy in joint.items():
+        p_xy = n_xy / total
+        p_x = cluster_marginal[x] / total
+        p_y = cluster_marginal[y] / total
+        if p_xy > 0 and p_x > 0 and p_y > 0:
+            mi += p_xy * math.log2(p_xy / (p_x * p_y))
+
+    inter_ratio = inter_count / valid_pairs if valid_pairs > 0 else 0.0
+
+    return {
+        "cluster_mi": max(0.0, mi),  # 数値誤差 clamp
+        "cluster_link_pairs": valid_pairs,
+        "cluster_inter_ratio": inter_ratio,
+    }

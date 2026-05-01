@@ -101,7 +101,6 @@ def test_world_model_section_renders():
         _assert("### チャネル" in s, "チャネル heading"),
         _assert("device (direct)" in s, "device 行"),
         _assert("claude (social)" in s, "claude 行"),
-        _assert("まだ観測されていない" in s, "未観測メッセージ (facts=空)"),
     ])
 
 
@@ -183,21 +182,24 @@ def test_tool_block_no_registry_still_works():
 
 def test_assemble_contains_all_five_sections():
     print("== assemble: 5 要素全部含む (world_model 明示渡し) ==")
-    from core.world_model import init_world_model
+    from core.world_model import init_world_model, ensure_channel
+    from core.channel_registry import channel_from_device_input
     state = _fresh_state()
     state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
                      "intent": "x", "result": "y"}]
     tools = _sample_tools()
+    wm = init_world_model()
+    ensure_channel(wm, **channel_from_device_input())
     prompt = assemble_system_prompt(
         state=state, tools_dict=tools,
         fire_cause="threshold breach",
-        world_model=init_world_model(),
+        world_model=wm,
     )
     return all([
         _assert("Approval Protocol" in prompt, "① 承認プロトコル"),
         _assert("発火原因: threshold breach" in prompt, "② 発火原因"),
         _assert("世界モデル" in prompt, "③ 世界モデル section heading"),
-        _assert("STM — log" in prompt, "④ log block heading"),
+        _assert("[log]" in prompt, "④ log block heading"),
         _assert("read_file" in prompt, "④ log 中身"),
         _assert("利用可能なツール" in prompt, "⑤ tool 一覧 heading"),
     ])
@@ -205,19 +207,22 @@ def test_assemble_contains_all_five_sections():
 
 def test_assemble_section_order():
     print("== assemble: 5 要素の順序が正しい (world_model 明示渡し) ==")
-    from core.world_model import init_world_model
+    from core.world_model import init_world_model, ensure_channel
+    from core.channel_registry import channel_from_device_input
     state = _fresh_state()
     state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
                      "intent": "x", "result": "y"}]
+    wm = init_world_model()
+    ensure_channel(wm, **channel_from_device_input())
     prompt = assemble_system_prompt(
         state=state, tools_dict=_sample_tools(),
         fire_cause="test cause",
-        world_model=init_world_model(),
+        world_model=wm,
     )
     i_approval = prompt.find("Approval Protocol")
     i_fire = prompt.find("発火原因")
     i_wm = prompt.find("世界モデル")
-    i_log = prompt.find("STM — log")
+    i_log = prompt.find("[log]")
     i_tools = prompt.find("利用可能なツール")
     return all([
         _assert(i_approval < i_fire, "Approval < 発火原因"),

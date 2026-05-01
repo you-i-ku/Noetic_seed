@@ -28,6 +28,15 @@ class OpenAIProvider(BaseProvider):
 
     name = "openai_compat"
 
+    def __init__(self, model: str, api_key: str = "", base_url: str = "",
+                 strict_tools: bool = False):
+        super().__init__(model, api_key, base_url)
+        # strict_tools=True で各 tool function に "strict": true を付与し、
+        # provider 側 (LM Studio の grammar enforcement 等) に required
+        # field を物理的に守らせる。LM Studio docs 上 tools 経路 strict は
+        # 未明記のため smoke で実証 + ignore 時も無害な前提で運用する。
+        self.strict_tools = bool(strict_tools)
+
     def supports_tool_use(self) -> bool:
         return True
 
@@ -57,9 +66,22 @@ class OpenAIProvider(BaseProvider):
             "temperature": req.temperature,
         }
         if req.tools:
-            payload["tools"] = req.tools
+            tools = (
+                [self._with_strict(t) for t in req.tools]
+                if self.strict_tools else req.tools
+            )
+            payload["tools"] = tools
             payload["tool_choice"] = req.tool_choice or "auto"
         return payload
+
+    @staticmethod
+    def _with_strict(tool: dict) -> dict:
+        """tools[].function.strict=true を非破壊で付与。"""
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            return tool
+        fn = dict(tool.get("function") or {})
+        fn["strict"] = True
+        return {**tool, "function": fn}
 
     def _build_messages(self, req: ApiRequest) -> list:
         out: list = []

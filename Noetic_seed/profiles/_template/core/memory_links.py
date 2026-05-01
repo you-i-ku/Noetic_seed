@@ -3,13 +3,19 @@
 memory entry 間に関係性 link を LLM judge で生成、Zettelkasten 形式の graph 化。
 既存 entity facts (段階4) とは別 layer として並立、データ重複なし。
 
-link_type 候補: similar / contradict / elaborate / causal / temporal
+link_type 候補:
+  既存 5 type (11-B Phase 4): similar / contradict / elaborate / causal / temporal
+  追加 3 type (11-D Phase 2): co_activation / semantic / supporting
+    - semantic は本 Phase 2 から LLM judge 経由で生成可能
+    - co_activation / supporting は LINK_TYPES 受け入れのみ、実 generation hook
+      は Phase 4 (predictive coding 接続時) で実装
 confidence 閾値: 0.7 以上のみ保存 (link 爆発防止、escape hatch で tune 可)
 link 生成タイミング: memory_store 同期 + top-K=5 近傍のみ LLM judge
 (Phase 3 keywords 同期と一貫性)
 
-Phase 4 スコープ: storage のみ。retrieval (follow_links) は Phase 5 smoke
-観察後に判定 (link_grad_density > 0.2 なら拡張、< 0.2 なら保留)。
+11-D Phase 2 schema 拡張: link_entry に strength / last_used / usage_count
+3 field 追加 (Phase 3 Physarum update の前準備、§-1 v1「initial strength =
+confidence」自然 migration)。
 """
 import json
 import re
@@ -24,7 +30,61 @@ from core.config import MEMORY_DIR
 LINK_FILE_NAME = "memory_links.jsonl"
 LINK_CONFIDENCE_THRESHOLD = 0.7      # Phase 4 Step 4.2: これ未満は discard
 LINK_GENERATION_TOP_K = 5            # Phase 4 Step 4.3: 近傍 top-K のみ judge
-LINK_TYPES = ("similar", "contradict", "elaborate", "causal", "temporal")
+LINK_TYPES = (
+    # 既存 5 type (11-B Phase 4)
+    "similar", "contradict", "elaborate", "causal", "temporal",
+    # 11-D Phase 2 追加 3 type (storage 受け入れ + semantic は LLM judge 候補)
+    "co_activation", "semantic", "supporting",
+)
+
+# 11-D Phase 3 (Physarum strength update、Session W v1 確定):
+# 数式 strength[t+1] = strength[t] * (1 - β) + α * usage[t] (EMA with decay 同型)
+# 根拠: Tero et al. 2007 + Sun 2017 review + RL/EMA 典型値
+PHYSARUM_ALPHA = 0.1                 # up rate (Tero 2007 + EMA 典型値 0.01-0.1 上限)
+PHYSARUM_BETA = 0.05                 # decay rate (Tero 2007 + 半減期 14 cycle)
+STRENGTH_CAP = 1.0                   # 数学派生 saturate ceiling (α=0.1 で 10 連続 hit で saturate)
+PRUNING_STRENGTH_RATIO = 0.15        # pruning threshold = initial × 0.15 (動的相対基準)
+
+
+def _compute_pruning_idle_cycles() -> int:
+    """pruning idle cycle 閾値 = β 半減期 × 4 (動的派生、literal 定数追加なし)。
+
+    β=0.05 で ≒ 56 cycle。β を変えれば自動再計算 (ゆう ① マジックナンバー回避精神)。
+    """
+    import math
+    return int(round(math.log(0.5) / math.log(1.0 - PHYSARUM_BETA) * 4))
+
+
+def _link_strength(link: dict) -> float:
+    """link の現在 strength を取得 (Phase 2 以前 link の backward compat)。
+
+    Phase 2 以前 (11-B Phase 4 で作られた link) は strength field 欠落、
+    confidence 値にフォールバック (initial strength = confidence の自然 migration)。
+    """
+    return float(link.get("strength", link.get("confidence", 0.0)))
+
+
+def _apply_lazy_decay(link: dict, current_cycle: int) -> float:
+    """case Q lazy decay: last_used_cycle から経過 cycle 分の decay を計算 (read-only)。
+
+    数式: strength_decayed = strength * (1 - β)^elapsed_cycles
+    既存 link (last_used_cycle 欠落、Phase 2 以前) は decay skip (current cycle 扱い)、
+    Phase 3 以降の新 link は最初の access で last_used_cycle が設定される。
+
+    Returns:
+        decay 適用後の strength (link 自体は変更しない)
+    """
+    strength = _link_strength(link)
+    last_cycle = link.get("last_used_cycle")
+    if last_cycle is None:
+        return strength
+    try:
+        elapsed = max(0, int(current_cycle) - int(last_cycle))
+    except (TypeError, ValueError):
+        return strength
+    if elapsed == 0:
+        return strength
+    return strength * ((1.0 - PHYSARUM_BETA) ** elapsed)
 
 
 def _link_file() -> Path:
@@ -33,7 +93,12 @@ def _link_file() -> Path:
 
 
 def _build_link_prompt(entry_a: dict, entry_b: dict) -> str:
-    """link 判定用 LLM prompt (PLAN Step 4.2 準拠、軽量 JSON 出力)。"""
+    """link 判定用 LLM prompt (PLAN §5 Phase 4 Step 4.2 + 11-D Phase 2 Step 2.2 準拠、軽量 JSON 出力)。
+
+    11-D Phase 2: semantic (embedding 類似ベース、5 type の generic 化) を
+    LLM judge 候補に追加。co_activation / supporting は Phase 4 hook で生成、
+    LLM judge では出さない (構造誘導の混乱回避)。
+    """
     a_kws = entry_a.get("keywords", []) or []
     b_kws = entry_b.get("keywords", []) or []
     return (
@@ -44,6 +109,7 @@ def _build_link_prompt(entry_a: dict, entry_b: dict) -> str:
         f"  tag: {entry_b.get('network', '')}, keywords: {b_kws}\n"
         "\nlink_type 候補:\n"
         "- similar: 類似内容 (重複に近い)\n"
+        "- semantic: 意味的に関連する一般概念 (similar より broader)\n"
         "- contradict: 矛盾 (Phase 3 reconciliation と補完関係)\n"
         "- elaborate: 片方が他方を詳述 / 具体化\n"
         "- causal: 原因-結果 / 行動-観察\n"
@@ -51,7 +117,7 @@ def _build_link_prompt(entry_a: dict, entry_b: dict) -> str:
         "- (none): 関係薄い → link 作らない\n"
         "\n出力は JSON のみ (他の文字を含めない):\n"
         '{"link_type": str, "confidence": float, "reason": str}\n'
-        '- link_type は上記 5 種 or "none"\n'
+        '- link_type は上記 6 種 or "none"\n'
         "- confidence 0.0-1.0、reason は 1 文"
     )
 
@@ -97,16 +163,28 @@ def _llm_judge_link(entry_a: dict, entry_b: dict,
 
 
 def _build_link_entry(from_entry: dict, to_entry: dict, verdict: dict) -> dict:
-    """link entry dict 生成 (storage 用)。11-A perspective 属性を付与。"""
+    """link entry dict 生成 (storage 用)。11-A perspective 属性を付与。
+
+    11-D Phase 2 schema 拡張 (Phase 3 Physarum update 前準備):
+    - strength: 初期値 = confidence (PLAN §-1 v1「initial strength = confidence」
+      自然 migration、Phase 3 Step 3.2 で動的更新対象)
+    - last_used: 初期値 = created_at (Phase 3 Step 3.3 で retrieval 毎に update)
+    - usage_count: 初期値 = 0 (Phase 3 Step 3.3 で retrieval 毎に increment)
+    """
     from core.perspective import default_self_perspective
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    confidence = float(verdict.get("confidence", 0.0))
     return {
         "id": f"link_{uuid.uuid4().hex[:12]}",
         "from_id": from_entry.get("id", ""),
         "to_id": to_entry.get("id", ""),
         "link_type": verdict.get("link_type", "none"),
-        "confidence": float(verdict.get("confidence", 0.0)),
+        "confidence": confidence,
+        "strength": confidence,            # 11-D Phase 2: 初期値 = confidence
         "perspective": default_self_perspective(),
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "created_at": now,
+        "last_used": now,                  # 11-D Phase 2: 初期値 = created_at
+        "usage_count": 0,                  # 11-D Phase 2: 初期値 = 0
         "reason": verdict.get("reason", ""),
     }
 
@@ -116,6 +194,180 @@ def _append_link(link_entry: dict) -> None:
     fpath = _link_file()
     with open(fpath, "a", encoding="utf-8") as f:
         f.write(json.dumps(link_entry, ensure_ascii=False) + "\n")
+
+
+def update_link_strength_used(link_id: str,
+                              current_cycle: Optional[int] = None,
+                              prediction_error: Optional[float] = None) -> Optional[dict]:
+    """retrieval で使われた link の strength を up + last_used / usage_count update。
+
+    11-D Phase 3 (Physarum rule、案 Q lazy decay):
+    1. last_used_cycle から経過 cycle 分の decay を適用 (case Q)
+    2. strength += α、上限 STRENGTH_CAP (1.0) で clip
+    3. last_used / last_used_cycle / usage_count を update
+    4. memory_links.jsonl に書き戻し
+
+    11-D Phase 4 (Predictive coding modulator):
+    - prediction_error (0.0-1.0) が指定されたら strength up を modulate:
+      * strength_delta = α * max(0.0, 1.0 - prediction_error)
+      * 予測誤差小 (成功) → modulator 1.0 → α そのまま
+      * 予測誤差大 (失敗) → modulator 0.0 → strength up ゼロ
+    - 段階10 経路 (entropy.record_ec_prediction_error) との接続点。
+      values は 0.0-1.0 severity スケールでそのまま使える (clamp あり)
+
+    Args:
+        link_id: 対象 link の id
+        current_cycle: 現在の cycle 番号 (state["cycle_id"])。None なら decay skip
+        prediction_error: 0.0-1.0 の severity (段階10 magnitude)。None なら modulator なし
+
+    Returns:
+        更新後の link entry (見つからない場合 None)
+    """
+    fpath = _link_file()
+    if not fpath.exists():
+        return None
+    try:
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+    # 11-D Phase 4: prediction_error modulator 計算 (段階10 接続)
+    if prediction_error is not None:
+        try:
+            err = max(0.0, min(1.0, float(prediction_error)))
+        except (TypeError, ValueError):
+            err = 0.0
+        strength_delta = PHYSARUM_ALPHA * (1.0 - err)
+    else:
+        strength_delta = PHYSARUM_ALPHA
+    updated_entry = None
+    new_lines = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            link = json.loads(line)
+        except Exception:
+            new_lines.append(line)
+            continue
+        if link.get("id") == link_id:
+            # 1. lazy decay (案 Q)
+            if current_cycle is not None:
+                strength = _apply_lazy_decay(link, current_cycle)
+            else:
+                strength = _link_strength(link)
+            # 2. strength up + cap (Phase 4 modulator 適用済の delta を使う)
+            strength = min(STRENGTH_CAP, strength + strength_delta)
+            link["strength"] = strength
+            link["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if current_cycle is not None:
+                link["last_used_cycle"] = int(current_cycle)
+            link["usage_count"] = int(link.get("usage_count", 0)) + 1
+            updated_entry = link
+        new_lines.append(json.dumps(link, ensure_ascii=False))
+    if new_lines:
+        fpath.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    return updated_entry
+
+
+# ============================================================
+# 段階11-D Phase 4 Step 4.2: 新 link 探索 trigger (動的 percentile threshold)
+# ============================================================
+
+NEW_LINK_EXPLORATION_PERCENTILE = 90        # 90% percentile (Active Inference epistemic value 系)
+NEW_LINK_EXPLORATION_HISTORY_N = 20         # 過去 N cycle のサンプル
+NEW_LINK_EXPLORATION_MIN_SAMPLES = 5        # サンプル不足判定
+NEW_LINK_EXPLORATION_FALLBACK = 0.7         # サンプル不足時の初期 fallback
+
+
+def should_explore_new_links(state: dict, current_error: float) -> bool:
+    """予測誤差大時に新 link 探索を起動するか判定 (Phase 4 Step 4.2、動的 percentile)。
+
+    Session W v1 確定 (動的派生、literal 定数なし):
+    過去 N=20 cycle の prediction_error 分布の 90% percentile を threshold とする。
+    サンプル不足 (< 5) は initial fallback 0.7 (Active Inference epistemic value 系
+    + anomaly detection 分野の確立手法、固定値より状況適応性が高い)。
+
+    実 generation 発火 (LLM judge で新 link 探索) は呼び手側で判断、本関数は
+    trigger の boolean のみ返す。reflect 継続原則。
+
+    Args:
+        state: state dict (state["prediction_error_history_ec"] を参照)
+        current_error: 現在の prediction error (0.0-1.0 severity)
+
+    Returns:
+        True: 探索 trigger (current_error > 動的 threshold)
+    """
+    history = state.get("prediction_error_history_ec", []) if isinstance(state, dict) else []
+    recent = list(history)[-NEW_LINK_EXPLORATION_HISTORY_N:]
+    if len(recent) < NEW_LINK_EXPLORATION_MIN_SAMPLES:
+        threshold = NEW_LINK_EXPLORATION_FALLBACK
+    else:
+        sorted_recent = sorted(float(x) for x in recent)
+        # 90% percentile (linear interpolation 不要、近似で十分)
+        idx = int(len(sorted_recent) * (NEW_LINK_EXPLORATION_PERCENTILE / 100.0))
+        idx = min(idx, len(sorted_recent) - 1)
+        threshold = sorted_recent[idx]
+    try:
+        cur = max(0.0, min(1.0, float(current_error)))
+    except (TypeError, ValueError):
+        return False
+    return cur > threshold
+
+
+def prune_weak_links(current_cycle: int) -> int:
+    """全 link を走査、低 strength + idle 長 の link を削除。
+
+    11-D Phase 3 Step 3.5 (Session W v1 確定、両方とも動的派生):
+    - strength threshold = confidence × 0.15 (initial strength = confidence の relative ratio)
+    - idle threshold = β 半減期 × 4 ≒ 56 cycle (β からの完全派生)
+
+    呼出タイミング: cycle 終端 batch (案 P 系の sweep 用、lazy decay 案 Q と並存)。
+    main.py の cycle loop で `pending_prune` と並んで呼ぶ運用想定。
+
+    Args:
+        current_cycle: 現在の cycle 番号 (state["cycle_id"])
+
+    Returns:
+        削除した link 件数
+    """
+    fpath = _link_file()
+    if not fpath.exists():
+        return 0
+    try:
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return 0
+    idle_threshold = _compute_pruning_idle_cycles()
+    kept = []
+    removed = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            link = json.loads(line)
+        except Exception:
+            kept.append(line)
+            continue
+        # initial strength = confidence (PLAN §-1 v1 自然 migration)
+        initial = float(link.get("confidence", 0.0))
+        strength_threshold = initial * PRUNING_STRENGTH_RATIO
+        # 現在の有効 strength (lazy decay 込み)
+        current_strength = _apply_lazy_decay(link, current_cycle)
+        last_cycle = link.get("last_used_cycle")
+        if last_cycle is None:
+            idle = 0   # last_used_cycle 欠落 link は idle 0 扱い (Phase 2 以前 / 新規 link 保護)
+        else:
+            try:
+                idle = max(0, int(current_cycle) - int(last_cycle))
+            except (TypeError, ValueError):
+                idle = 0
+        if current_strength < strength_threshold and idle >= idle_threshold:
+            removed += 1
+            continue
+        kept.append(json.dumps(link, ensure_ascii=False))
+    if removed:
+        fpath.write_text(("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+    return removed
 
 
 def list_links(limit: int = 200) -> list:
@@ -277,7 +529,12 @@ def _traverse_depth(
     min_confidence: float,
     top_n_per_depth: int,
 ) -> list:
-    """follow_links の再帰実装 (current_depth 1 始まり)."""
+    """follow_links の再帰実装 (current_depth 1 始まり).
+
+    11-D Phase 3 Step 3.2: strength_hint を confidence → strength に置換。
+    sort key も strength を優先 (Phase 2 以前 link は confidence にフォールバック)。
+    API 契約は変更なし (呼び手は strength_hint を float として扱うだけ)。
+    """
     if current_depth > max_depth:
         return []
 
@@ -292,7 +549,8 @@ def _traverse_depth(
         if float(l.get("confidence", 0.0)) < min_confidence:
             continue
         filtered.append(l)
-    filtered.sort(key=lambda l: float(l.get("confidence", 0.0)), reverse=True)
+    # 11-D Phase 3 Step 3.2: sort key を strength に変更 (Phase 2 以前は confidence)
+    filtered.sort(key=lambda l: _link_strength(l), reverse=True)
     near = filtered[:top_n_per_depth]
 
     results = []
@@ -308,7 +566,8 @@ def _traverse_depth(
             "memory_entry": target_entry,
             "via_link": link,
             "depth": current_depth,
-            "strength_hint": float(link.get("confidence", 0.0)),
+            # 11-D Phase 3 Step 3.2: strength_hint を strength に置換 (fallback あり)
+            "strength_hint": _link_strength(link),
         })
         if current_depth < max_depth:
             child = _traverse_depth(
@@ -325,10 +584,16 @@ def _find_memory_entry_by_id(entry_id: str) -> Optional[dict]:
 
     G-lite では coarse (全 tag 走査、network n 増加で線形)。
     11-D Phase 7 migration で索引化を検討可。
+
+    11-D Phase 2 hotfix (Phase 1 untagged 対応の補完): UNTAGGED_NETWORK も
+    走査対象に追加。Phase 1 で memory_update / memory_forget /
+    memory_network_search / list_records は untagged 対応済だったが、
+    本関数の見落としで untagged memory が link traverse から見えなかった
+    (link 生成は走るが follow_links から hit しない非対称) のを修復。
     """
-    from core.memory import list_records
+    from core.memory import list_records, UNTAGGED_NETWORK
     from core.tag_registry import list_registered_tags
-    for tag in list_registered_tags():
+    for tag in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
         try:
             recs = list_records(tag, limit=10000)
         except Exception:

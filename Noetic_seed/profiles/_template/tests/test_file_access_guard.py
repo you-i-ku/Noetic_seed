@@ -3,6 +3,11 @@
 Phase 4 Step H-2 C.4 Session A: claw ネイティブ file_ops への切替時に
 Noetic 固有ガード (secrets.json / sandbox/secrets/ の保護、sandbox 外
 書込禁止) を PreToolUse hook で再現する factory の動作検証。
+
+段階12 Step 2 (PLAN §3-2): 「sandbox 外書込禁止」を「profile 外書込禁止」
+に拡張。profile 配下すべてが身体改変対象になり、`.venv/` も身体拡張範囲
+として allow される。symbolic link / .. による境界抜けは Path.resolve()
+canonical 化で塞ぐ。
 """
 import sys
 import tempfile
@@ -75,15 +80,19 @@ def test_write_sandbox_secrets_denied():
     ])
 
 
-def test_write_outside_sandbox_denied():
-    print("== write_file(main.py) が sandbox 外書込拒否で deny される ==")
+def test_write_outside_profile_denied():
+    """段階12 Step 2: profile 境界外への絶対パス書込みは deny。
+    旧 test_write_outside_sandbox_denied を rename + 内容更新 (sandbox 外
+    deny ではなく profile 外 deny に意味変化、PLAN §3-2)。"""
+    print("== write_file(<tmpdir>/outside.txt) が profile 境界外で deny される ==")
     root = _setup_workspace()
     guard = make_file_access_guard(root)
-    r = guard("write_file", {"path": "main.py", "content": "# mod"})
+    outside = Path(tempfile.gettempdir()) / "noetic_outside_target.txt"
+    r = guard("write_file", {"path": str(outside), "content": "# outside"})
     return all([
         _assert(r.denied, "denied=True"),
-        _assert(any("sandbox/" in m for m in r.messages),
-                "sandbox/ 限定 message"),
+        _assert(any("プロファイル境界外" in m for m in r.messages),
+                "profile 境界外 message"),
     ])
 
 
@@ -95,6 +104,61 @@ def test_write_inside_sandbox_allowed():
     return _assert(not r.denied, "denied=False")
 
 
+def test_write_inside_profile_outside_sandbox_allowed():
+    """段階12 Step 2: profile 内なら sandbox 外でも write 許可 (身体改変経路)。
+    旧 sandbox 限定では deny されてた main.py / core/* が allow になる。"""
+    print("== write_file(main.py) が profile 内なので allow される (段階12 緩和) ==")
+    root = _setup_workspace()
+    guard = make_file_access_guard(root)
+    r = guard("write_file", {"path": "main.py", "content": "# mod"})
+    return _assert(not r.denied, "denied=False (profile 内 sandbox 外、身体改変経路)")
+
+
+def test_write_in_venv_allowed():
+    """段階12 Step 1.5 + Step 2: profile 配下の .venv も身体拡張範囲として allow。"""
+    print("== write_file(.venv/lib/foo.py) が profile 内なので allow される (身体拡張) ==")
+    root = _setup_workspace()
+    (root / ".venv" / "lib").mkdir(parents=True, exist_ok=True)
+    guard = make_file_access_guard(root)
+    r = guard("write_file", {"path": ".venv/lib/foo.py", "content": "# pkg"})
+    return _assert(not r.denied, "denied=False (.venv 配下、身体拡張経路)")
+
+
+def test_write_via_dotdot_outside_profile_denied():
+    """段階12 Step 2: `..` で profile 外を指すパスも resolve 後判定で deny。"""
+    print("== write_file(../escape.txt) は resolve 後 profile 外で deny ==")
+    root = _setup_workspace()
+    guard = make_file_access_guard(root)
+    r = guard("write_file", {"path": "../escape.txt", "content": "x"})
+    return all([
+        _assert(r.denied, "denied=True"),
+        _assert(any("プロファイル境界外" in m for m in r.messages),
+                "境界外 message"),
+    ])
+
+
+def test_write_via_symbolic_link_outside_profile_denied():
+    """段階12 Step 2: profile 内に作った symbolic link が profile 外を指すケースも
+    resolve canonical 化後 deny。Windows では Developer Mode 必要、権限なしなら skip。"""
+    print("== write_file(escape_link/foo.txt) は symbolic link 解決後 profile 外で deny ==")
+    root = _setup_workspace()
+    outside_dir = Path(tempfile.mkdtemp(prefix="noetic_outside_for_link_"))
+    link_path = root / "escape_link"
+    try:
+        link_path.symlink_to(outside_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        # Windows で symlink 権限なし環境では skip 扱い (Developer Mode 必要)
+        print("  [SKIP] symbolic link 作成権限がない環境")
+        return True
+    guard = make_file_access_guard(root)
+    r = guard("write_file", {"path": "escape_link/foo.txt", "content": "x"})
+    return all([
+        _assert(r.denied, "denied=True"),
+        _assert(any("プロファイル境界外" in m for m in r.messages),
+                "境界外 message"),
+    ])
+
+
 def test_read_inside_sandbox_allowed():
     print("== read_file(sandbox/memo.md) は allow される ==")
     root = _setup_workspace()
@@ -104,7 +168,7 @@ def test_read_inside_sandbox_allowed():
 
 
 def test_read_main_py_allowed():
-    print("== read_file(main.py) は read は許可 (読取は sandbox 外でも OK) ==")
+    print("== read_file(main.py) は read は許可 (読取は元々 sandbox 外でも OK) ==")
     root = _setup_workspace()
     guard = make_file_access_guard(root)
     r = guard("read_file", {"path": "main.py"})
@@ -133,7 +197,7 @@ def test_non_file_tool_passthrough():
     root = _setup_workspace()
     guard = make_file_access_guard(root)
     r = guard("bash", {"command": "ls"})
-    return _assert(not r.denied, "denied=False (bash は対象外)")
+    return _assert(not r.denied, "denied=False (bash は対象外、Step 7.5 で別途強化予定)")
 
 
 def test_empty_path_allow():
@@ -150,8 +214,12 @@ if __name__ == "__main__":
         ("read: sandbox/secrets/ 拒否", test_read_sandbox_secrets_denied),
         ("write: secrets.json 拒否", test_write_secrets_json_denied),
         ("write: sandbox/secrets/ 拒否", test_write_sandbox_secrets_denied),
-        ("write: sandbox 外拒否", test_write_outside_sandbox_denied),
+        ("write: profile 境界外拒否 (段階12 拡張)", test_write_outside_profile_denied),
         ("write: sandbox 内許可", test_write_inside_sandbox_allowed),
+        ("write: profile 内 sandbox 外許可 (段階12 緩和、身体改変)", test_write_inside_profile_outside_sandbox_allowed),
+        ("write: .venv 配下許可 (段階12 身体拡張)", test_write_in_venv_allowed),
+        ("write: .. 抜け拒否 (段階12 canonical 判定)", test_write_via_dotdot_outside_profile_denied),
+        ("write: symbolic link 抜け拒否 (段階12 canonical 判定)", test_write_via_symbolic_link_outside_profile_denied),
         ("read: sandbox 内許可", test_read_inside_sandbox_allowed),
         ("read: sandbox 外 (main.py) 許可", test_read_main_py_allowed),
         ("edit: secrets 拒否", test_edit_secrets_denied),

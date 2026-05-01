@@ -79,7 +79,7 @@ def _format_preview(
                     if rules:
                         lines.append(f"   rules: {rules}")
                     else:
-                        lines.append("   (rules 未指定 → handler で reject)")
+                        lines.append("   (rules 省略 → 全 False default で auto register)")
             except Exception:
                 pass
 

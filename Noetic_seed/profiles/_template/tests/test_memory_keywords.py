@@ -225,11 +225,18 @@ _p4 = _parse_metadata_response('{"keywords": "not a list", "contextual_descripti
 _assert(_p4["keywords"] == [] and _p4["contextual_description"] == "42",
         f"G-4 型不整合で定型化 (got {_p4})")
 
+# 段階11-D Phase 1 (Step 1.7 v1 調整、A-MEM paper 版 literal 整合):
+# 上限値 (旧 keywords[:7] / desc[:500]) を撤去。LLM 出力をそのまま保持する
+# (cognitive richness 優先、ゆう gut「マジックナンバー回避」+「o 制約解放」整合)。
+_keywords_input = ["k" + str(i) for i in range(15)]
+import json as _json
 _p5 = _parse_metadata_response(
-    '{"keywords": ["' + "a," * 20 + '"], "contextual_description": "' + "x" * 600 + '"}'
+    _json.dumps({"keywords": _keywords_input, "contextual_description": "x" * 800})
 )
-_assert(len(_p5["keywords"]) <= 7, f"G-5 keywords 7 個まで切詰 (got {len(_p5['keywords'])})")
-_assert(len(_p5["contextual_description"]) <= 500, f"G-6 description 500 文字まで切詰")
+_assert(_p5["keywords"] == _keywords_input,
+        f"G-5 keywords 上限なしで保持 (got {len(_p5['keywords'])} 個)")
+_assert(len(_p5["contextual_description"]) == 800,
+        f"G-6 description 上限なしで保持 (got {len(_p5['contextual_description'])} 字)")
 
 
 # =========================================================================

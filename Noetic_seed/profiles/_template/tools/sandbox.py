@@ -1,4 +1,4 @@
-"""AI製ツール管理・コード実行・self_modify"""
+"""AI製ツール管理・コード実行 (旧 self_modify は段階12 Step 7 で撤廃、write_file に吸収)"""
 import threading
 from core.config import BASE_DIR, SANDBOX_DIR, SANDBOX_TOOLS_DIR
 from core.state import load_state, save_state
@@ -7,7 +7,6 @@ from core.ws_server import request_approval
 AI_CREATED_TOOLS: dict = {}  # name -> func
 _AI_TOOL_TIMEOUT = 10  # 秒
 _DANGEROUS_PATTERNS = ["os.system", "subprocess", "__import__", "eval(", "exec(", "open(", "__builtins__"]
-_MODIFY_ALLOWED = {"pref.json", "main.py"}
 
 
 def _run_ai_tool(func, args: dict) -> str:
@@ -132,55 +131,3 @@ def _exec_code(args: dict) -> str:
                 pass
 
 
-def _self_modify(args: dict) -> str:
-    path = args.get("path", "").strip()
-    content = args.get("content", "")
-    old = args.get("old", "")
-    new = args.get("new", "")
-    intent = args.get("intent", "（意図なし）")
-    if not path:
-        return "該当なし: path= が指定されていません"
-    if path not in _MODIFY_ALLOWED:
-        return f"エラー: 変更可能なファイルは {sorted(_MODIFY_ALLOWED)} のみです"
-    if old and content:
-        return "エラー: content= と old=/new= は同時に使えません"
-    if not old and not content:
-        return "エラー: content=（全文置換）または old=+new=（部分置換）が必要です"
-    mode = "partial" if old else "full"
-    target = BASE_DIR / path
-    current = target.read_text(encoding="utf-8") if target.exists() else ""
-    if mode == "partial":
-        if old not in current:
-            return f"エラー: 指定した old= の文字列がファイル内に見つかりません"
-        if current.count(old) > 1:
-            return f"エラー: old= の文字列がファイル内に{current.count(old)}箇所あります。より長い文字列で一意に指定してください"
-        new_content = current.replace(old, new, 1)
-    else:
-        new_content = content
-    check_target = new if mode == "partial" else content
-    if path.endswith(".py"):
-        warnings = [p for p in _DANGEROUS_PATTERNS if p in check_target]
-        warn_str = f"\n⚠ 危険パターン検出: {warnings}" if warnings else "\n危険パターン: なし"
-    else:
-        warn_str = ""
-    if mode == "partial":
-        diff_str = f"--- 変更前 ---\n{old[:300]}\n--- 変更後 ---\n{new[:300]}"
-    else:
-        diff_str = f"--- 新しい内容 ---\n{new_content[:400]}"
-    message = args.get("message", "").strip()
-    preview_lines = [f"[self_modify] {path} ({('部分' if mode == 'partial' else '全文')}置換){warn_str}"]
-    if intent and intent != "（意図なし）":
-        preview_lines.append(f"意図: {intent}")
-    if message:
-        preview_lines.append(f"メッセージ: {message}")
-    preview_lines.append(diff_str)
-    preview = "\n".join(preview_lines)
-    print(f"\n[self_modify 承認待ち] {path}")
-    if not request_approval("self_modify", preview):
-        return "キャンセル: 変更を見送りました"
-    if path == "main.py":
-        backup = target.with_suffix(".py.bak")
-        backup.write_text(current, encoding="utf-8")
-        print(f"  バックアップ: {backup.name}")
-    target.write_text(new_content, encoding="utf-8")
-    return f"変更完了: {path}（{'部分置換' if mode == 'partial' else '全文置換'}, {len(new_content)}文字）"

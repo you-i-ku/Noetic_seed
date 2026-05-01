@@ -2,6 +2,7 @@
 クレデンシャルは core.auth.get_llm_credentials から動的に取得する。
 settings.json の provider/model は呼び出し直前に再読み込み（次サイクルからの切替対応）。"""
 import httpx
+import re
 import subprocess
 import json
 import base64
@@ -170,45 +171,56 @@ def _call_claude(prompt: str, max_tokens: int, image_paths: list = None) -> str:
     resp.raise_for_status()
     return resp.json()["content"][0]["text"]
 
-def _call_claude_code(prompt: str, max_tokens: int) -> str:
-    """Claude Code CLI（claude -p）。サブスクリプション枠で動く。APIキー不要。
-    --bare: hooks/MCP/memory等をスキップして高速化
-    --system-prompt: Claude Codeのデフォルトプロンプトを完全置換（ikuのプロンプトのみ使用）
-    --output-format json: 構造化出力でresultフィールドからテキスト抽出
+def _call_via_claude_code_provider(prompt: str, max_tokens: int,
+                                    image_paths: list = None,
+                                    role: str | None = None) -> str:
+    """call_llm 経路 (LLM① ③ ④) 用の shim — 新 ClaudeCodeProvider 経由。
+
+    旧 _call_claude_code (subprocess 自前 wrap, text-only) は撤去 (2026-04-27)。
+    新 provider は claude-agent-sdk を経由して JSONL stream で双方向通信、
+    Step 2 で画像対応・Step 3 で tool calling 拡張予定。
+    詳細: WORLD_MODEL_DESIGN/CLAUDE_CODE_UNIFIED_PROVIDER_PLAN.md
+
+    Args:
+        prompt: ユーザー prompt 文字列 (system 部分も既に埋め込まれている前提)。
+        max_tokens: 上限トークン数 (claude-agent-sdk のデフォルトに従う、参考値)。
+        image_paths: Step 1 では警告 + text-only fallback、Step 2 で対応予定。
+        role: LLM 役割識別子 ("llm3" 等)。指定されかつ settings.json の
+            model_overrides に該当 role エントリがあれば、当該呼び出しのみ
+            そのモデルに切替える (claude_code 限定の動的解決)。
+
+    Returns:
+        AssistantMessage.text。
     """
-    import tempfile
-    # CLAUDE.mdやmemoryが存在しないtempディレクトリで実行（文脈汚染防止）
-    clean_dir = tempfile.mkdtemp(prefix="iku_llm_")
-    cmd = [
-        "claude",
-        "-p", prompt,
-        "--output-format", "json",
-        "--system-prompt", "You are a component in an autonomous AI system. Follow the instructions in the user message exactly. Do not add explanations, greetings, or meta-commentary. Do NOT use any tools.",
-        "--disallowedTools", "Bash,Read,Edit,Write,WebSearch,WebFetch",
-        "--no-session-persistence",
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            encoding="utf-8",
-            errors="replace",
-            cwd=clean_dir,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()[:200]
-            raise RuntimeError(f"claude -p failed (rc={result.returncode}): {stderr}")
-        # --output-format json の場合、resultフィールドにテキストが入る
-        try:
-            data = json.loads(result.stdout)
-            return data.get("result", result.stdout.strip())
-        except json.JSONDecodeError:
-            # JSONパース失敗→生テキストとして返す
-            return result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("claude -p timed out (300s)")
+    from core.providers.base import ApiRequest
+    from core.providers.claude_code import ClaudeCodeProvider
+
+    _, _, _, model = _get_active_provider_config()
+
+    # role 別 model override (claude_code 限定)。
+    # 他 provider 経路は role 引数を渡さない/無視するため、本機構は自動的に
+    # 「claude_code のとき限定」が成立する。
+    # 用途: LLM3 (E 値評価) を Sonnet → Haiku に切替えて refusal 削減
+    # (2026-04-28 smoke v7 で LLM3 が constraint_circumvention 等の自己観察
+    # ラベルに RLHF refusal 連発、reflect 滞留 22-30 分の主因と判明)。
+    if role:
+        overrides = llm_cfg.get("model_overrides", {}) or {}
+        model_override = overrides.get(role)
+        if model_override:
+            model = model_override
+
+    provider = ClaudeCodeProvider(model=model or "sonnet")
+    req = ApiRequest(
+        system_prompt="",
+        messages=[{
+            "role": "user",
+            "content": [{"type": "text", "text": prompt}],
+        }],
+        max_tokens=max_tokens,
+        image_paths=image_paths,
+    )
+    msg = provider.stream(req)
+    return msg.text
 
 _lmstudio_model_cache = {}
 
@@ -262,17 +274,85 @@ def _call_lmstudio_native(prompt: str, max_tokens: int, temperature: float = 0.7
         chat.add_user_message(prompt)
 
     config = {"maxTokens": max_tokens, "temperature": temperature}
-    result = model.respond(chat, config=config)
-    return result.content if hasattr(result, "content") else str(result)
+    sampling = llm_cfg.get("llm_sampling") or {}
+    if sampling:
+        # settings.json (snake_case) → LM Studio SDK (camelCase) 変換
+        # SDK default 値は非公開のため、明示しない場合は legacy 挙動 (config に渡さない)
+        if "top_p" in sampling:
+            config["topPSampling"] = sampling["top_p"]
+        if "top_k" in sampling:
+            config["topKSampling"] = sampling["top_k"]
+        if "min_p" in sampling:
+            config["minPSampling"] = sampling["min_p"]
+        if "repetition_penalty" in sampling:
+            config["repeatPenalty"] = sampling["repetition_penalty"]
+
+    # 段階12 補足-3 改 (2026-04-29): reasoning model fragment 分離。
+    # SDK は fragment 単位で reasoning_type tag を付けて emit するが、
+    # result.content は reasoning + 最終応答を全部混ぜて連結する。
+    # on_prediction_fragment callback で reasoning_type を見て自前で振り分け、
+    # 最終応答だけを return する。reasoning は debug log に保存して観察
+    # 手段を確保する (autopoiesis 整合: 内的状態の永続化を捨てない)。
+    # 対象 model: Qwen3 系 / DeepSeek-R1 系 / その他 reasoning enabled モデル。
+    _content_parts: list = []
+    _reasoning_parts: list = []
+    _REASONING_TYPES = {"reasoning", "reasoningStartTag", "reasoningEndTag"}
+
+    def _on_fragment(fragment):
+        rtype = getattr(fragment, "reasoning_type", None)
+        text = getattr(fragment, "content", "") or ""
+        if rtype in _REASONING_TYPES:
+            _reasoning_parts.append(text)
+        else:
+            _content_parts.append(text)
+
+    result = model.respond(chat, config=config, on_prediction_fragment=_on_fragment)
+
+    # reasoning が分離されたら debug log に保存 (think 観察維持)
+    if _reasoning_parts:
+        try:
+            from core.state import append_debug_log
+            append_debug_log("lmstudio (reasoning)", "".join(_reasoning_parts))
+        except Exception:
+            pass
+
+    # fragment が一切来なかった場合 (古い SDK / 非 streaming server) は
+    # legacy behavior に fallback (result.content をそのまま返す)。
+    if not _content_parts and not _reasoning_parts:
+        return result.content if hasattr(result, "content") else str(result)
+
+    return "".join(_content_parts)
 
 
-def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
-             image_path: str = None, image_paths: list = None) -> str:
-    """LLM呼び出し統一インターフェース。
-    image_path (単一) / image_paths (複数) のどちらか、または両方なしで呼ぶ。
-    provider は llm_cfg から動的に読み出される（次サイクルから切替反映）。
+def _detect_repetition(text: str, ngram_size: int = 5, threshold: int = 4,
+                       tail_chars: int = 400) -> bool:
+    """末尾 tail_chars に同一 char-based n-gram が threshold 回以上出現したら True。
+
+    日本語の「として、として、として、…」のような短い反復ループを検知する。
+    通常の自然な反復 (例: 「は、」「を、」3 回) では発火しないよう、
+    ngram_size=5 / threshold=4 を default にする。
     """
-    # image_paths が未指定で image_path があれば [image_path] に昇格
+    if not text or len(text) < ngram_size * threshold:
+        return False
+    tail = text[-tail_chars:] if len(text) > tail_chars else text
+    counts: dict = {}
+    for i in range(len(tail) - ngram_size + 1):
+        ng = tail[i:i + ngram_size]
+        counts[ng] = counts.get(ng, 0) + 1
+        if counts[ng] >= threshold:
+            return True
+    return False
+
+
+def _call_llm_inner(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
+                    image_path: str = None, image_paths: list = None,
+                    role: str | None = None) -> str:
+    """LLM provider dispatch (内部実装)。call_llm が repetition guard で wrap する。
+
+    role: "llm3" 等の役割識別子。claude_code provider 限定で、settings.json の
+    model_overrides に該当 role があれば当該呼び出しのみモデル切替される。
+    他 provider 経路 (lmstudio/openai_compat/claude) では role 引数を無視。
+    """
     if image_paths is None:
         image_paths = [image_path] if image_path else None
 
@@ -280,10 +360,94 @@ def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
     if provider == "claude":
         return _call_claude(prompt, max_tokens, image_paths=image_paths)
     elif provider == "claude_code":
-        return _call_claude_code(prompt, max_tokens)  # claude_codeは画像非対応
+        return _call_via_claude_code_provider(prompt, max_tokens,
+                                               image_paths=image_paths,
+                                               role=role)
     elif provider == "lmstudio":
         # LM Studio 経由は常に公式 SDK を使う（REST API の vision バグ #968 回避）
         return _call_lmstudio_native(prompt, max_tokens, temperature, image_paths=image_paths)
     else:
         # openai, gemini 等（OpenAI互換サーバ）はREST APIが正常なのでそのまま
         return _call_openai_compat(prompt, max_tokens, temperature, image_paths=image_paths)
+
+
+def call_llm(prompt: str, max_tokens: int = 24000, temperature: float = 0.7,
+             image_path: str = None, image_paths: list = None,
+             max_retry: int = 0,
+             role: str | None = None) -> str:
+    """LLM呼び出し統一インターフェース (repetition guard 関数残置、default 無効)。
+
+    出力に repetition loop を検知したら temperature を上げて再呼び出しする
+    (max_retry まで)。すべての retry でループが消えなければ最後の出力を返す
+    (諦め)。
+
+    2026-04-27 default max_retry=2 → 0 (retry guard 実質デッドコード化):
+      smoke 検証で全系統の retry 効果ゼロを確証 (LLM3 数値ガチャのみ /
+      Reflection は連発が retry 後も同型 / memory_store 0.0 連発が完全同型 /
+      正常 JSON 出力で false positive あり)。retry は時間ロスのみで gemma を
+      attractor から脱出させていない事実を踏まえ、default で guard 無効化。
+      _detect_repetition / retry loop は残置、必要時に呼出側で max_retry=N
+      指定で復活可能 (柔軟性確保)。詳細:
+      memory/project_v05_phase5_stage11d_phase8_retry_guard_deadcode.md
+
+    image_path (単一) / image_paths (複数) のどちらか、または両方なしで呼ぶ。
+    provider は llm_cfg から動的に読み出される（次サイクルから切替反映）。
+    """
+    out = _call_llm_inner(prompt, max_tokens, temperature, image_path, image_paths,
+                          role=role)
+    for retry in range(max_retry):
+        if not _detect_repetition(out):
+            return _post_process_response(out)
+        new_temp = min(temperature + 0.2 * (retry + 1), 1.2)
+        print(f"  [llm] repetition detected, retry {retry + 1}/{max_retry} (temp={new_temp:.2f})")
+        out = _call_llm_inner(prompt, max_tokens, new_temp, image_path, image_paths,
+                              role=role)
+    return _post_process_response(out)
+
+
+# ============================================================
+# Reasoning model (Qwen3 / DeepSeek-R1 系) の <think> tag 対応
+# ============================================================
+# 2026-04-29: Qwen3 系 / DeepSeek-R1 系の reasoning model は内部思考を
+# `<think>...</think>` で囲んで返す。tool 呼出 JSON / [TOOL:...] や
+# 自然言語の最終応答は </think> 後に出る前提だが、parser がそのまま
+# tag 入り text を受け取ると tool 検出失敗 / 自然言語結果に think 混入
+# が起きる。
+#
+# 対処は二段構え (X 改良案):
+#   ① raw (think 込み) を append_debug_log 経由で `llm_debug.log` に保存
+#      → think 内容の観察手段は別 layer で完全に保たれる
+#   ② <think> 区間を strip して return
+#      → caller (parser / 自然言語 description 経路) は綺麗な text を受け取る
+#
+# autopoiesis 哲学整合: 内的状態 (think) の永続化を捨てず、parse 用 text
+# だけ「邪魔な部分を取り除く」として扱う (memory `feedback_action_observation_unified`
+# 系譜、内的・外的を独立 layer で持つ設計)。
+# ============================================================
+
+_THINK_PATTERN = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
+
+
+def _strip_think(text: str) -> str:
+    """`<think>...</think>` 区間を除去 (閉じ tag のある区間のみ)。
+
+    未閉じ <think> が残った場合はそのまま (parse 失敗で発覚 → debug)。
+    None / 空 text はそのまま透過。
+    """
+    if not text:
+        return text
+    return _THINK_PATTERN.sub('', text)
+
+
+def _post_process_response(raw: str) -> str:
+    """call_llm の最終 return 直前の post-process。
+
+    raw (think 込み) を `llm_debug.log` に保存しつつ <think> を strip して
+    返す。append_debug_log の i/o 失敗は無害扱い (return 値には影響させない)。
+    """
+    try:
+        from core.state import append_debug_log
+        append_debug_log("call_llm (raw)", raw)
+    except Exception:
+        pass
+    return _strip_think(raw)

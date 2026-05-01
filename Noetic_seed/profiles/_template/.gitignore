@@ -1,0 +1,27 @@
+# profile 内独立 git repo の ignore (段階12 PLAN §6 改訂)。
+# 親 git の .gitignore とは独立、本 profile 内 repo の身体改変履歴専用。
+
+# venv (容量、requirements.txt から再構築可能)
+.venv/
+
+# Python キャッシュ
+__pycache__/
+*.pyc
+*.pyo
+*.bak
+
+# 認証 (secrets、git に残してはいけない)
+secrets.json
+sandbox/secrets/
+
+# 音声バッファ (容量大、流動)
+sandbox/audio/
+
+# 個人設定 (親 .gitignore と踏襲)
+pref.json
+
+# state / memory / その他 sandbox は意図的に track する。
+# autopoiesis 哲学整合、ゆう判断 2026-04-29:
+# 「身体改変イベント時の state / memory も一緒にスナップショット保存したい。
+#  自己改善前後の自分の状態・記憶まで残ってた方が後で観察に便利」
+# → G-2 自動 stash で身体 + state + memory が一括 snapshot される。

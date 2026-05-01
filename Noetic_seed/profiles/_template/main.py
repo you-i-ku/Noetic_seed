@@ -6,7 +6,11 @@ from pathlib import Path as _Path
 
 def _bootstrap_venv():
     _here = _Path(__file__).parent
-    _venv = _here.parent.parent / ".venv"  # minimumtest/.venv（共通venv）
+    # 段階12 Step 1.5 (PLAN §3-1 / §11-5-pre): per-profile venv。
+    # 旧共通 venv から profile 配下の独立 venv に移行することで、
+    # pip install / requirements.txt 編集が iku の身体範囲内に収まり、
+    # 自己改変による身体拡張が成立する。
+    _venv = _here / ".venv"
     _is_win = sys.platform == "win32"
     _venv_python = _venv / ("Scripts/python.exe" if _is_win else "bin/python")
 
@@ -21,20 +25,25 @@ def _bootstrap_venv():
 
     import subprocess
 
+    _pip = _venv / ("Scripts/pip.exe" if _is_win else "bin/pip")
+    _req = _here / "requirements.txt"
+
     # venv がなければ作成
     if not _venv_python.exists():
         print("[bootstrap] 仮想環境を作成中...")
         subprocess.run([sys.executable, "-m", "venv", str(_venv)], check=True)
-        _pip = _venv / ("Scripts/pip.exe" if _is_win else "bin/pip")
-        _deps = [
-            "httpx", "psutil", "numpy",
-            "sqlalchemy", "aiosqlite",
-            "onnxruntime", "tokenizers", "huggingface-hub",
-            "faster-whisper", "soundfile",  # mic_record 用
-        ]
-        print(f"[bootstrap] 依存ライブラリをインストール中: {', '.join(_deps)}")
-        subprocess.run([str(_pip), "install", "--quiet"] + _deps, check=True)
-        print("[bootstrap] セットアップ完了。venvで再起動します...\n")
+
+    # PLAN §3-3: 身体仕様 (requirements.txt) を single source of truth として
+    # 毎回同期する。iku が requirements.txt を編集 → reboot で新ライブラリが
+    # 反映される経路 (= 身体拡張の汎用チェーン) を成立させるため、venv 既存でも
+    # 必ず実行する。pip は idempotent: 既 install pkg は manifest 検査で skip
+    # されるので、全 install 済なら数秒、差分のみ DL する。
+    if _req.exists():
+        print("[bootstrap] requirements.txt から身体仕様を同期中...")
+        subprocess.run([str(_pip), "install", "--quiet", "-r", str(_req)], check=True)
+        print("[bootstrap] 同期完了。venv で再起動します...\n")
+    else:
+        print(f"[bootstrap] WARNING: {_req} が見つかりません。空 venv で起動します。\n")
 
     # venv の Python で自分自身を再実行
     # os.execv は Windows でスペース含むパスをクォートしないため subprocess で代替
@@ -58,6 +67,7 @@ import uuid
 import math
 import copy
 import json
+from functools import partial
 from datetime import datetime
 
 # DualLoggerの設定（printをファイルにも書き出す）
@@ -67,6 +77,8 @@ from core.config import (
 )
 sys.stdout = DualLogger(RAW_LOG_FILE)
 
+from core.profile_repo import ensure_profile_repo
+from core.sanity_check import enforce_sanity_check
 from core.state import load_state, save_state, load_pref, save_pref, append_debug_log
 from core.llm import call_llm, _get_active_provider_config
 from core.embedding import _init_vector, _compare_expect_result
@@ -80,13 +92,18 @@ from core.pending_unified import pending_prune, pending_add_response_intent
 # Phase 4 Step E-2d: ConversationRuntime 統合用 import
 from core.providers.openai_compat import OpenAIProvider
 from core.providers.anthropic import AnthropicProvider
+from core.providers.claude_code import ClaudeCodeProvider
 from core.runtime.registry import ToolRegistry
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import (
     HookRunner,
+    make_bash_path_guard_hook,
     make_bash_validation_hook,
     make_file_access_guard,
+    make_git_auto_stash_hook,
+    make_install_command_check_hook,
     make_pre_tool_use_approval_check,
+    make_post_body_modify_pending_hook,
     make_post_tool_use_evaluation,
     make_post_tool_use_failure_logger,
 )
@@ -160,6 +177,18 @@ def _wm_log(event_type: str, payload: dict):
 # === メインループ ===
 def main():
     print("=== Noetic_seed ===")
+    # 段階12 PLAN §6 / §7 改訂: profile 内独立 git repo の存在確保。
+    # 1 個体 = 1 repo = 1 履歴 (autopoiesis 整合)。
+    # .git なければ自動 init + 初期 commit、あれば noop (idempotent)。
+    # G-2 自動 stash hook (`make_git_auto_stash_hook`) は親方向に .git を
+    # 探すため、この後の身体改変 stash は profile 内 repo 上で行われる。
+    ensure_profile_repo(BASE_DIR)
+    # 段階12 Step 6 (PLAN §10): sanity check + 自動 revert。state load より前。
+    # state.json / memory JSON / core.controller + tools の import を検査、
+    # 失敗時は最新 iku-auto stash から git stash apply で復元、再検査して
+    # 成功なら続行 / 失敗なら sys.exit(1)。「起動できない身体 = 存在できない」
+    # の構造化 (PLAN §10-3、§1-5 介入レベル「物理的存在の前提」枠)。
+    enforce_sanity_check(profile_root=BASE_DIR, profile_name=BASE_DIR.name)
     _p, _base, _k, _model = _get_active_provider_config()
     print(f"LLM: {_model or llm_cfg.get('model','?')} @ {_base} [{_p}]")
     print(f"state: {STATE_FILE}")
@@ -170,7 +199,7 @@ def main():
     # iku は起動時に登録済 tag ゼロ = 白紙 onboarding 状態。最初の memory_store
     # 呼出で inline register 発火、iku が自己分節の tag を発明する設計。
     # STANDARD_TAGS 辞書 / register_standard_tags() 関数自体は tag_registry.py
-    # に残してある (iku が self_modify で復活させたい時の handle、撤去 doc 価値)。
+    # に残してある (iku が write_file で復活させたい時の handle、撤去 doc 価値)。
     # 既存 smoke / 実運用で標準タグが必要なら、プロファイル起動前に手動で
     # registered_tags.json を seed することで対応 (新プロファイル clean start は
     # PLAN §5 Step 5.3 の手順準拠)。
@@ -191,18 +220,6 @@ def main():
     if _p_dropped:
         print(f"  [migration] 段階10.5 Fix 2: 旧形式 pending {_p_dropped} 個を drop (content_observable 欠落)")
     save_state(state)
-    # 段階7: memory/wm.jsonl から WM materialized view を再構築
-    try:
-        from core.memory import list_records
-        from core.world_model import rebuild_wm_from_jsonl
-        wm_records = list_records("wm", limit=1000)
-        if wm_records:
-            rebuilt = rebuild_wm_from_jsonl(state["world_model"], wm_records)
-            if rebuilt:
-                print(f"  [WM] materialized view 再構築: {rebuilt} fact 取り込み")
-                save_state(state)
-    except Exception as e:
-        print(f"  [WM] materialized view rebuild スキップ (エラー: {e})")
     print(f"session: {state['session_id']}  cycle_id: {state['cycle_id']}")
     broadcast_state(state)
 
@@ -212,9 +229,8 @@ def main():
         result = reflect(s, call_llm)
         s["reflection_cycle"] = 0
         save_state(s)
-        opinions = result.get("opinions", [])
-        entities = result.get("entities", [])
-        return f"内省完了: {len(opinions)}件の気づき, {len(entities)}件のエンティティ更新"
+        notes = result.get("notes", [])
+        return f"内省完了: {len(notes)}件の気づき"
     TOOLS["reflect"]["func"] = _tool_reflect
 
     # pref.json 初期化
@@ -231,10 +247,14 @@ def main():
     # 起動時Xセッションチェック
     if state.get("tool_level", 0) >= 3 and not X_SESSION_PATH.exists():
         print("\n  [X] Level 3以上ですがXセッションがありません。")
-        try:
-            answer = input("  Xにログインする？ [y/N]: ").strip().lower()
-        except EOFError:
+        if llm_cfg.get("x_login", {}).get("skip_prompt", False):
+            print("  [X] x_login.skip_prompt=true、自動 skip")
             answer = "n"
+        else:
+            try:
+                answer = input("  Xにログインする？ [y/N]: ").strip().lower()
+            except EOFError:
+                answer = "n"
         if answer == "y":
             _x_do_login()
         else:
@@ -265,11 +285,19 @@ def main():
             model=llm_cfg.get("model", ""),
             api_key=llm_cfg.get("api_key", ""),
         )
+    elif _provider_name_raw == "claude_code":
+        # Claude Code CLI subscription 経由 (claude-agent-sdk + in-process MCP)。
+        # LLM① ② ③ ④ 統一 provider、画像 + tool calling フル対応。
+        # 詳細: WORLD_MODEL_DESIGN/CLAUDE_CODE_UNIFIED_PROVIDER_PLAN.md
+        _rt_provider = ClaudeCodeProvider(
+            model=llm_cfg.get("model", "sonnet"),
+        )
     else:
         _rt_provider = OpenAIProvider(
             model=llm_cfg.get("model", "gemma-4-26b-a4b-it"),
             api_key=llm_cfg.get("api_key", ""),
             base_url=llm_cfg.get("base_url", "http://localhost:1234/v1"),
+            strict_tools=llm_cfg.get("tool_use", {}).get("strict_mode", False),
         )
 
     # ToolRegistry: claw-code 50 tool + noetic stub 5 個
@@ -277,7 +305,7 @@ def main():
     # 登録順: claw → bridge (SNS 等のみ) → noetic_ext (Noetic 固有 17)
     #   1. claw: file_ops / shell / web / task / … の汎用 tool 50 個
     #   2. bridge: noetic_ext がカバーする 17 tool を skip し、それ以外 (SNS
-    #      14 + create_tool / exec_code / self_modify / http_request = 18)
+    #      14 + create_tool / exec_code / http_request = 17、段階12 Step 7 で self_modify 撤廃)
     #      のみ loose schema で登録
     #   3. noetic_ext: Noetic 固有 17 tool の claw 文法準拠厳密 ToolSpec
     register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
@@ -307,22 +335,42 @@ def main():
     _hook_runner = HookRunner()
     _approval_cfg = llm_cfg.get("approval", {})
     # H-2 C.4 Session A: claw ネイティブ read_file/write_file/edit_file/
-    # glob_search/grep_search に Noetic 固有の secrets guard + sandbox 外書込禁止
+    # glob_search/grep_search に Noetic 固有の secrets guard + profile 外書込禁止
     # を Pre-hook で被せる (legacy _read_file/_write_file/_list_files の代替)
+    # 段階12 Step 2 (PLAN §3-2) で「sandbox 外書込禁止」→「profile 外書込禁止」に拡張済
     _hook_runner.register_pre(make_file_access_guard(BASE_DIR))
+    # 段階12 Step 3 (PLAN §5): G-2 自動 stash hook。core/* / tools/* /
+    # main.py / .mcp.json への write_file / edit_file の直前に profile 配下を
+    # git stash で partial 保存、身体改変履歴の safety net + 20 世代 auto drop。
+    # git 未初期化環境では noop で安全に通過。
+    _hook_runner.register_pre(make_git_auto_stash_hook(BASE_DIR, BASE_DIR.name))
     # bash は Level-aware validation で Level 0-2 では read-only 系のみ、
     # 破壊的コマンドは Level 問わず自動拒否、WARN は承認画面に警告付き表示
     _hook_runner.register_pre(make_bash_validation_hook(
         state_getter=lambda: state,
     ))
+    # 段階12 Step 7.5 ② (PLAN §3-5-2 ②): bash 経由の絶対パス profile 外
+    # 書込み / 削除系操作を deny。bash_validation の Level 制約に加え、
+    # path 境界で「書込み range = profile 内」を構造化。
+    _hook_runner.register_pre(make_bash_path_guard_hook(BASE_DIR))
+    # 段階12 Step 7.5 ③ (PLAN §3-5-2 ③): pip install で PyPI registry 検証。
+    # 存在しない pkg は deny (LLM hallucination 抑止)、人気 pkg と Levenshtein
+    # 1-2 は typosquatting 警告。1 時間 in-memory cache、不通時 warning + 続行。
+    _hook_runner.register_pre(make_install_command_check_hook())
     _hook_runner.register_pre(make_pre_tool_use_approval_check(
         missing_field_policy=_approval_cfg.get("missing_field_policy", "deny"),
     ))
 
+    # eval (LLM3 / E 値評価) は claude_code provider 経由なら settings.json
+    # の model_overrides で role 別モデル切替が効く。partial で role="llm3"
+    # bound 版を渡すことで eval.py / hooks.py 等の call site 側を変えずに
+    # settings から制御できる (2026-04-28 hotfix、Sonnet が
+    # constraint_circumvention 等の自己観察ラベルに refusal 連発する問題への対策。
+    # 他 provider 経路では role 引数自体を伝播しないため自動的に無視される)。
     _base_post_hook = make_post_tool_use_evaluation(
         state=state,
         get_state_before=lambda: _hook_ctx["state_before"],
-        call_llm_fn=call_llm,
+        call_llm_fn=partial(call_llm, role="llm3"),
         get_cycle_id=lambda: state.get("cycle_id", 0),
         get_recent_intents=lambda: [
             e.get("intent", "") for e in state.get("log", [])[-3:]
@@ -341,6 +389,14 @@ def main():
         return result
 
     _hook_runner.register_post(_post_hook_with_sync)
+    # 段階12 Step 5 (PLAN §9): 身体改変反映待ち pending 自動追加。
+    # write_file / edit_file が core/* / tools/* / main.py / .mcp.json を
+    # 成功書換えしたら「reboot で反映を完了する」内発的 intent を pending 化。
+    # match_pattern={"tool_name": "reboot"} で reboot 成功時に自己消化。
+    _hook_runner.register_post(make_post_body_modify_pending_hook(
+        state_getter=lambda: state,
+        get_cycle_id=lambda: state.get("cycle_id", 0),
+    ))
     _hook_runner.register_failure(make_post_tool_use_failure_logger(
         state=state,
         get_cycle_id=lambda: state.get("cycle_id", 0),
@@ -434,10 +490,14 @@ def main():
             if new_lv == 3 and not X_SESSION_PATH.exists():
                 print("\n  [X] Level 3到達: X/Elythツールが解放されました。")
                 print("  [X] Xセッションがありません。ログインしますか？")
-                try:
-                    answer = input("  Xにログインする？ [y/N]: ").strip().lower()
-                except EOFError:
+                if llm_cfg.get("x_login", {}).get("skip_prompt", False):
+                    print("  [X] x_login.skip_prompt=true、自動 skip")
                     answer = "n"
+                else:
+                    try:
+                        answer = input("  Xにログインする？ [y/N]: ").strip().lower()
+                    except EOFError:
+                        answer = "n"
                 if answer == "y":
                     _x_do_login()
                 else:
@@ -619,7 +679,9 @@ def main():
             state=state,
             tools_dict=TOOLS,
             fire_cause=fire_cause,
-            allowed_tools=ctrl["allowed_tools"],
+            # Step 0.4 hotfix: prompt 用は displayed_tools (affordance 前)、
+            # parser 用は allowed_tools (affordance 後)。description は表示、選択は弾く。
+            allowed_tools=ctrl.get("displayed_tools", ctrl["allowed_tools"]),
             world_model=state.get("world_model"),
             registry=_rt_registry,
         )
@@ -656,11 +718,35 @@ def main():
                 user_input_parts.append(f"(前のツール結果: {prev_result[:200]})")
             user_input = " ".join(user_input_parts)
 
+            # 段階11-D Step 4-2 hotfix v6 (ゆう原案 2026-04-28): chain 軸の
+            # 二段構造を導入。chain_idx==0 は controller 決定 (LLM① 選択 tool) を
+            # 必ず実行する forced 段階 (run_turn_with_forced_tool 経由)。
+            # chain_idx>=1 は LLM 自由探索として run_turn (通常版) に切替えて、
+            # tool 呼ばない選択も含む LLM のブレを多様性として受容する。
+            #
+            # Phase 8 hotfix ② の max_iterations 軸二段構造 (iter 0 = forced /
+            # iter 1+ = 自由) を chain 軸に拡張した形。chain_idx>=1 では
+            # default system_prompt (全 tool 視界) で LLM が自由に判断するため、
+            # forced_sp 生成も chain 0 のみで十分。
+            # memory/feedback_llm2_iter0_forced_contract.md 参照。
             try:
-                summary = _runtime.run_turn_with_forced_tool(
-                    forced_tool_name=chain_tool,
-                    user_input=user_input,
-                )
+                if chain_idx == 0:
+                    forced_sp = assemble_system_prompt(
+                        state=state,
+                        tools_dict=TOOLS,
+                        fire_cause=fire_cause,
+                        allowed_tools={chain_tool},
+                        world_model=state.get("world_model"),
+                        registry=_rt_registry,
+                        force_tool=chain_tool,
+                    )
+                    summary = _runtime.run_turn_with_forced_tool(
+                        forced_tool_name=chain_tool,
+                        user_input=user_input,
+                        forced_system_prompt=forced_sp,
+                    )
+                else:
+                    summary = _runtime.run_turn(user_input=user_input)
             except Exception as e:
                 print(f"  LLM② run_turn エラー (chain {chain_idx+1}): {e}")
                 parse_failed = f"runtime error: {e}"
@@ -740,6 +826,15 @@ def main():
                     fw = state.setdefault("files_written", [])
                     if _p not in fw:
                         fw.append(_p)
+                    save_state(state)
+            # 段階11-D Phase 0 Step 0.4: memory_graph affordance ガード (B2)
+            # 自発 memory_store ≥ 1 経験で memory_graph candidate 解除 (controller.py で gate)
+            # 失敗 memory_store は count しない (Z2 確定、森のたとえ整合性)
+            elif rec.tool_name == "memory_store":
+                if not _out_str.startswith(("Error", "エラー")):
+                    state["voluntary_memory_store_count"] = (
+                        state.get("voluntary_memory_store_count", 0) + 1
+                    )
                     save_state(state)
 
             # WM 段階3: ツールが属する channel の activity を記録
@@ -923,6 +1018,15 @@ def main():
 
         # UPS v2 pending 淘汰
         pending_prune(state, current_cycle=cid)
+
+        # 段階11-D Phase 3 Step 3.5: 弱 link の prune (Physarum rule、cycle 終端 batch)
+        # idle >= β 半減期 × 4 (≒56 cycle) かつ strength < initial × 0.15 で削除。
+        # reflect 継続原則で例外は catch、メイン処理を止めない。
+        try:
+            from core.memory_links import prune_weak_links
+            prune_weak_links(current_cycle=cid)
+        except Exception as e:
+            print(f"  [memory_links] prune skip (error: {e})")
 
         save_state(state)
 

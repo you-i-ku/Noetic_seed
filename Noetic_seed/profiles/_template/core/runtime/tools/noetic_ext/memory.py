@@ -63,15 +63,15 @@ def _build_specs(tools_dict: dict) -> list:
         ToolSpec(
             name="memory_store",
             description=(
-                "記憶ネットワークに新エントリを保存する。network で保存先のタグ名を指定 "
-                "(動的拡張可、未登録タグは rules={beta_plus:bool, bitemporal:bool} 必須)。"
+                "記憶ネットワークに新エントリを保存する。network 省略 → untagged 経路 "
+                "(11-D Phase 1)、network 指定 + 未登録 → auto register、rules 省略可。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "network": {
                         "type": "string",
-                        "description": "保存先のタグ名 (動的拡張可、未登録タグは rules 必須で inline 登録)",
+                        "description": "保存先のタグ名 (省略可、動的拡張可、未登録タグは auto register)",
                     },
                     "content": {
                         "type": "string",
@@ -93,10 +93,12 @@ def _build_specs(tools_dict: dict) -> list:
                     },
                     "rules": {
                         "type": "object",
-                        "description": "(段階7: 新タグ発明時 必須) {beta_plus: bool, bitemporal: bool}",
+                        "description": "(11-D 以降 任意) bitemporal=True (既存 fact 凍結) や write_protected=True (書込み禁止 pseudo-tag) を指定したい時のみ渡す。省略時は全 False default で auto register",
                         "properties": {
                             "beta_plus": {"type": "boolean"},
                             "bitemporal": {"type": "boolean"},
+                            "c_gradual_source": {"type": "boolean"},
+                            "write_protected": {"type": "boolean"},
                         },
                     },
                     "display_format": {
