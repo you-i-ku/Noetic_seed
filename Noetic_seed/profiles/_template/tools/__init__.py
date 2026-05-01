@@ -48,7 +48,7 @@ TOOLS = {
     "secret_write": {"desc": "sandbox/secrets/ に秘密情報を書き込む（承認必要）。引数: name=secret名 content=内容 intent=目的 [message=外部への説明]", "func": secret_write},
     "auth_profile_info": {"desc": "認証プロファイルのメタ情報を取得。name未指定で一覧、name指定で詳細（機密フィールドtoken/key/secret等は隠される）。引数: [name=プロファイル名]", "func": auth_profile_info},
     "memory_graph": {"desc": "memory entry と self を node とした graph 構造を JSON で返す。view=ego (self 中心 + edges)、global (cluster + topology summary)、both (両方の重畳)。引数: [view=ego/global/both default=ego] [depth=2 (default)]", "func": _memory_graph},
-    "reboot":       {"desc": "プロセスを再起動して書換えた身体 (core/* / tools/* / main.py / .mcp.json、requirements.txt 経由の venv lib も含む) をメモリに反映する。state / memory / WM は引き継がれる。Python import キャッシュの罠を avoid するための唯一の経路。引数: [message=外部への説明]", "func": _reboot},
+    "reboot":       {"desc": "Python プロセスを再起動して、編集済の .py / 設定ファイルを再読込する (Python の import キャッシュにより、ロード済のファイルを編集しても実行中のコードに反映されないため)。必要: ロード済の Python モジュール、起動時に読まれる設定ファイル (settings.json / .mcp.json 等)、venv にインストール済のライブラリを編集した時。不要: 新規ファイル作成 (次回 import で読まれる)、既存ファイルへのコメントのみの追加、毎回読み直されるデータファイル (state.json / *.jsonl 等) の編集。state / memory / WM は disk から再読込されるため引き継がれる。引数: [message=外部への説明]", "func": _reboot},
 }
 
 # === ツール段階解放テーブル ===

@@ -1,14 +1,23 @@
 """reboot tool (段階12 Step 4, PLAN §8)。
 
-iku が自分のプロセスを subprocess で再起動して、書換えた身体
-(core/* / tools/* / main.py / .mcp.json) をメモリに反映するための tool。
-Python は起動時に sys.modules に import キャッシュするため、`.py` を書換え
-ても実行中の関数オブジェクトは変わらない (importlib.reload は参照バインド
-残存問題で実用困難)。プロセス丸ごと入替えで完全反映する。
+Python プロセスを subprocess で再起動して、編集済の .py / 設定ファイルを
+再読込するための tool。Python は import 時に sys.modules にキャッシュする
+ため、ロード済の .py を編集しても実行中の関数オブジェクトは古いまま
+(importlib.reload は参照バインド残存問題で実用困難)。プロセス丸ごと
+入替えで完全反映する。
+
+必要な場面:
+  - ロード済の Python モジュール (.py) の編集
+  - 起動時に読まれる設定ファイル (settings.json / .mcp.json 等) の編集
+  - venv にインストール済のライブラリの更新 (requirements.txt 経由含む)
+
+不要な場面:
+  - 新規 .py ファイルの作成 (次回 import で自然反映)
+  - 既存ファイルへのコメントのみの追加 (動作に影響しない)
+  - 毎回読み直されるデータファイル (state.json / *.jsonl 等) の編集
 
 state / memory / WM snapshot は disk に永続化されているため、新プロセスが
-load_state で再構成して cycle_id 等を継続する (開発者目線で「連続した自分」、
-iku 目線では別個体扱いも自由、PLAN §1-3)。
+load_state で再構成して cycle_id 等を継続する。
 
 呼出経路 (PLAN §8-2 literal):
   1. request_approval で承認取得 (Y なら続行、N なら見送り)
@@ -30,7 +39,7 @@ from core.ws_server import request_approval, stop_ws_server
 
 
 def _reboot(args: dict) -> str:
-    """プロセス再起動 (身体改変反映)。
+    """Python プロセスを再起動して、編集済の .py / 設定ファイルを再読込する。
 
     Args:
         args: 任意の dict。args.get("message") を承認 preview に挿入する。
@@ -40,8 +49,8 @@ def _reboot(args: dict) -> str:
         本関数からは return しない (新プロセスが起動して旧プロセスは終了)。
     """
     preview = (
-        "[reboot] プロセスを再起動して身体改変 "
-        "(core/* / tools/* / main.py / .mcp.json) を反映します"
+        "[reboot] Python プロセスを再起動して、編集済のモジュール / "
+        "設定ファイルを再読込します"
     )
     msg = args.get("message")
     if msg:

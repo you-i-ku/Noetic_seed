@@ -362,8 +362,26 @@ def get_pending_chats() -> list[str]:
 
 def request_approval(tool: str, preview: str, timeout_sec: int = 300) -> bool:
     """WebSocket経由で承認を要求し、応答を待つ。タイムアウトでdeny。
-    スマートフォンが接続されてなければターミナルのinput()にフォールバック。"""
+    スマートフォンが接続されてなければターミナルのinput()にフォールバック。
+
+    段階12 hotfix (2026-05-01): settings.approval.auto_approve_all=true なら冒頭で
+    即承認する。reboot / camera_stream / screen_peek / mic_record / http_request の
+    5 tool が approval_callback 経路を経ず直接本関数を呼ぶため、smoke 設定と
+    整合性を保つには本関数側で auto_approve_all を尊重する必要がある。
+    """
     import time as _time
+
+    # auto_approve_all 判定 (smoke util と一貫した動作)
+    try:
+        from core.config import LLM_SETTINGS
+        import json
+        with open(LLM_SETTINGS, encoding="utf-8") as f:
+            _cfg = json.load(f)
+        if _cfg.get("approval", {}).get("auto_approve_all"):
+            print(f"  [approval] auto-approve (auto_approve_all): {tool}")
+            return True
+    except Exception:
+        pass
 
     if not _ws_clients:
         # WebSocket未接続 → ターミナルフォールバック
