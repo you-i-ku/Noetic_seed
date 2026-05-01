@@ -51,6 +51,10 @@
     "strict_mode": true,
     "_comment": "tools[].function.strict=true を OpenAI 互換 provider (LM Studio 等) に渡し、required field を grammar 強制させる。LM Studio docs では tools 経路の strict 明記なしのため smoke 実証中。ignore 時も無害、副作用観測されたら false に切替"
   },
+  "x_login": {
+    "skip_prompt": true,
+    "_comment": "true で起動時 / Level 3 到達時の input('Xにログインする？') を skip (= 自動 'n' 扱い)。smoke 中の stdin tty ハング回避用。本番 HITL 維持なら false に切替"
+  },
   "prompt": {
     "observation_label_format": "structured_compact"
   },

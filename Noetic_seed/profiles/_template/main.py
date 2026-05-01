@@ -247,10 +247,14 @@ def main():
     # 起動時Xセッションチェック
     if state.get("tool_level", 0) >= 3 and not X_SESSION_PATH.exists():
         print("\n  [X] Level 3以上ですがXセッションがありません。")
-        try:
-            answer = input("  Xにログインする？ [y/N]: ").strip().lower()
-        except EOFError:
+        if llm_cfg.get("x_login", {}).get("skip_prompt", False):
+            print("  [X] x_login.skip_prompt=true、自動 skip")
             answer = "n"
+        else:
+            try:
+                answer = input("  Xにログインする？ [y/N]: ").strip().lower()
+            except EOFError:
+                answer = "n"
         if answer == "y":
             _x_do_login()
         else:
@@ -486,10 +490,14 @@ def main():
             if new_lv == 3 and not X_SESSION_PATH.exists():
                 print("\n  [X] Level 3到達: X/Elythツールが解放されました。")
                 print("  [X] Xセッションがありません。ログインしますか？")
-                try:
-                    answer = input("  Xにログインする？ [y/N]: ").strip().lower()
-                except EOFError:
+                if llm_cfg.get("x_login", {}).get("skip_prompt", False):
+                    print("  [X] x_login.skip_prompt=true、自動 skip")
                     answer = "n"
+                else:
+                    try:
+                        answer = input("  Xにログインする？ [y/N]: ").strip().lower()
+                    except EOFError:
+                        answer = "n"
                 if answer == "y":
                     _x_do_login()
                 else:
