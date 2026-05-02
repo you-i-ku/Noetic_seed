@@ -734,6 +734,31 @@ def _archive_entries(entries: list):
     _update_jsonl_index("subjective_entries.jsonl", entries)
 
 
+def _record_entry(state: dict, entry: dict) -> None:
+    """段階13 Phase 0.1.C: entry を archive + raw/subj jsonl + in-memory views に同期記録。
+
+    呼出側 (main.py × 5 site) を 1 行に集約 (Option A 精神継承、handoff memo
+    line 273-274、0.1.A の `_archive_entries` 内部集約と同流儀)。0.1.E で
+    state["log"] 撤去時に本 helper の 1 行削除で全 site 反映 = 片付け楽。
+
+    挙動:
+      1. _archive_entries([entry]): archive_YYYYMMDD.jsonl + raw_events.jsonl
+         + subjective_entries.jsonl + index.json (0.1.A dual emit + 0.1.B index)
+      2. state["log"].append(entry): 旧 in-memory log (0.1.E まで temporary、
+         既存 read 経路 18+ 箇所が 0.1.D で切替されるまで並走互換)
+      3. state["raw_events"].append(raw_part) + state["subjective_entries"]
+         .append(subj_part): 新 in-memory view を cycle 中 sync (起動時
+         _rebuild_views_from_jsonl と同じ partition で更新)
+
+    save_state は呼出側責務 (site 毎に呼ぶ/呼ばない判断が異なる)。
+    """
+    _archive_entries([entry])
+    state["log"].append(entry)
+    raw_part, subj_part, _ = _split_entry_fields(entry)
+    state["raw_events"].append(raw_part)
+    state["subjective_entries"].append(subj_part)
+
+
 def _summarize_entries(entries: list, label: str = "要約") -> dict:
     """LLMでエントリ群を要約して1件のsummaryエントリを返す。
     外部入力（[external]）は原文に近い形で保持する方針。"""

@@ -118,7 +118,7 @@ from core.entropy import (
     ENTROPY_PARAMS, tick_entropy, calc_dynamic_threshold,
     calc_pressure_signals, apply_negentropy
 )
-from core.memory import _archive_entries, maybe_compress_log, get_relevant_memories, format_memories_for_prompt
+from core.memory import _record_entry, maybe_compress_log, get_relevant_memories, format_memories_for_prompt
 from core.perspective import make_perspective
 from core.reflection import should_reflect, reflect
 from core.prompt import build_prompt_propose
@@ -603,8 +603,7 @@ def main():
                 ),
                 "perspective": make_perspective(),  # 段階11-A: system 処理は self/actual
             }
-            _archive_entries([_sys_end_entry])
-            state["log"].append(_sys_end_entry)
+            _record_entry(state, _sys_end_entry)
             save_state(state)
 
         try:
@@ -1011,8 +1010,7 @@ def main():
                         pt.get("prediction_error_ec"),
                     )
 
-        _archive_entries([entry])
-        state["log"].append(entry)
+        _record_entry(state, entry)
 
         maybe_compress_log(state, set(TOOLS.keys()))
 
@@ -1116,8 +1114,7 @@ def main():
                     # Noetic 主体で決定済の中立 id、feedback_no_user_assistant_frame 整合)
                     "perspective": make_perspective(viewer=_channel_id, viewer_type="actual"),
                 }
-                _archive_entries([_ext_entry])
-                state["log"].append(_ext_entry)
+                _record_entry(state, _ext_entry)
                 # 未応答カウンター (pressure 経路で AI に応答を促す)
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
                 # 段階8 改善5 (案 5-A): 外部入力 → iku 内部応答意図 pending 化。
@@ -1185,8 +1182,7 @@ def main():
                             # device_input 側と同じ方針で対称性維持。
                             "perspective": make_perspective(viewer=_channel_id, viewer_type="actual"),
                         }
-                        _archive_entries([_ext_entry])
-                        state["log"].append(_ext_entry)
+                        _record_entry(state, _ext_entry)
                         state["unresponded_external_count"] = (
                             state.get("unresponded_external_count", 0) + 1
                         )
@@ -1247,8 +1243,7 @@ def main():
                         "result": str(_tres),
                         "perspective": make_perspective(),  # 段階11-A: test タブ実行も Noetic 内部扱いで self/actual
                     }
-                    _archive_entries([_test_entry])
-                    state["log"].append(_test_entry)
+                    _record_entry(state, _test_entry)
                     save_state(state)
                 except Exception as _te:
                     _eline = f"  [test] エラー: {_te}"
