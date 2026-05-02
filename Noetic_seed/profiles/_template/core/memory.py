@@ -19,6 +19,27 @@ from core.perspective import Perspective, default_self_perspective
 UNTAGGED_NETWORK = "_untagged"
 
 
+# === 段階13 Phase 0.1.A: raw / subjective 二層分離 field set ===
+# 判断軸 7 (PLAN §20-2 / handoff memo) に従って entry field を分配する。
+# id は両側に重複、perspective / to_perspective は partition meta として両側保持。
+# 未知 field は raw 寄せ + _unclassified_fields マーカー (SCHEMA_META_FIELDS) で
+# 明示し、schema_warnings.jsonl に記録する (cap SCHEMA_WARNINGS_CAP 超で archive)。
+RAW_FIELDS = frozenset({
+    "id", "time", "channel", "tool", "args", "result", "type",
+})
+SUBJECTIVE_FIELDS = frozenset({
+    "id", "intent", "expect",
+    "e1", "e2", "e3", "e4",
+    "predicted_e2", "predicted_ec",
+    "actual_e2", "actual_ec",
+    "prediction_error", "prediction_error_ec",
+    "per_tool", "parse_error",
+})
+PARTITION_META_FIELDS = frozenset({"perspective", "to_perspective"})
+SCHEMA_META_FIELDS = frozenset({"_unclassified_fields"})
+SCHEMA_WARNINGS_CAP = 1000
+
+
 def _network_file(network):
     """network jsonl ファイルパスを返す。
 
@@ -569,8 +590,92 @@ def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
     return "\n".join(lines)
 
 
+def _split_entry_fields(entry: dict):
+    """段階13 Phase 0.1.A: entry を raw / subjective に分配する。
+
+    判断軸 7 に従って RAW_FIELDS は raw 側、SUBJECTIVE_FIELDS は subjective 側、
+    PARTITION_META_FIELDS (perspective / to_perspective) は両側に重複保持する。
+    未知 field は raw 寄せで保全 + raw["_unclassified_fields"] にリスト化して
+    マーカーを刻む (default policy: raw 寄せ、PLAN §20-2 軸 6 「迷ったら raw 側」)。
+
+    Returns:
+        (raw_part, subjective_part, unknown_fields)
+    """
+    raw = {k: v for k, v in entry.items() if k in RAW_FIELDS}
+    subj = {k: v for k, v in entry.items() if k in SUBJECTIVE_FIELDS}
+    for k in PARTITION_META_FIELDS:
+        if k in entry:
+            raw[k] = entry[k]
+            subj[k] = entry[k]
+    known = RAW_FIELDS | SUBJECTIVE_FIELDS | PARTITION_META_FIELDS | SCHEMA_META_FIELDS
+    unknown = [k for k in entry.keys() if k not in known]
+    if unknown:
+        for k in unknown:
+            raw[k] = entry[k]
+        raw["_unclassified_fields"] = list(unknown)
+    return raw, subj, unknown
+
+
+def _emit_raw_event(raw_part: dict):
+    """段階13 Phase 0.1.A: raw event を memory/raw_events.jsonl に append-only で記録。
+
+    raw_events は source of truth (PLAN §18-2)、永続維持・compaction 対象外。
+    """
+    MEMORY_DIR.mkdir(exist_ok=True)
+    target = MEMORY_DIR / "raw_events.jsonl"
+    with open(target, "a", encoding="utf-8") as f:
+        f.write(json.dumps(raw_part, ensure_ascii=False) + "\n")
+
+
+def _emit_subjective_entry(subjective_part: dict):
+    """段階13 Phase 0.1.A: subjective entry を memory/subjective_entries.jsonl に append。
+
+    subjective_entries は LLM 解釈の materialized view (PLAN §18-2)、
+    rebuild 可・compaction 対象 (Phase 0.1.B 以降で扱う、本 phase は append のみ)。
+    """
+    MEMORY_DIR.mkdir(exist_ok=True)
+    target = MEMORY_DIR / "subjective_entries.jsonl"
+    with open(target, "a", encoding="utf-8") as f:
+        f.write(json.dumps(subjective_part, ensure_ascii=False) + "\n")
+
+
+def _record_schema_warning(entry_id: str, unknown_fields: list):
+    """段階13 Phase 0.1.A: schema 未分類 field を schema_warnings.jsonl に記録。
+
+    SCHEMA_WARNINGS_CAP 件超で archive_schema_warnings.jsonl に move して
+    schema_warnings.jsonl を新規スタート (maybe_compress_log 流儀の軽量版)。
+    気付き 2 段機構の永続側 (即時 print は呼出側で実施)。
+    """
+    MEMORY_DIR.mkdir(exist_ok=True)
+    warnings_file = MEMORY_DIR / "schema_warnings.jsonl"
+    archive_file = MEMORY_DIR / "archive_schema_warnings.jsonl"
+    if warnings_file.exists():
+        try:
+            existing = warnings_file.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            existing = []
+        if len(existing) >= SCHEMA_WARNINGS_CAP:
+            with open(archive_file, "a", encoding="utf-8") as f:
+                for line in existing:
+                    if line.strip():
+                        f.write(line + "\n")
+            warnings_file.unlink()
+    record = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "entry_id": entry_id,
+        "fields": list(unknown_fields),
+    }
+    with open(warnings_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def _archive_entries(entries: list):
-    """エントリ群をmemory/archive_YYYYMMDD.jsonlに追記しindex.jsonを更新"""
+    """エントリ群をmemory/archive_YYYYMMDD.jsonlに追記しindex.jsonを更新。
+
+    段階13 Phase 0.1.A: 既存 archive_YYYYMMDD 経路は 0.1.E 完了まで温存。
+    並走で raw_events.jsonl + subjective_entries.jsonl への dual emit を行う
+    (PLAN §18-2 段階7 materialized view パターン)。
+    """
     MEMORY_DIR.mkdir(exist_ok=True)
     today = datetime.now().strftime("%Y%m%d")
     archive_file = MEMORY_DIR / f"archive_{today}.jsonl"
@@ -593,6 +698,18 @@ def _archive_entries(entries: list):
     if entries:
         index[fname]["to"] = entries[-1].get("time", "")
     index_file.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 段階13 Phase 0.1.A: raw / subjective dual emit (並走経路)
+    for entry in entries:
+        raw_part, subj_part, unknown = _split_entry_fields(entry)
+        if unknown:
+            print(
+                f"[schema] ★ unclassified fields: {unknown} "
+                f"(id={entry.get('id', '?')})"
+            )
+            _record_schema_warning(str(entry.get("id", "")), unknown)
+        _emit_raw_event(raw_part)
+        _emit_subjective_entry(subj_part)
 
 
 def _summarize_entries(entries: list, label: str = "要約") -> dict:

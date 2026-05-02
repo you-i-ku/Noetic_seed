@@ -77,6 +77,12 @@ def load_state() -> dict:
             data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             if "log" not in data:
                 data["log"] = []
+            # 段階13 Phase 0.1.A: raw / subjective 二層分離 (state["log"] と並走、
+            # 0.1.E 完了で state["log"] は撤去予定)
+            if "raw_events" not in data:
+                data["raw_events"] = []
+            if "subjective_entries" not in data:
+                data["subjective_entries"] = []
             if "self" not in data:
                 data["self"] = {"name": _name}
             elif "name" not in data["self"]:
@@ -131,7 +137,7 @@ def load_state() -> dict:
         except json.JSONDecodeError:
             pass
     from core.world_model import init_world_model
-    return {"log": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
+    return {"log": [], "raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
 
 
 def save_state(state: dict):
