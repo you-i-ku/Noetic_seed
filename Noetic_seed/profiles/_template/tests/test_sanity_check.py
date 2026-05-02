@@ -4,6 +4,7 @@
   - _check_state_json: 正常 / JSON 破損 / 必須キー欠落 / 不存在 (初回起動)
   - _check_memory_jsons: 正常 / 破損 JSON あり / memory/ 不存在 (初回起動)
   - _check_imports: 実 module を mock (importlib + sys.modules)
+  - _enumerate_runtime_modules: 実 walk + package broken 検出 (Issue 5 fix)
   - enforce_sanity_check: 成功経路 / 失敗 + revert 成功 / 失敗 + stash なし /
     auto_revert=False 失敗
 
@@ -14,6 +15,7 @@ _try_auto_revert_from_stash を mock してフロー検証する。
   cd Noetic_seed/profiles/_template
   python tests/test_sanity_check.py
 """
+import importlib
 import json
 import sys
 import tempfile
@@ -27,6 +29,8 @@ from core.sanity_check import (
     SanityCheckError,
     _check_state_json,
     _check_memory_jsons,
+    _check_imports,
+    _enumerate_runtime_modules,
     enforce_sanity_check,
 )
 
@@ -129,6 +133,83 @@ def test_memory_dir_absent():
         return _assert(False, f"raise 想定外: {e}")
 
 
+def test_enumerate_runtime_modules_lists_known_files():
+    """Issue 5 fix (2026-05-02): _enumerate_runtime_modules が
+    core/runtime/ 配下の既知 module を含む list を返すか (実 walk)。
+    """
+    print("== _enumerate_runtime_modules: core.runtime 配下を実列挙 ==")
+    modules = _enumerate_runtime_modules()
+    expected_present = (
+        "core.runtime.hooks",
+        "core.runtime.permissions",
+        "core.runtime.config",
+    )
+    return all([
+        _assert(isinstance(modules, list), "list 型を返す"),
+        _assert(
+            all(m in modules for m in expected_present),
+            f"既知の runtime module を含む (期待: {expected_present}, "
+            f"実測 {len(modules)} 件)",
+        ),
+        _assert(
+            all(m.startswith("core.runtime.") for m in modules),
+            "全 module が 'core.runtime.' prefix",
+        ),
+    ])
+
+
+def test_enumerate_runtime_pkg_import_failure_raises():
+    """core.runtime package 自体の import 失敗 → SanityCheckError raise。"""
+    print("== _enumerate_runtime_modules: package import 失敗で raise ==")
+
+    def fake_import(name):
+        if name == "core.runtime":
+            raise ImportError("simulate package broken")
+        return importlib.import_module(name)
+
+    with patch.object(sanity_check.importlib, "import_module",
+                      side_effect=fake_import):
+        try:
+            _enumerate_runtime_modules()
+            return _assert(False, "raise されるべき")
+        except SanityCheckError as e:
+            return _assert(
+                "core.runtime package" in str(e),
+                f"reason に 'core.runtime package' 含む (実測: {e})",
+            )
+
+
+def test_check_imports_runtime_module_failure_detected():
+    """Issue 5 fix の核心動作: core.runtime.* の import 失敗を検出。
+
+    旧版は hardcoded "core.controller" / "tools" のみ検査で、
+    core/runtime/util.py 等の SyntaxError を素通りさせていた (smoke12
+    シナリオ C で発覚)。Fix 後は pkgutil.iter_modules で core/runtime/
+    配下を walk して検出する。
+    """
+    print("== _check_imports: core.runtime.* の import 失敗を検出 ==")
+
+    def fake_import(name):
+        if name == "core.runtime.fake_broken":
+            raise SyntaxError("simulate broken core.runtime.* file")
+        return None  # core.controller / tools / 他は success simulate
+
+    with patch.object(sanity_check, "_enumerate_runtime_modules",
+                      return_value=["core.runtime.fake_broken"]), \
+         patch.object(sanity_check.importlib, "import_module",
+                      side_effect=fake_import), \
+         patch.object(sanity_check.importlib, "reload",
+                      return_value=None):
+        try:
+            _check_imports()
+            return _assert(False, "raise されるべき")
+        except SanityCheckError as e:
+            return _assert(
+                "core.runtime.fake_broken" in str(e),
+                f"reason に 'core.runtime.fake_broken' 含む (実測: {e})",
+            )
+
+
 def test_enforce_success_returns_none():
     print("== enforce_sanity_check 全 OK で None 返り (起動続行) ==")
     tmp = Path(tempfile.mkdtemp(prefix="noetic_sanity_enforce_"))
@@ -201,6 +282,12 @@ if __name__ == "__main__":
         ("memory/ 全 JSON 正常", test_memory_jsons_all_valid),
         ("memory/ 壊れた JSON あり", test_memory_jsons_broken),
         ("memory/ 不存在 (初回起動)", test_memory_dir_absent),
+        ("Issue 5 fix: _enumerate_runtime_modules 実列挙",
+         test_enumerate_runtime_modules_lists_known_files),
+        ("Issue 5 fix: core.runtime package import 失敗で raise",
+         test_enumerate_runtime_pkg_import_failure_raises),
+        ("Issue 5 fix: core.runtime.* import 失敗を検出",
+         test_check_imports_runtime_module_failure_detected),
         ("enforce 全 OK で続行", test_enforce_success_returns_none),
         ("enforce 失敗 + revert 成功 + 再 check 成功 で続行",
          test_enforce_failure_with_revert_success),

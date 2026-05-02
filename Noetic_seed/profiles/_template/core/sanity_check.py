@@ -21,6 +21,7 @@ iku の起動初頭で、身体 (state / memory / core / tools) の最低限の�
 """
 import importlib
 import json
+import pkgutil
 import subprocess
 import sys
 from pathlib import Path
@@ -65,14 +66,54 @@ def _check_memory_jsons(profile_root: Path) -> None:
             raise SanityCheckError(f"memory/{rel} の JSON parse 失敗: {e}")
 
 
+def _enumerate_runtime_modules() -> list:
+    """`core.runtime` package 配下のサブモジュール名を動的列挙。
+
+    Issue 5 fix (2026-05-02): `pkgutil.iter_modules` で `core/runtime/*.py` を
+    全列挙して import 検査対象に加える。range は **書換え可能 + 起動時必ず
+    通る path** に絞り、`core/` 直下 (memory.py / embedding.py 等) は対象外
+    (PEP 810 lazy import トレンド整合、副作用 import 回避)。
+
+    Returns:
+        ["core.runtime.bash_validation", "core.runtime.compaction", ...]
+
+    Raises:
+        SanityCheckError: `core.runtime` package 自体の import に失敗した場合
+            (= `core/runtime/__init__.py` が壊れている等)。
+    """
+    try:
+        runtime_pkg = importlib.import_module("core.runtime")
+    except Exception as e:
+        raise SanityCheckError(
+            f"core.runtime package の import 失敗: {type(e).__name__}: {e}"
+        )
+    return [
+        name for _, name, _ in pkgutil.iter_modules(
+            runtime_pkg.__path__, prefix="core.runtime."
+        )
+    ]
+
+
 def _check_imports() -> None:
-    """core.controller / tools が import 可能か。
+    """起動 path モジュールが import 可能か (構文エラー・import 例外検出)。
 
     既に import 済 (smoke で main.py から走る場合) は reload で再評価、
     未 import (test 環境) は新規 import_module。書換え後の構文エラーや
     import 時に raise する例外を本検査で捕捉する。
+
+    検査対象 (Issue 5 fix 2026-05-02 で範囲拡張):
+      - 既存 hardcode (起動時必ず通る fixed path):
+          core.controller / tools
+      - 動的列挙 (書換え可能 + 起動時必ず通る path):
+          core.runtime.* (pkgutil.iter_modules で `core/runtime/` 配下を walk)
+
+    `core/` 直下の memory.py / embedding.py / world_model.py 等は **lazy
+    import 設計** (LM Studio 接続 / bge-m3 model load 等の副作用) のため
+    本検査の対象外。PEP 810 lazy import (Python 2026) トレンドとも整合。
     """
-    for mod_name in ("core.controller", "tools"):
+    fixed_modules = ("core.controller", "tools")
+    runtime_modules = _enumerate_runtime_modules()
+    for mod_name in (*fixed_modules, *runtime_modules):
         try:
             if mod_name in sys.modules:
                 importlib.reload(sys.modules[mod_name])
