@@ -10,6 +10,7 @@ from tools.http_tool import http_request
 from tools.secret_tools import secret_read, secret_write
 from tools.auth_tools import auth_profile_info
 from tools.memory_graph_tool import _memory_graph
+from tools.world_fact_view_tool import _world_fact_view
 from tools.reboot import _reboot
 
 TOOLS = {
@@ -48,6 +49,7 @@ TOOLS = {
     "secret_write": {"desc": "sandbox/secrets/ に秘密情報を書き込む（承認必要）。引数: name=secret名 content=内容 intent=目的 [message=外部への説明]", "func": secret_write},
     "auth_profile_info": {"desc": "認証プロファイルのメタ情報を取得。name未指定で一覧、name指定で詳細（機密フィールドtoken/key/secret等は隠される）。引数: [name=プロファイル名]", "func": auth_profile_info},
     "memory_graph": {"desc": "memory entry と self を node とした graph 構造を JSON で返す。view=ego (self 中心 + edges)、global (cluster + topology summary)、both (両方の重畳)。引数: [view=ego/global/both default=ego] [depth=2 (default)]", "func": _memory_graph},
+    "world_fact_view": {"desc": "raw_events.jsonl (tool 実行 + 結果の immutable 履歴 = 物理世界の fact) を view する。memory_graph (subjective layer) と並走の raw layer 経路、過去の事実確認用。引数: [mode=recent/by_tool/by_channel default=recent] [filter_tool=tool名] [filter_channel=channel名] [limit=件数 default=20 max=100]", "func": _world_fact_view},
     "reboot":       {"desc": "Python プロセスを再起動して、編集済の .py / 設定ファイルを再読込する (Python の import キャッシュにより、ロード済のファイルを編集しても実行中のコードに反映されないため)。必要: ロード済の Python モジュール、起動時に読まれる設定ファイル (settings.json / .mcp.json 等)、venv にインストール済のライブラリを編集した時。不要: 新規ファイル作成 (次回 import で読まれる)、既存ファイルへのコメントのみの追加、毎回読み直されるデータファイル (state.json / *.jsonl 等) の編集。state / memory / WM は disk から再読込されるため引き継がれる。引数: [message=外部への説明]", "func": _reboot},
 }
 
@@ -63,8 +65,8 @@ _LV3_TOOLS = (
 )
 LEVEL_TOOLS = {
     0: {"glob_search", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio", "bash"},
-    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_graph", "reflect", "output_display", "view_image", "listen_audio", "bash"},
-    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "memory_graph", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio", "bash", "reboot"},
+    1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_graph", "world_fact_view", "reflect", "output_display", "view_image", "listen_audio", "bash"},
+    2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "memory_graph", "world_fact_view", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio", "bash", "reboot"},
     3: _LV3_TOOLS | {"bash"},
     4: _LV3_TOOLS | {"create_tool", "bash"},
     # 段階12 Step 7: self_modify 撤廃により Level 5 = Level 6 = TOOLS 全部。
