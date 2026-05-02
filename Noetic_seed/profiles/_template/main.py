@@ -119,6 +119,7 @@ from core.entropy import (
     calc_pressure_signals, apply_negentropy
 )
 from core.memory import _record_entry, maybe_compress_log, get_relevant_memories, format_memories_for_prompt
+from core import event_emitter
 from core.perspective import make_perspective
 from core.reflection import should_reflect, reflect
 from core.prompt import build_prompt_propose
@@ -220,6 +221,10 @@ def main():
     if _p_dropped:
         print(f"  [migration] 段階10.5 Fix 2: 旧形式 pending {_p_dropped} 個を drop (content_observable 欠落)")
     save_state(state)
+    # 段階13 Phase 0.2: event_emitter observer pattern。default observer として
+    # _record_entry (jsonl emit + state view sync) を subscribe。Phase 0.4 で
+    # check_raw_subjective_gap 等の追加 observer もここに 1 行で並ぶ予定。
+    event_emitter.subscribe(_record_entry)
     print(f"session: {state['session_id']}  cycle_id: {state['cycle_id']}")
     broadcast_state(state)
 
@@ -603,7 +608,7 @@ def main():
                 ),
                 "perspective": make_perspective(),  # 段階11-A: system 処理は self/actual
             }
-            _record_entry(state, _sys_end_entry)
+            event_emitter.fire_event(state, _sys_end_entry)
             save_state(state)
 
         try:
@@ -1010,7 +1015,7 @@ def main():
                         pt.get("prediction_error_ec"),
                     )
 
-        _record_entry(state, entry)
+        event_emitter.fire_event(state, entry)
 
         maybe_compress_log(state, set(TOOLS.keys()))
 
@@ -1117,7 +1122,7 @@ def main():
                     # Noetic 主体で決定済の中立 id、feedback_no_user_assistant_frame 整合)
                     "perspective": make_perspective(viewer=_channel_id, viewer_type="actual"),
                 }
-                _record_entry(state, _ext_entry)
+                event_emitter.fire_event(state, _ext_entry)
                 # 未応答カウンター (pressure 経路で AI に応答を促す)
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
                 # 段階8 改善5 (案 5-A): 外部入力 → iku 内部応答意図 pending 化。
@@ -1185,7 +1190,7 @@ def main():
                             # device_input 側と同じ方針で対称性維持。
                             "perspective": make_perspective(viewer=_channel_id, viewer_type="actual"),
                         }
-                        _record_entry(state, _ext_entry)
+                        event_emitter.fire_event(state, _ext_entry)
                         state["unresponded_external_count"] = (
                             state.get("unresponded_external_count", 0) + 1
                         )
@@ -1246,7 +1251,7 @@ def main():
                         "result": str(_tres),
                         "perspective": make_perspective(),  # 段階11-A: test タブ実行も Noetic 内部扱いで self/actual
                     }
-                    _record_entry(state, _test_entry)
+                    event_emitter.fire_event(state, _test_entry)
                     save_state(state)
                 except Exception as _te:
                     _eline = f"  [test] エラー: {_te}"
