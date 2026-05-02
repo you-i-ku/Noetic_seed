@@ -37,7 +37,7 @@ def test_medium_prediction_propagates_through_controller():
     print("== Medium prediction (candidate.prediction) が controller の乗算に反映 ==")
     wm = init_world_model()
     state = {
-        "energy": 50, "entropy": 0.65, "log": [], "pending": [],
+        "energy": 50, "entropy": 0.65, "raw_events": [], "subjective_entries": [], "pending": [],
         "world_model": wm,
     }
     ctrl = {"tool_rank": {"output_display": 60, "wait": 40}}
@@ -92,7 +92,7 @@ def test_high_pe2_candidate_has_higher_weight_share():
     print("== 高 pe2 候補は低 pe2 候補より重み share が大きい ==")
     wm = init_world_model()
     state = {
-        "energy": 50, "entropy": 0.65, "log": [], "pending": [],
+        "energy": 50, "entropy": 0.65, "raw_events": [], "subjective_entries": [], "pending": [],
         "world_model": wm,
     }
     ctrl = {"tool_rank": {"tool_a": 50, "tool_b": 50}}
@@ -123,7 +123,7 @@ def test_missing_prediction_uses_light_fallback():
     print("== candidate.prediction なし → Light fallback で pe2 補填 ==")
     wm = init_world_model()
     state = {
-        "energy": 50, "entropy": 0.65, "log": [], "pending": [],
+        "energy": 50, "entropy": 0.65, "raw_events": [], "subjective_entries": [], "pending": [],
         "world_model": wm,
     }
     ctrl = {"tool_rank": {"output_display": 60}}

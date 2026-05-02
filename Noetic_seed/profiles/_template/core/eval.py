@@ -208,7 +208,9 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
         score += 0.3 * (old_pending - new_pending)
 
     # --- 行動の意味的新規性（外界作用 or 内省の繰り返し検出）---
-    log = state_after.get("log", [])
+    # 段階13 Phase 0.1.D: tool (raw) + intent + result の両層参照 = merge view
+    from core.state import merge_log_view
+    log = merge_log_view(state_after)
     for tn in tool_names:
         if tn not in ACTIONABLE_TOOLS:
             continue

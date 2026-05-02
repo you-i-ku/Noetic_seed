@@ -78,6 +78,48 @@ def _rebuild_views_from_jsonl(state: dict) -> None:
         state[key] = rebuilt
 
 
+def merge_log_view(state: dict) -> list:
+    """段階13 Phase 0.1.D: raw_events と subjective_entries を id で zip した
+    合本 view を返す。controller / prompt 等、両層の field を同時に見たい
+    consumer 用 (旧 state["log"] 撤去後の代替)。
+
+    哲学整合: raw (immutable, source of truth) と subjective (mutable, materialized
+    view) は別 jsonl で永続、同 id で対応関係を保つ。merge は read 時のみの
+    on-the-fly 合成、永続化しない (段階7 materialized view pattern 同精神)。
+
+    片側のみ存在する id (raw のみ / subjective のみ) は欠落 field を空 dict 補完で
+    そのまま含める (defensive、起動直後 jsonl 同期前等の過渡期向け)。
+
+    注意 (Codex review 0.1.D Hypothesis):
+      - id collision (タイムスタンプ modulo 系の id 衝突) が起きると、raw_by_id
+        辞書化で earlier raw event が silently 上書きされる。現状 id 生成は
+        cycle_id + ms (main.py:606/1014/1119/1188/1250) で衝突確率は実質ゼロ
+        だが、id 生成器側で uniqueness を保つ前提で本 helper は dict 構築を採用。
+      - raw-only entry (subjective 未生成) は subjective 主軸の後に append される
+        ため、`[-N:]` 系 reader からは「最新」のように見える。過渡期 only の状態
+        だが、raw-only が大量残存する状況なら別途 sort 戦略を検討。
+    """
+    raw_by_id = {e.get("id"): e for e in state.get("raw_events", []) if e.get("id")}
+    subj_by_id = {e.get("id"): e for e in state.get("subjective_entries", []) if e.get("id")}
+    merged: list = []
+    seen: set = set()
+    # subjective_entries の順序を主軸にする (compaction 対象 = 「iku の経験」順)
+    for s in state.get("subjective_entries", []):
+        sid = s.get("id")
+        if sid is None:
+            merged.append(dict(s))
+            continue
+        r = raw_by_id.get(sid, {})
+        merged.append({**r, **s})
+        seen.add(sid)
+    # raw のみ存在する entry (subjective 未生成、過渡期 only) を末尾に
+    for r in state.get("raw_events", []):
+        rid = r.get("id")
+        if rid is not None and rid not in seen:
+            merged.append(dict(r))
+    return merged
+
+
 def _atomic_write(path, text: str):
     """tmp ファイルに書いてから os.replace でアトミックに差し替える。"""
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -112,14 +154,16 @@ def load_state() -> dict:
     if STATE_FILE.exists():
         try:
             data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            if "log" not in data:
-                data["log"] = []
-            # 段階13 Phase 0.1.A: raw / subjective 二層分離 (state["log"] と並走、
-            # 0.1.E 完了で state["log"] は撤去予定)
+            # 段階13 Phase 0.1.D: state["log"] 撤去済。raw_events.jsonl (immutable
+            # source of truth) + subjective_entries.jsonl (materialized view、
+            # compaction 対象) の二層分離。in-memory view は _rebuild_views_from_jsonl
+            # で起動時に必ず jsonl から rebuild する (PLAN §20-2 #4)。
             if "raw_events" not in data:
                 data["raw_events"] = []
             if "subjective_entries" not in data:
                 data["subjective_entries"] = []
+            # 旧 state["log"] が残ってる profile は無視 (jsonl が source of truth)
+            data.pop("log", None)
             if "self" not in data:
                 data["self"] = {"name": _name}
             elif "name" not in data["self"]:
@@ -177,7 +221,7 @@ def load_state() -> dict:
         except json.JSONDecodeError:
             pass
     from core.world_model import init_world_model
-    fresh = {"log": [], "raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
+    fresh = {"raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
     # 段階13 Phase 0.1.B: state.json が無くても jsonl があれば rebuild
     # (state.json 削除 + memory/ 残存ケースの safety net)
     _rebuild_views_from_jsonl(fresh)

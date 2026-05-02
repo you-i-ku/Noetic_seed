@@ -5,7 +5,8 @@ iku の起動初頭で、身体 (state / memory / core / tools) の最低限の�
 自動復元を 1 回試行、それでも失敗なら手動介入を要求して exit(1)。
 
 検査項目 (PLAN §10-1):
-  1. state.json が JSON parse 可能 + 必須キー (cycle_id / tool_level / log)
+  1. state.json が JSON parse 可能 + 必須キー (cycle_id / tool_level /
+     subjective_entries) (段階13 Phase 0.1.D で log → subjective_entries 移行)
   2. memory/ 配下の JSON が全て parse 可能
   3. import テスト: core.controller / tools が import で副作用なく成功
 
@@ -27,7 +28,10 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
-REQUIRED_STATE_KEYS: Tuple[str, ...] = ("cycle_id", "tool_level", "log")
+# 段階13 Phase 0.1.D: 新 schema 強制 — subjective_entries を必須化 (旧 log は撤去済)。
+# 既存プロファイル (log のみ存在) は本 check で fail する設計、新規 profile 前提
+# (smoke 慣習 = `_template_smokeN` clean profile)。ゆう判断「migration 不要」整合。
+REQUIRED_STATE_KEYS: Tuple[str, ...] = ("cycle_id", "tool_level", "subjective_entries")
 
 
 class SanityCheckError(Exception):

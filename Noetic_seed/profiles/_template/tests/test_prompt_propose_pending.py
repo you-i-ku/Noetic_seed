@@ -33,7 +33,7 @@ def _assert(cond, label):
 def _fresh_state(pending=None):
     return {
         "cycle_id": 20,
-        "log": [],
+        "raw_events": [], "subjective_entries": [],
         "pending": pending or [],
         "self": {"name": "iku"},
         "energy": 50,

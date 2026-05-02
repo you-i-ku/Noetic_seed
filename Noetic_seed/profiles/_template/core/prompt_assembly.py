@@ -122,12 +122,15 @@ def build_log_block(state: dict, budget_tok: Optional[int] = None) -> str:
     ⚠️ マーク)。LLM に事実を明示するだけで命令はしない (feedback_llm_as_brain 整合)。
 
     Args:
-        state: state dict (log list を含む)
+        state: state dict (raw_events / subjective_entries を含む、段階13 Phase
+            0.1.D で旧 log は撤去、merge_log_view で合本 view を取得)
         budget_tok: log block に使えるトークン予算。None で _calc_log_budget。
     """
     if budget_tok is None:
         budget_tok = _calc_log_budget()
-    log = state.get("log", [])
+    # 段階13 Phase 0.1.D: tool/args/result + intent + e1-4 両層必要 = merge view
+    from core.state import merge_log_view
+    log = merge_log_view(state)
     body = _pack_log_block(log, budget_tok, with_evals=True)
     explainer = (
         "(表示規約: args:{...} は tool 呼出引数 cap 200、"

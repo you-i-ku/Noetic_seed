@@ -53,7 +53,7 @@ def test_tag_filter_default_returns_all_networks(tmp_path: Path):
                  metadata={}, _auto_metadata=False)
 
     # state に最近 intent を入れる (query 駆動のため)
-    state = {"log": [{"intent": "hybrid test"}]}
+    state = {"subjective_entries": [{"intent": "hybrid test"}]}
     results = get_relevant_memories(state, limit=10)
 
     networks_found = {m.get("network") for m in results}
@@ -78,7 +78,7 @@ def test_tag_filter_specific_tag_only(tmp_path: Path):
     memory_store(network=None, content="untagged non-target text", metadata={},
                  _auto_metadata=False)
 
-    state = {"log": [{"intent": "target text"}]}
+    state = {"subjective_entries": [{"intent": "target text"}]}
     results = get_relevant_memories(state, limit=10, tag_filter=["opinion"])
 
     networks_found = {m.get("network") for m in results if m.get("network") != "external"}
@@ -98,7 +98,7 @@ def test_tag_filter_untagged_only(tmp_path: Path):
                  _auto_metadata=False)
     memory_store(network=None, content="untagged target memory", metadata={}, _auto_metadata=False)
 
-    state = {"log": [{"intent": "target memory"}]}
+    state = {"subjective_entries": [{"intent": "target memory"}]}
     results = get_relevant_memories(state, limit=10, tag_filter=[UNTAGGED_NETWORK])
 
     networks_found = {m.get("network") for m in results if m.get("network") != "external"}
@@ -117,7 +117,7 @@ def test_tag_filter_signature_with_use_links(tmp_path: Path):
     memory_store(network="opinion", content="signature combo test", metadata={"confidence": 0.8},
                  _auto_metadata=False)
 
-    state = {"log": [{"intent": "signature combo"}]}
+    state = {"subjective_entries": [{"intent": "signature combo"}]}
     # tag_filter + use_links 共存できる (signature 受領 + crash しない)
     results = get_relevant_memories(state, limit=5, use_links=True, tag_filter=["opinion"])
     _assert(isinstance(results, list), "戻り値は list")
@@ -134,7 +134,7 @@ def test_tag_filter_backward_compat(tmp_path: Path):
     memory_store(network="opinion", content="backward compat test", metadata={"confidence": 0.8},
                  _auto_metadata=False)
 
-    state = {"log": [{"intent": "backward compat"}]}
+    state = {"subjective_entries": [{"intent": "backward compat"}]}
     # tag_filter 渡さない → default None → 全 networks 横断
     results = get_relevant_memories(state, limit=5)
     _assert(isinstance(results, list), "tag_filter なしで戻り値は list")
@@ -154,7 +154,7 @@ def test_tag_filter_empty_list_falls_back_to_all(tmp_path: Path):
     memory_store(network=None, content="untagged empty list fallback", metadata={},
                  _auto_metadata=False)
 
-    state = {"log": [{"intent": "empty list fallback"}]}
+    state = {"subjective_entries": [{"intent": "empty list fallback"}]}
     results = get_relevant_memories(state, limit=10, tag_filter=[])
 
     # 空 list は memory_network_search 内 `if not networks` 経路 → 全 networks

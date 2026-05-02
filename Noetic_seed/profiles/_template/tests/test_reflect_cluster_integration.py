@@ -117,7 +117,7 @@ def test_parse_notes_to_untagged_with_state_hook():
 
     refl.memory_store = mock_memory_store
     try:
-        state = {"log": [], "self": {"name": "iku"}}
+        state = {"raw_events": [], "subjective_entries": [], "self": {"name": "iku"}}
         result = _parse_reflection("""
 NOTES:
 - 観察には視点がある (confidence: 0.8)
@@ -178,7 +178,7 @@ def test_parse_ignores_old_opinions_entities():
 
     refl.memory_store = mock_memory_store
     try:
-        state = {"log": [], "self": {}}
+        state = {"raw_events": [], "subjective_entries": [], "self": {}}
         result = _parse_reflection("""
 OPINIONS:
 - 旧形式の主張 (confidence: 0.7)
@@ -206,7 +206,7 @@ def test_return_dict_structure():
     orig_ms = refl.memory_store
     refl.memory_store = lambda *a, **kw: {"id": "mock"}
     try:
-        state = {"log": [], "self": {}}
+        state = {"raw_events": [], "subjective_entries": [], "self": {}}
         result = _parse_reflection("NOTES:\n- 気づき\n", state)
         return all([
             _assert("notes" in result, "notes キー存在"),

@@ -373,7 +373,7 @@ def _build_minimal_controller_args(state_overrides: dict = None):
     """controller() を呼ぶための最小 mock 引数セット."""
     from tools import TOOLS, LEVEL_TOOLS
     state = {
-        "log": [],
+        "raw_events": [], "subjective_entries": [],
         "energy": 50,
         "files_read": ["file1", "file2", "file3"],   # tool_level >=2 確保
         "files_written": ["w1", "w2"],

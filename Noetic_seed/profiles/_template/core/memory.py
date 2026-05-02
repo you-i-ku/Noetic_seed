@@ -435,7 +435,7 @@ def get_relevant_memories(
       use_links=True と組み合わせて 3 経路 (semantic / link / tag-filtered)
       hybrid retrieval が成立。経路別 top-k=5 / 統合 top-k=8 (PLAN §11-1)。
     """
-    recent_intents = [e.get("intent", "") for e in state.get("log", [])[-5:] if e.get("intent")]
+    recent_intents = [e.get("intent", "") for e in state.get("subjective_entries", [])[-5:] if e.get("intent")]
 
     # archive からの最近の [external] 入力を優先的に取得
     external_mems = _recent_externals_from_archive(limit=3)
@@ -735,25 +735,21 @@ def _archive_entries(entries: list):
 
 
 def _record_entry(state: dict, entry: dict) -> None:
-    """段階13 Phase 0.1.C: entry を archive + raw/subj jsonl + in-memory views に同期記録。
+    """段階13 Phase 0.1.D: entry を archive + raw/subj jsonl + in-memory views に同期記録。
 
-    呼出側 (main.py × 5 site) を 1 行に集約 (Option A 精神継承、handoff memo
-    line 273-274、0.1.A の `_archive_entries` 内部集約と同流儀)。0.1.E で
-    state["log"] 撤去時に本 helper の 1 行削除で全 site 反映 = 片付け楽。
+    呼出側 (main.py × 5 site) を 1 行に集約 (Option A 精神継承)。
 
     挙動:
       1. _archive_entries([entry]): archive_YYYYMMDD.jsonl + raw_events.jsonl
          + subjective_entries.jsonl + index.json (0.1.A dual emit + 0.1.B index)
-      2. state["log"].append(entry): 旧 in-memory log (0.1.E まで temporary、
-         既存 read 経路 18+ 箇所が 0.1.D で切替されるまで並走互換)
-      3. state["raw_events"].append(raw_part) + state["subjective_entries"]
-         .append(subj_part): 新 in-memory view を cycle 中 sync (起動時
-         _rebuild_views_from_jsonl と同じ partition で更新)
+      2. state["raw_events"].append(raw_part) + state["subjective_entries"]
+         .append(subj_part): in-memory view を cycle 中 sync (起動時
+         _rebuild_views_from_jsonl と同じ partition で更新)。raw / subjective
+         両層は id を共有、read 側は merge_log_view で合本 view を組む。
 
     save_state は呼出側責務 (site 毎に呼ぶ/呼ばない判断が異なる)。
     """
     _archive_entries([entry])
-    state["log"].append(entry)
     raw_part, subj_part, _ = _split_entry_fields(entry)
     state["raw_events"].append(raw_part)
     state["subjective_entries"].append(subj_part)
@@ -835,17 +831,26 @@ def _archive_summary(summary: dict):
 
 def maybe_compress_log(state: dict, tool_names: set = None):
     """
-    Trigger1: log >= LOG_HARD_LIMIT(150) → 古い (LOG_HARD_LIMIT - LOG_KEEP) 件を要約
+    段階13 Phase 0.1.D: subjective_entries (LLM 解釈、materialized view) のみ
+    compaction。raw_events (source of truth) は永続不変 (PLAN §20-2 #4)。
+
+    Trigger1: subjective >= LOG_HARD_LIMIT(150) → 古い (HARD - KEEP) 件を要約
               → 直近 LOG_KEEP(120) 件を保持
-              ※ [external] エントリは要約対象外で保持（外部からの会話は高価値情報として永続）
-    Trigger2: summaries >= 10 → メタ要約（全 summary + 直近 raw 数件） → summaries = [1件]
+              ※ [external] エントリは要約対象外で保持 (外部からの会話の永続化)
+    Trigger2: summaries >= 10 → メタ要約 (全 summary + 直近 raw 数件) → summaries=[1]
+
+    要約材料は raw + subjective を id zip した合本 view で組む (tool/result は raw、
+    intent/e2 は subjective、_summarize_entries が両層 field 同時参照のため)。
     """
+    from core.state import merge_log_view
+
     state.setdefault("summaries", [])
 
-    if len(state["log"]) >= LOG_HARD_LIMIT:
+    if len(state["subjective_entries"]) >= LOG_HARD_LIMIT:
         compress_count = max(1, LOG_HARD_LIMIT - LOG_KEEP)
-        old_section = state["log"][:compress_count]
-        # [external] 入力は要約せず保持（外部からの会話の永続化）
+        merged = merge_log_view(state)
+        old_section = merged[:compress_count]
+        # [external] 入力は要約せず保持 (外部からの会話の永続化)
         to_preserve = [e for e in old_section if e.get("type") == "external"]
         to_summarize = [e for e in old_section if e.get("type") != "external"]
 
@@ -868,17 +873,23 @@ def maybe_compress_log(state: dict, tool_names: set = None):
             _archive_summary(summary)
             state["summaries"].append(summary)
 
-        # 残り = 保持対象 external + 直近 LOG_KEEP 件
-        state["log"] = to_preserve + state["log"][compress_count:]
+        # subjective_entries trim: external 対応 entry の subjective 部のみ前段保持
+        preserve_ids = {e.get("id") for e in to_preserve if e.get("id")}
+        state["subjective_entries"] = (
+            [s for s in state["subjective_entries"][:compress_count]
+             if s.get("id") in preserve_ids]
+            + state["subjective_entries"][compress_count:]
+        )
         print(
             f"  [memory] Trigger1: {len(to_summarize)}件→要約 "
             f"({len(to_preserve)}件のexternal保持), "
-            f"log={len(state['log'])}件, summaries={len(state['summaries'])}件"
+            f"subj={len(state['subjective_entries'])}件, summaries={len(state['summaries'])}件"
         )
 
     if len(state["summaries"]) >= SUMMARY_HARD_LIMIT:
-        n_raw = min(META_SUMMARY_RAW, len(state["log"]))
-        raw_for_meta = state["log"][:n_raw]
+        n_raw = min(META_SUMMARY_RAW, len(state["subjective_entries"]))
+        # メタ要約材料は merge view から (tool/result + intent 両層必要)
+        raw_for_meta = merge_log_view(state)[:n_raw]
         meta_input = []
         for s in state["summaries"]:
             meta_input.append({
@@ -893,5 +904,5 @@ def maybe_compress_log(state: dict, tool_names: set = None):
         meta_summary["covers_raw"] = n_raw
         _archive_summary(meta_summary)
         state["summaries"] = [meta_summary]
-        state["log"] = state["log"][n_raw:]
-        print(f"  [memory] Trigger2: メタ要約, log={len(state['log'])}件, summaries=1件")
+        state["subjective_entries"] = state["subjective_entries"][n_raw:]
+        print(f"  [memory] Trigger2: メタ要約, subj={len(state['subjective_entries'])}件, summaries=1件")

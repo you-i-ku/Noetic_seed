@@ -32,7 +32,7 @@ def _assert(cond, label):
 def _fresh_state():
     return {
         "cycle_id": 10,
-        "log": [],
+        "raw_events": [], "subjective_entries": [],
         "pending": [],
         "action_ledger": [],
         "self": {},

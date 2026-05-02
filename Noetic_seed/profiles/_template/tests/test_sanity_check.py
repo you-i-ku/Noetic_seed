@@ -55,7 +55,7 @@ def _setup_profile(state_content=None, memory_jsons=None):
 
 def test_state_json_valid():
     print("== state.json 正常 ==")
-    valid = json.dumps({"cycle_id": 1, "tool_level": 0, "log": []})
+    valid = json.dumps({"cycle_id": 1, "tool_level": 0, "subjective_entries": []})
     tmp = _setup_profile(state_content=valid)
     try:
         _check_state_json(tmp)

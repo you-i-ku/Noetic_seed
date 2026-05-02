@@ -181,7 +181,9 @@ def reflect(state: dict, call_llm_fn) -> dict:
     import json
 
     # 段階11-A G3: 直近 log の材料分離 (self/observation)
-    recent_log = state.get("log", [])[-10:]
+    # 段階13 Phase 0.1.D: _split_log_by_perspective が perspective + 他 field 参照 = merge
+    from core.state import merge_log_view
+    recent_log = merge_log_view(state)[-10:]
     self_actions, observations = _split_log_by_perspective(recent_log)
     self_actions_text = _format_self_actions(self_actions)
     observations_text = _format_observations(observations)

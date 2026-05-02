@@ -120,7 +120,7 @@ ATTRIBUTED_DISPOSITION:
 - viewer: claude, key: skepticism, delta: -0.02, confidence: 0.7
 """
 
-state = {"log": [], "self": {"name": "iku"}}
+state = {"raw_events": [], "subjective_entries": [], "self": {"name": "iku"}}
 result = _parse_reflection(mock_llm_text, state)
 
 # 戻り値構造
@@ -235,7 +235,7 @@ _assert(
 print("\n=== Section 6: clamping + backward compat ===")
 
 # 6-A: 過大 delta は ±0.1 clamp
-state2 = {"log": [], "self": {}}
+state2 = {"raw_events": [], "subjective_entries": [], "self": {}}
 _parse_reflection("""
 SELF_DISPOSITION:
 - curiosity_delta: +99.0
@@ -252,7 +252,7 @@ _assert(
 
 # 6-B: value は [0.1, 0.9] clamp
 state3 = {
-    "log": [],
+    "raw_events": [], "subjective_entries": [],
     "dispositions": {"self": {"curiosity": {"value": 0.88}}},
 }
 _parse_reflection("""
@@ -266,7 +266,7 @@ _assert(
 
 # 6-C: 既存 perspective-keyed state から +delta (Step 5 以降の通常運用)
 state4 = {
-    "log": [],
+    "raw_events": [], "subjective_entries": [],
     "dispositions": {"self": {"curiosity": {"value": 0.3}}},
 }
 _parse_reflection("""
@@ -279,7 +279,7 @@ _assert(
 )
 
 # 6-D: parse 時に OPINIONS / ENTITIES セクション順序が混在しても動く
-state5 = {"log": [], "self": {}}
+state5 = {"raw_events": [], "subjective_entries": [], "self": {}}
 result5 = _parse_reflection("""
 ATTRIBUTED_DISPOSITION:
 - viewer: test_viewer, key: mood, delta: +0.05, confidence: 0.5

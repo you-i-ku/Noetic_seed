@@ -284,7 +284,7 @@ def pending_observe(
     pending が並立する場合の誤消化を防ぐ)。
 
     §6 "pending_feedback 遅延 E2 遡及" の吸収: observe 対象 pending が
-    `retro_log_entry_id` を持つ場合、state.log 中の該当 entry の `e2` を
+    `retro_log_entry_id` を持つ場合、state.subjective_entries 中の該当 entry の `e2` を
     +retro_e2_bonus% 上方修正 (上限 100%)。
 
     Args:
@@ -342,7 +342,8 @@ def _apply_retro_e2(state: dict, log_entry_id: str, bonus_pct: int) -> bool:
         修正を実行した場合 True、対象 entry 無し or e2 未設定の場合 False。
     """
     import re
-    for entry in state.get("log", []):
+    # 段階13 Phase 0.1.D: e2 mutate 先は subjective_entries (e2 = LLM 解釈の subj field)
+    for entry in state.get("subjective_entries", []):
         if entry.get("id") != log_entry_id:
             continue
         old_e2 = entry.get("e2", "")
@@ -430,7 +431,8 @@ def pending_prune(
             dynamic_candidates.append(p)
 
     if dynamic_n is None:
-        log_count = len(state.get("log", []))
+        # 段階13 Phase 0.1.D: dynamic_n は iku の経験量 = subjective_entries 件数で算出
+        log_count = len(state.get("subjective_entries", []))
         dynamic_n = max(3, min(20, log_count // 5))
 
     dynamic_candidates.sort(key=lambda p: -float(p.get("gap", 0.0)))

@@ -232,9 +232,11 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     self_text = json.dumps(state["self"], ensure_ascii=False) if state["self"] else "(なし)"
     energy = round(state.get("energy", 50), 1)
-    e_trend = _calc_e_trend(state["log"][-10:])
-    # 鮮度勾配で log 部を pack（全件維持、tier ごとに result を cap）
-    log_text = _pack_log_block(state["log"], _calc_log_budget(), with_evals=False)
+    # 段階13 Phase 0.1.D: e_trend は subjective field (e1-4) のみ消費 = subj 直読み
+    e_trend = _calc_e_trend(state["subjective_entries"][-10:])
+    # 鮮度勾配で log 部を pack (tool/args/result + intent 両層必要 = merge view)
+    from core.state import merge_log_view
+    log_text = _pack_log_block(merge_log_view(state), _calc_log_budget(), with_evals=False)
     allowed = ctrl.get("allowed_tools", set(tools_dict.keys()))
     tool_lines = _build_tool_lines(allowed, tools_dict, registry=registry)
     summaries = state.get("summaries", [])

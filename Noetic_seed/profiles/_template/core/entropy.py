@@ -77,7 +77,8 @@ def tick_entropy(state: dict, measured_entropy: float | None = None,
 def calc_dynamic_threshold(state: dict, base_threshold: float) -> float:
     """動的閾値: E2移動平均で鷹揚さ、entropyで緊急度を加味。
     E2高い→閾値上がる（余裕）。entropy高い→閾値下がる（秩序崩壊で敏感に）。"""
-    log = state.get("log", [])
+    # 段階13 Phase 0.1.D: e2 のみ参照 = subjective 直読み
+    log = state.get("subjective_entries", [])
     e2_vals = []
     for entry in log[-10:]:
         m = re.search(r'(\d+)%', str(entry.get("e2", "")))

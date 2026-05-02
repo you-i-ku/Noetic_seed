@@ -37,7 +37,7 @@ def _assert(cond, label):
 def _fresh_state():
     return {
         "cycle_id": 10,
-        "log": [],
+        "raw_events": [], "subjective_entries": [],
         "pending": [],
     }
 
@@ -163,7 +163,7 @@ def test_add_living_presence():
 
 def test_add_empty_state():
     print("== pending_add: state['pending'] 未初期化でも setdefault ==")
-    state = {"cycle_id": 0, "log": []}  # pending key なし
+    state = {"cycle_id": 0, "raw_events": [], "subjective_entries": []}  # pending key なし
     pending_add(
         state, source_action="x_post",
         expected_observation="反応",
@@ -366,7 +366,7 @@ def test_prune_dynamic_n_from_log():
     print("== pending_prune: dynamic_n=None → log 長から自動 (max3, min20) ==")
     state = _fresh_state()
     # log 10 件 → max(3, min(20, 10//5)) = max(3, 2) = 3
-    state["log"] = [{"cycle": i} for i in range(10)]
+    state["subjective_entries"] = [{"cycle": i} for i in range(10)]
     for gap in [0.9, 0.7, 0.5, 0.3, 0.1]:
         pending_add(
             state, source_action="reflection",
@@ -384,7 +384,7 @@ def test_prune_semantic_merge_excluded_from_cap():
     dynamic_n cap 対象外 (繰り返しの熱を attempts に溜めるための時間持続性)。"""
     print("== pending_prune: semantic_merge=True は dynamic_n 対象外 ==")
     state = _fresh_state()
-    state["log"] = [{"cycle": i} for i in range(10)]  # cap=3 になるログ量
+    state["subjective_entries"] = [{"cycle": i} for i in range(10)]  # cap=3 になるログ量
     # semantic_merge=True を 5 件 (本来なら cap=3 で 2 件落ちるはず)
     for gap in [0.9, 0.7, 0.5, 0.3, 0.1]:
         pending_add(
@@ -493,30 +493,30 @@ def test_recalc_skips_non_ups():
 def test_retro_e2_helper_basic():
     print("== _apply_retro_e2: log entry の e2 を +bonus で上書き ==")
     state = _fresh_state()
-    state["log"] = [
+    state["subjective_entries"] = [
         {"id": "e0", "e2": "50%"},
         {"id": "e1", "e2": "30%"},
     ]
     ok = _apply_retro_e2(state, "e1", 40)
     return all([
         _assert(ok is True, "戻り値 True"),
-        _assert(state["log"][1]["e2"] == "70%", f"e1.e2=70% (30+40)"),
-        _assert(state["log"][0]["e2"] == "50%", "他 entry は無変更"),
+        _assert(state["subjective_entries"][1]["e2"] == "70%", f"e1.e2=70% (30+40)"),
+        _assert(state["subjective_entries"][0]["e2"] == "50%", "他 entry は無変更"),
     ])
 
 
 def test_retro_e2_caps_at_100():
     print("== _apply_retro_e2: 100% 超過で頭打ち ==")
     state = _fresh_state()
-    state["log"] = [{"id": "e0", "e2": "80%"}]
+    state["subjective_entries"] = [{"id": "e0", "e2": "80%"}]
     _apply_retro_e2(state, "e0", 50)  # 80 + 50 = 130 → 100
-    return _assert(state["log"][0]["e2"] == "100%", "100% で頭打ち")
+    return _assert(state["subjective_entries"][0]["e2"] == "100%", "100% で頭打ち")
 
 
 def test_retro_e2_missing_entry():
     print("== _apply_retro_e2: 該当 entry 無し → False ==")
     state = _fresh_state()
-    state["log"] = [{"id": "e0", "e2": "50%"}]
+    state["subjective_entries"] = [{"id": "e0", "e2": "50%"}]
     ok = _apply_retro_e2(state, "nonexistent", 40)
     return _assert(ok is False, "False 返却")
 
@@ -524,7 +524,7 @@ def test_retro_e2_missing_entry():
 def test_retro_e2_no_e2_field():
     print("== _apply_retro_e2: e2 未設定 → False (defensive) ==")
     state = _fresh_state()
-    state["log"] = [{"id": "e0", "tool": "x"}]  # e2 無し
+    state["subjective_entries"] = [{"id": "e0", "tool": "x"}]  # e2 無し
     ok = _apply_retro_e2(state, "e0", 40)
     return _assert(ok is False, "e2 未設定なら False")
 
@@ -545,7 +545,7 @@ def test_add_with_retro_log_entry_id():
 def test_observe_triggers_retro_e2():
     print("== pending_observe: retro_log_entry_id 対象の log e2 を遡及修正 ==")
     state = _fresh_state()
-    state["log"] = [
+    state["subjective_entries"] = [
         {"id": "log_123", "tool": "output_display", "e2": "40%"},
     ]
     pending_add(
@@ -560,15 +560,15 @@ def test_observe_triggers_retro_e2():
     )
     return all([
         _assert(len(updated) == 1, "1 件 observe"),
-        _assert(state["log"][0]["e2"] == "80%",
-                f"log e2=80% (40 + 40): {state['log'][0]['e2']}"),
+        _assert(state["subjective_entries"][0]["e2"] == "80%",
+                f"log e2=80% (40 + 40): {state['subjective_entries'][0]['e2']}"),
     ])
 
 
 def test_observe_skips_retro_when_bonus_zero():
     print("== pending_observe: retro_e2_bonus=0 で遡及スキップ ==")
     state = _fresh_state()
-    state["log"] = [{"id": "log_x", "e2": "40%"}]
+    state["subjective_entries"] = [{"id": "log_x", "e2": "40%"}]
     pending_add(
         state, source_action="output_display",
         expected_observation="x", lag_kind="minutes",
@@ -580,14 +580,14 @@ def test_observe_skips_retro_when_bonus_zero():
         cycle_id=1, match_source_actions=["output_display"],
         retro_e2_bonus=0,
     )
-    return _assert(state["log"][0]["e2"] == "40%",
+    return _assert(state["subjective_entries"][0]["e2"] == "40%",
                    "bonus=0 で修正なし")
 
 
 def test_observe_no_retro_when_id_missing():
     print("== pending_observe: retro_log_entry_id 無しの pending は遡及なし ==")
     state = _fresh_state()
-    state["log"] = [{"id": "log_y", "e2": "40%"}]
+    state["subjective_entries"] = [{"id": "log_y", "e2": "40%"}]
     pending_add(
         state, source_action="output_display",
         expected_observation="x", lag_kind="minutes",
@@ -598,7 +598,7 @@ def test_observe_no_retro_when_id_missing():
         state, observed_content="ok", channel="device",
         cycle_id=1, match_source_actions=["output_display"],
     )
-    return _assert(state["log"][0]["e2"] == "40%",
+    return _assert(state["subjective_entries"][0]["e2"] == "40%",
                    "retro_log_entry_id 無しなら log は無変更")
 
 
@@ -609,7 +609,7 @@ def test_observe_no_retro_when_id_missing():
 def test_integration_add_observe_prune():
     print("== 統合: add 5 → observe 2 → prune で dynamic_n 動作 ==")
     state = _fresh_state()
-    state["log"] = [{"cycle": i} for i in range(20)]  # dynamic_n = 4
+    state["subjective_entries"] = [{"cycle": i} for i in range(20)]  # dynamic_n = 4
 
     # 5 件追加 (gap 0.9, 0.7, 0.5, 0.3, 0.1)
     entries = []

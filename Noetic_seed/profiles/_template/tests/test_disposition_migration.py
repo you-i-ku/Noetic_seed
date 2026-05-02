@@ -168,7 +168,7 @@ print("\n=== Section 2: load_state 経由 ===")
 
 # state.json に旧 flat disposition 書き込み
 legacy_state = {
-    "log": [],
+    "raw_events": [], "subjective_entries": [],
     "self": {"name": "test"},
     "energy": 50,
     "cycle_id": 0,

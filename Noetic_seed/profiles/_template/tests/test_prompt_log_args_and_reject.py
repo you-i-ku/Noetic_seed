@@ -122,8 +122,12 @@ def test_rejected_variants_all_get_warning():
 
 def test_build_log_block_explainer():
     print("== build_log_block: 表示規約の explainer 冒頭 ==")
+    # 段階13 Phase 0.1.D: _base_entry は raw 寄り field のみ (id/time/tool/result/args)
+    # → raw_events に置き、subjective_entries は id 共有 shell entry のみ
+    _e = _base_entry(args={"channel": "device", "content": "hi"})
     state = {
-        "log": [_base_entry(args={"channel": "device", "content": "hi"})],
+        "raw_events": [_e],
+        "subjective_entries": [{"id": _e["id"]}],
         "cycle_id": 1,
     }
     block = build_log_block(state, budget_tok=2000)
@@ -136,8 +140,10 @@ def test_build_log_block_explainer():
 
 def test_build_log_block_contains_entries():
     print("== build_log_block: 通常 log エントリも含まれる ==")
+    _e = _base_entry(tool="search_memory", result="3 件見つかった")
     state = {
-        "log": [_base_entry(tool="search_memory", result="3 件見つかった")],
+        "raw_events": [_e],
+        "subjective_entries": [{"id": _e["id"]}],
         "cycle_id": 1,
     }
     block = build_log_block(state, budget_tok=2000)

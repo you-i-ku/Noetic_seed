@@ -2,7 +2,7 @@
 import re
 import random
 from core.config import SANDBOX_TOOLS_DIR, WORLD_MODEL_CFG
-from core.state import load_pref
+from core.state import load_pref, merge_log_view
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.eval import predict_result_novelty
 from core.predictor import get_predictor
@@ -14,7 +14,9 @@ _PREDICTOR = get_predictor(WORLD_MODEL_CFG.get("predictor_mode", "light"))
 def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tools: dict, dangerous_patterns: list, run_ai_tool_fn) -> dict:
     """E値とenergyから構造的制約を導出。ツール解放レベルを判定。"""
     energy = state.get("energy", 50)
-    log = state["log"]
+    # 段階13 Phase 0.1.D: tool 別 e2 平均 + Level 6 解放判定で raw (tool/result) と
+    # subjective (e2) の両層 field を同時参照するため merge view を使う
+    log = merge_log_view(state)
 
     # --- sandbox/tools/ をスキャンしてAI製ツールを動的ロード ---
     if SANDBOX_TOOLS_DIR.exists():
@@ -145,7 +147,8 @@ def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tool
 
 def _intent_conditioned_scores(candidates: list, state: dict) -> list:
     """候補ごとに、過去の類似intent×同toolのE2加重平均を返す。"""
-    log = state.get("log", [])
+    # 段階13 Phase 0.1.D: intent (subj) + tool (raw) + e2 (subj) を同時参照のため merge
+    log = merge_log_view(state)
     if not log or not is_vector_ready():
         return [50.0] * len(candidates)
 

@@ -270,7 +270,8 @@ def _resolve_x_feedback(parsed_notifications: list):
 
             if matched:
                 pf["status"] = "resolved"
-                for le in state.get("log", []):
+                # 段階13 Phase 0.1.D: e2 mutate 先 = subjective_entries
+                for le in state.get("subjective_entries", []):
                     if le.get("id") == pf.get("log_entry_id"):
                         m = _re.search(r'(\d+)', str(le.get("e2", "")))
                         if m:

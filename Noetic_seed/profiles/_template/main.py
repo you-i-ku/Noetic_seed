@@ -373,7 +373,7 @@ def main():
         call_llm_fn=partial(call_llm, role="llm3"),
         get_cycle_id=lambda: state.get("cycle_id", 0),
         get_recent_intents=lambda: [
-            e.get("intent", "") for e in state.get("log", [])[-3:]
+            e.get("intent", "") for e in state.get("subjective_entries", [])[-3:]
             if e.get("intent")
         ],
     )
@@ -503,7 +503,7 @@ def main():
                 else:
                     print("  [X] スキップ。X系ツールはセッションなしで動作しません。")
                 print()
-        print(f"  ctrl: level={new_lv} tools={sorted(allowed)} log={len(state['log'])}件(全件)")
+        print(f"  ctrl: level={new_lv} tools={sorted(allowed)} subj={len(state['subjective_entries'])}件(全件)")
 
         # ① LLM: 候補提案
         propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause, registry=_rt_registry)
@@ -1064,11 +1064,14 @@ def main():
             _tick_count = getattr(main, '_tick_count', 0) + 1
             main._tick_count = _tick_count
             if _tick_count % 10 == 0:
-                main._cached_measured = calc_measured_entropy(state, state.get("log", []))
-                main._cached_spiral = calc_spiral_vector(state, state.get("log", []))
-                # behavioral_entropy: ツール使用分布の情報エントロピー（パターン化検出用）
+                # 段階13 Phase 0.1.D: entropy/spiral は tool (raw) + intent (subj) 両層 = merge
+                from core.state import merge_log_view as _merge_log_view
+                _merged_log = _merge_log_view(state)
+                main._cached_measured = calc_measured_entropy(state, _merged_log)
+                main._cached_spiral = calc_spiral_vector(state, _merged_log)
+                # behavioral_entropy: ツール使用分布の情報エントロピー（tool は raw 直読みで OK）
                 from collections import Counter as _Counter
-                _recent_tools = [e.get("tool", "unknown") for e in state.get("log", [])[-20:]]
+                _recent_tools = [e.get("tool", "unknown") for e in state.get("raw_events", [])[-20:]]
                 if len(_recent_tools) >= 2:
                     _counts = _Counter(_recent_tools)
                     _total = sum(_counts.values())

@@ -36,7 +36,7 @@ def _assert(cond, label):
 def _fresh_state():
     return {
         "cycle_id": 10,
-        "log": [],
+        "raw_events": [], "subjective_entries": [],
         "pending": [],
         "self": {"name": "iku"},
         "energy": 50,
@@ -113,11 +113,15 @@ def test_log_block_empty():
 def test_log_block_with_entries():
     print("== log block: entry あり → 1 行ずつレンダ ==")
     state = _fresh_state()
-    state["log"] = [
-        {"id": "e1", "time": "09:00", "tool": "read_file",
-         "intent": "設定確認", "result": "OK"},
-        {"id": "e2", "time": "09:05", "tool": "write_file",
-         "intent": "更新", "result": "done"},
+    # 段階13 Phase 0.1.D: 哲学最 literal で raw / subjective 二層分割
+    # raw=monitor footage (time/tool/result)、subjective=journal (intent)、id 共有
+    state["raw_events"] = [
+        {"id": "e1", "time": "09:00", "tool": "read_file", "result": "OK"},
+        {"id": "e2", "time": "09:05", "tool": "write_file", "result": "done"},
+    ]
+    state["subjective_entries"] = [
+        {"id": "e1", "intent": "設定確認"},
+        {"id": "e2", "intent": "更新"},
     ]
     s = build_log_block(state, budget_tok=1000)
     return all([
@@ -185,8 +189,9 @@ def test_assemble_contains_all_five_sections():
     from core.world_model import init_world_model, ensure_channel
     from core.channel_registry import channel_from_device_input
     state = _fresh_state()
-    state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
-                     "intent": "x", "result": "y"}]
+    # 段階13 Phase 0.1.D: raw / subj 二層分割 (id 共有、time/tool/result=raw、intent=subj)
+    state["raw_events"] = [{"id": "e1", "time": "09:00", "tool": "read_file", "result": "y"}]
+    state["subjective_entries"] = [{"id": "e1", "intent": "x"}]
     tools = _sample_tools()
     wm = init_world_model()
     ensure_channel(wm, **channel_from_device_input())
@@ -210,8 +215,9 @@ def test_assemble_section_order():
     from core.world_model import init_world_model, ensure_channel
     from core.channel_registry import channel_from_device_input
     state = _fresh_state()
-    state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
-                     "intent": "x", "result": "y"}]
+    # 段階13 Phase 0.1.D: raw / subj 二層分割 (id 共有、time/tool/result=raw、intent=subj)
+    state["raw_events"] = [{"id": "e1", "time": "09:00", "tool": "read_file", "result": "y"}]
+    state["subjective_entries"] = [{"id": "e1", "intent": "x"}]
     wm = init_world_model()
     ensure_channel(wm, **channel_from_device_input())
     prompt = assemble_system_prompt(
@@ -235,8 +241,9 @@ def test_assemble_section_order():
 def test_assemble_wm_omitted_when_none():
     print("== assemble: world_model=None なら 世界モデル section 省略 ==")
     state = _fresh_state()
-    state["log"] = [{"id": "e1", "time": "09:00", "tool": "read_file",
-                     "intent": "x", "result": "y"}]
+    # 段階13 Phase 0.1.D: raw / subj 二層分割 (id 共有、time/tool/result=raw、intent=subj)
+    state["raw_events"] = [{"id": "e1", "time": "09:00", "tool": "read_file", "result": "y"}]
+    state["subjective_entries"] = [{"id": "e1", "intent": "x"}]
     prompt = assemble_system_prompt(
         state=state, tools_dict=_sample_tools(),
         fire_cause="",
@@ -278,9 +285,11 @@ def test_assemble_no_magic_if():
 def test_assemble_within_budget():
     print("== assemble: 通常条件で SOFT_LIMIT 内に収まる ==")
     state = _fresh_state()
-    state["log"] = [{"id": f"e{i}", "time": "09:00",
-                     "tool": "read_file", "intent": f"intent {i}",
-                     "result": "x"} for i in range(30)]
+    # 段階13 Phase 0.1.D: raw / subj 二層分割
+    state["raw_events"] = [{"id": f"e{i}", "time": "09:00",
+                     "tool": "read_file", "result": "x"} for i in range(30)]
+    state["subjective_entries"] = [{"id": f"e{i}", "intent": f"intent {i}"}
+                     for i in range(30)]
     prompt = assemble_system_prompt(
         state=state, tools_dict=_sample_tools(),
         fire_cause="",
@@ -295,8 +304,10 @@ def test_assemble_overbudget_raises():
     print("== assemble: raise_on_overbudget=True で超過時 ValueError ==")
     state = _fresh_state()
     # 超長 log を強引に作る
-    state["log"] = [{"id": f"e{i}", "time": "09:00", "tool": "read_file",
-                     "intent": "x", "result": "Y" * 1000} for i in range(100)]
+    # 段階13 Phase 0.1.D: raw / subj 二層分割
+    state["raw_events"] = [{"id": f"e{i}", "time": "09:00", "tool": "read_file",
+                     "result": "Y" * 1000} for i in range(100)]
+    state["subjective_entries"] = [{"id": f"e{i}", "intent": "x"} for i in range(100)]
     try:
         assemble_system_prompt(
             state=state, tools_dict=_sample_tools(),
@@ -314,8 +325,10 @@ def test_assemble_overbudget_raises():
 def test_assemble_overbudget_warns_no_raise():
     print("== assemble: raise_on_overbudget=False → stderr 警告のみ ==")
     state = _fresh_state()
-    state["log"] = [{"id": f"e{i}", "time": "09:00", "tool": "read_file",
-                     "intent": "x", "result": "Y" * 1000} for i in range(100)]
+    # 段階13 Phase 0.1.D: raw / subj 二層分割
+    state["raw_events"] = [{"id": f"e{i}", "time": "09:00", "tool": "read_file",
+                     "result": "Y" * 1000} for i in range(100)]
+    state["subjective_entries"] = [{"id": f"e{i}", "intent": "x"} for i in range(100)]
     try:
         prompt = assemble_system_prompt(
             state=state, tools_dict=_sample_tools(),

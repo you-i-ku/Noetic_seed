@@ -246,7 +246,7 @@ def test_controller_select_attaches_predicted_outcome():
     state = {
         "energy": 50,
         "entropy": 0.65,
-        "log": [],
+        "raw_events": [], "subjective_entries": [],
         "pending": [],
         "world_model": wm,
     }
