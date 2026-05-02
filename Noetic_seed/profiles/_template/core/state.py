@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone
-from core.config import STATE_FILE, PREF_FILE, DEBUG_LOG, SEED_FILE
+from core.config import STATE_FILE, PREF_FILE, DEBUG_LOG, SEED_FILE, MEMORY_DIR
 
 
 def _migrate_disposition_v11a(state: dict) -> None:
@@ -39,6 +39,43 @@ def _migrate_disposition_v11a(state: dict) -> None:
                 "perspective": default_self_perspective(),
                 "updated_at": now_iso,
             }
+
+
+def _rebuild_views_from_jsonl(state: dict) -> None:
+    """段階13 Phase 0.1.B: raw_events.jsonl / subjective_entries.jsonl から
+    state["raw_events"] / state["subjective_entries"] view を再構築する。
+
+    PLAN §18-2 「段階7 materialized view パターン継承」の起動時 in-memory rebuild。
+    jsonl が source of truth (PLAN §20-2 #4 raw 永続 / subjective compaction 可)
+    なので state.json の view 値は信頼せず rebuild で完全置換する。
+
+    挙動:
+      - jsonl 不在 (clean profile) → state[key] = []
+      - 壊れた行 (json parse 失敗) → skip して続行 (load_all_memories 流儀)
+      - 読み出し例外 (encoding 等) → state[key] = [] にフォールバック
+    """
+    for key, filename in (
+        ("raw_events", "raw_events.jsonl"),
+        ("subjective_entries", "subjective_entries.jsonl"),
+    ):
+        fpath = MEMORY_DIR / filename
+        if not fpath.exists():
+            state[key] = []
+            continue
+        try:
+            lines = fpath.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            state[key] = []
+            continue
+        rebuilt = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                rebuilt.append(json.loads(line))
+            except Exception:
+                continue
+        state[key] = rebuilt
 
 
 def _atomic_write(path, text: str):
@@ -133,11 +170,18 @@ def load_state() -> dict:
                 data["prediction_error_history_ec"] = []
             # 段階11-A Step 5: disposition (flat) → dispositions (perspective-keyed) 移行
             _migrate_disposition_v11a(data)
+            # 段階13 Phase 0.1.B: jsonl が source of truth、in-memory view は
+            # 起動時に必ず rebuild (state.json 内の値は信頼せず上書き、PLAN §18-2)
+            _rebuild_views_from_jsonl(data)
             return data
         except json.JSONDecodeError:
             pass
     from core.world_model import init_world_model
-    return {"log": [], "raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
+    fresh = {"log": [], "raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
+    # 段階13 Phase 0.1.B: state.json が無くても jsonl があれば rebuild
+    # (state.json 削除 + memory/ 残存ケースの safety net)
+    _rebuild_views_from_jsonl(fresh)
+    return fresh
 
 
 def save_state(state: dict):

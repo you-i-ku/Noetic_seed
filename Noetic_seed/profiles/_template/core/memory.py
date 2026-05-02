@@ -669,35 +669,52 @@ def _record_schema_warning(entry_id: str, unknown_fields: list):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _archive_entries(entries: list):
-    """エントリ群をmemory/archive_YYYYMMDD.jsonlに追記しindex.jsonを更新。
+def _update_jsonl_index(filename: str, entries: list):
+    """段階13 Phase 0.1.B: index.json の filename entry を count/from/to 更新する。
 
-    段階13 Phase 0.1.A: 既存 archive_YYYYMMDD 経路は 0.1.E 完了まで温存。
-    並走で raw_events.jsonl + subjective_entries.jsonl への dual emit を行う
-    (PLAN §18-2 段階7 materialized view パターン)。
+    既存 _archive_entries の inline index 更新ロジック (旧 line 686-700) を
+    関数化したもの。archive_YYYYMMDD.jsonl / raw_events.jsonl /
+    subjective_entries.jsonl の 3 経路で共通使用する (DRY)。
+    entries は元 entry list (subj_part に time field がないため raw / subj 両方
+    の index 更新に元 entry の time を使う)、empty なら no-op。
     """
+    if not entries:
+        return
     MEMORY_DIR.mkdir(exist_ok=True)
-    today = datetime.now().strftime("%Y%m%d")
-    archive_file = MEMORY_DIR / f"archive_{today}.jsonl"
     index_file = MEMORY_DIR / "index.json"
-    with open(archive_file, "a", encoding="utf-8") as f:
-        for entry in entries:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     index = {}
     if index_file.exists():
         try:
             index = json.loads(index_file.read_text(encoding="utf-8"))
         except Exception:
             pass
-    fname = archive_file.name
-    if fname not in index:
-        index[fname] = {"count": 0, "from": "", "to": ""}
-    index[fname]["count"] += len(entries)
-    if not index[fname]["from"] and entries:
-        index[fname]["from"] = entries[0].get("time", "")
-    if entries:
-        index[fname]["to"] = entries[-1].get("time", "")
+    if filename not in index:
+        index[filename] = {"count": 0, "from": "", "to": ""}
+    index[filename]["count"] += len(entries)
+    if not index[filename]["from"]:
+        index[filename]["from"] = entries[0].get("time", "")
+    index[filename]["to"] = entries[-1].get("time", "")
     index_file.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _archive_entries(entries: list):
+    """エントリ群をmemory/archive_YYYYMMDD.jsonlに追記しindex.jsonを更新。
+
+    段階13 Phase 0.1.A: 既存 archive_YYYYMMDD 経路は 0.1.E 完了まで温存。
+    並走で raw_events.jsonl + subjective_entries.jsonl への dual emit を行う
+    (PLAN §18-2 段階7 materialized view パターン)。
+
+    段階13 Phase 0.1.B: index 更新を _update_jsonl_index に集約 (DRY)、
+    raw_events.jsonl / subjective_entries.jsonl も同 index に追跡される
+    (count/from/to)。view rebuild は load_state 側で行う。
+    """
+    MEMORY_DIR.mkdir(exist_ok=True)
+    today = datetime.now().strftime("%Y%m%d")
+    archive_file = MEMORY_DIR / f"archive_{today}.jsonl"
+    with open(archive_file, "a", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _update_jsonl_index(archive_file.name, entries)
 
     # 段階13 Phase 0.1.A: raw / subjective dual emit (並走経路)
     for entry in entries:
@@ -710,6 +727,11 @@ def _archive_entries(entries: list):
             _record_schema_warning(str(entry.get("id", "")), unknown)
         _emit_raw_event(raw_part)
         _emit_subjective_entry(subj_part)
+
+    # 段階13 Phase 0.1.B: raw_events.jsonl / subjective_entries.jsonl の
+    # index も追跡 (subj_part に time field がないため元 entries を渡す)
+    _update_jsonl_index("raw_events.jsonl", entries)
+    _update_jsonl_index("subjective_entries.jsonl", entries)
 
 
 def _summarize_entries(entries: list, label: str = "要約") -> dict:
