@@ -137,15 +137,24 @@ def calc_pressure_signals(state: dict, spiral: dict | None = None) -> dict:
     last_pred_err = float(state.get("last_prediction_error", 0))
     base_pe = last_pred_err / 100.0
 
-    # 段階11-B Phase 3 Step 3.4: reconciliation 由来 EC 誤差を同じ pressure signal に merge。
-    # 共通 weight w_prediction_error を流用 (新規マジックナンバー 0)、別 w_contradiction は
-    # 導入しない (PLAN §6-4 の「情報理論的に pressure 1 本に集約」決定通り)。
-    # 直近 5 件 magnitude 平均を加算 (段階10 _is_match の 5 件 bootstrap と整合)、cap 1.0。
-    recon_hist = state.get("prediction_error_history_by_source", {}).get("reconciliation", [])
-    recon_pe = 0.0
-    if recon_hist:
-        recent = [float(h.get("magnitude", 0.0)) for h in recon_hist[-5:]]
-        recon_pe = sum(recent) / max(1, len(recent))
+    # 段階11-B Phase 3 Step 3.4 + 段階13 Phase 0.4: reconciliation + raw_subj_gap 由来
+    # EC 誤差を同じ pressure signal に merge。共通 weight w_prediction_error 流用
+    # (新規マジックナンバー 0)、別 w_contradiction は導入しない (PLAN §6-4 + §18-C.5
+    # の「情報理論的に pressure 1 本に集約」決定通り)。各 source 直近 5 件の magnitude
+    # を全部集めて平均 (段階10 _is_match の 5 件 bootstrap と整合)、cap 1.0。
+    # whitelist 方式: prediction_error_history_ec を直読みすると predictor 由来の
+    # prediction_error_ec (last_prediction_error / 100.0 経路と base_pe で重複計上) も
+    # 入って二重カウントするため、source 別 detail (by_source) を読む。
+    EC_PRESSURE_SOURCES = ("reconciliation", "raw_subj_gap")
+    by_source = state.get("prediction_error_history_by_source", {})
+    ec_pe_samples = []
+    for src in EC_PRESSURE_SOURCES:
+        src_hist = by_source.get(src, [])
+        if src_hist:
+            ec_pe_samples.extend(
+                float(h.get("magnitude", 0.0)) for h in src_hist[-5:]
+            )
+    recon_pe = sum(ec_pe_samples) / len(ec_pe_samples) if ec_pe_samples else 0.0
     combined_pe = min(1.0, base_pe + recon_pe)
 
     signals["prediction_error"] = combined_pe * ep["w_prediction_error"]

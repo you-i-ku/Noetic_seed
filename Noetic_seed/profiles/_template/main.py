@@ -222,9 +222,14 @@ def main():
         print(f"  [migration] 段階10.5 Fix 2: 旧形式 pending {_p_dropped} 個を drop (content_observable 欠落)")
     save_state(state)
     # 段階13 Phase 0.2: event_emitter observer pattern。default observer として
-    # _record_entry (jsonl emit + state view sync) を subscribe。Phase 0.4 で
-    # check_raw_subjective_gap 等の追加 observer もここに 1 行で並ぶ予定。
+    # _record_entry (jsonl emit + state view sync) を subscribe。
     event_emitter.subscribe(_record_entry)
+    # 段階13 Phase 0.4: raw event vs subjective entry の意味的 gap 検出 observer。
+    # subscribe 順序 snapshot で _record_entry 後に発火、in-memory view 更新済の状態
+    # で同 id の raw_part / subj_part を比較、gap >= 0.30 (entity_resolver 閾値流用)
+    # で record_ec_prediction_error(source="raw_subj_gap") に流す (check_on_write sibling)。
+    from core.reconciliation import check_raw_subjective_gap
+    event_emitter.subscribe(check_raw_subjective_gap)
     print(f"session: {state['session_id']}  cycle_id: {state['cycle_id']}")
     broadcast_state(state)
 
