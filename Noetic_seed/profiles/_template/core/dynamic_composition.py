@@ -49,6 +49,11 @@ WEIGHT_ANOMALY: float = 0.2
 WEIGHT_FRONTIER: float = 0.2
 WEIGHT_AVG_STRENGTH: float = 0.2
 
+# PLAN §3-1 literal: pressure 軸の重み。
+# 「w_pressure = 1.0 常時、線は消えない、靄の前駆体」(PLAN §3-1 literal)。
+# pressure_axis.candidates(weight=w_pressure) で明示適用 (graph 軸 w_graph と対称)。
+W_PRESSURE: float = 1.0
+
 
 # ------------------------------------------------------------
 # 純粋関数: sigmoid

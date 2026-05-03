@@ -65,8 +65,30 @@ def build_approval_protocol() -> str:
     return _APPROVAL_PROTOCOL
 
 
-def build_fire_cause_section(fire_cause: str) -> str:
-    """発火原因メタ注入セクション。空文字なら空セクションを返す (呼出側で省略可)。"""
+def build_fire_cause_section(fire_cause: str = "",
+                              fire_candidates: list = None) -> str:
+    """発火原因メタ注入セクション。空文字なら空セクションを返す (呼出側で省略可)。
+
+    段階13 Phase 4 commit 4 (PLAN §3-1 + §5-5 literal): fire_candidates list が
+    あれば両軸並走 list を inline format で render (LLM② に selection 委譲、
+    PLAN §5-5「selection = △ 1 cycle 1 つ、LLM② 判断」literal)。
+    list 未指定 / 空なら従来 scalar fire_cause 経路 (backward compat)。
+
+    表示 format は既存 [発火原因: X] inline 継承 (判断 #4 案 c):
+      list あり: [発火候補: name1(kind), name2(kind), ...]  (上位 10 件、score 表示なし)
+      list なし: [発火原因: X]                              (既存)
+    """
+    if fire_candidates:
+        sorted_cands = sorted(
+            fire_candidates,
+            key=lambda c: c.get("score", 0.0),
+            reverse=True,
+        )
+        inline_items = [
+            f"{c.get('name', '?')}({c.get('kind', '?')})"
+            for c in sorted_cands[:10]
+        ]
+        return f"[発火候補: {', '.join(inline_items)}]"
     if not fire_cause:
         return ""
     return f"[発火原因: {fire_cause}]"
@@ -197,6 +219,7 @@ def assemble_system_prompt(
     raise_on_overbudget: bool = False,
     registry=None,
     force_tool: Optional[str] = None,
+    fire_candidates: list = None,
 ) -> str:
     """Phase 4 ConversationRuntime 用 system_prompt を 5 要素 (+ forced 時 6) で組立。
 
@@ -222,7 +245,7 @@ def assemble_system_prompt(
     """
     sections = [
         build_approval_protocol(),
-        build_fire_cause_section(fire_cause),
+        build_fire_cause_section(fire_cause, fire_candidates=fire_candidates),
         # 段階10.5 Fix 4 δ': state 経由で opinions / dispositions を渡し構造化自己認識を完成
         build_world_model_section(world_model, state=state),
         "[log]\n" + build_log_block(state, log_budget_tok),

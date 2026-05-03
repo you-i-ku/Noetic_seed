@@ -228,7 +228,8 @@ def _calc_log_budget() -> int:
     return max(1000, total - reserved)
 
 
-def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: str = "", registry=None) -> str:
+def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: str = "",
+                          fire_candidates: list = None, registry=None) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     self_text = json.dumps(state["self"], ensure_ascii=False) if state["self"] else "(なし)"
     energy = round(state.get("energy", 50), 1)
@@ -246,7 +247,28 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
     ]
     summary_text = "\n".join(summary_lines)
 
-    fire_cause_line = f"\n[発火原因: {fire_cause}]" if fire_cause and ctrl.get("tool_level", 0) >= 2 else ""
+    # 段階13 Phase 4 commit 4 (PLAN §3-1 + §5-5): fire_candidates list があれば
+    # 両軸並走 list を LLM② に show、selection は LLM② 判断 (PLAN §5-5「△ 1 cycle 1 つ」literal)。
+    # tool_level ガード解除 (判断 #5 案 b、PLAN §3-3「育成中 cycle 5 で graph 候補が
+    # 薄く混ざる」literal 整合 = cycle 5 で LLM② に graph 候補が見える設計)。
+    # 表示 format は既存 [発火原因: X] inline 継承 (判断 #4 案 c、簡潔・統一)。
+    fire_cause_line = ""
+    if fire_candidates:
+        sorted_cands = sorted(
+            fire_candidates,
+            key=lambda c: c.get("score", 0.0),
+            reverse=True,
+        )
+        # 上位 10 件、kind 識別付き inline (例: "name1(pressure), name2(graph)")。
+        # score 表示なし (LLM② prompt 膨張回避 + selection 委譲、score 自体は内部計算用)。
+        inline_items = [
+            f"{c.get('name', '?')}({c.get('kind', '?')})"
+            for c in sorted_cands[:10]
+        ]
+        fire_cause_line = f"\n[発火候補: {', '.join(inline_items)}]"
+    elif fire_cause and ctrl.get("tool_level", 0) >= 2:
+        # backward compat: list 未指定時は既存 scalar 経路 (tool_level ガード継承)
+        fire_cause_line = f"\n[発火原因: {fire_cause}]"
 
     # pending（未対応事項） — UPS v2 (type='pending') / 旧形式両対応
     # id 形式: p_{session}_{cycle:04d}_{source[:8]}_{ms} (log entry の

@@ -458,7 +458,7 @@ def main():
     _pending_observations: list = []
 
     def _run_one_fire(fire_cause, _tunnel_fire, pp, threshold, tick_dt,
-                      _micro_iter=0):
+                      _micro_iter=0, fire_candidates=None):
         """1 fire iteration 本体。micro-loop から複数回呼ばれる可能性。
 
         state / _runtime / _hook_ctx / _pending_observations / TOOLS /
@@ -533,7 +533,9 @@ def main():
         print(f"  ctrl: level={new_lv} tools={sorted(allowed)} subj={len(state['subjective_entries'])}件(全件)")
 
         # ① LLM: 候補提案
-        propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause, registry=_rt_registry)
+        propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause,
+                                               fire_candidates=fire_candidates,
+                                               registry=_rt_registry)
 
         # 画像入力の決定
         from core.ws_server import get_stream_snapshot
@@ -705,6 +707,7 @@ def main():
             state=state,
             tools_dict=TOOLS,
             fire_cause=fire_cause,
+            fire_candidates=fire_candidates,
             # Step 0.4 hotfix: prompt 用は displayed_tools (affordance 前)、
             # parser 用は allowed_tools (affordance 後)。description は表示、選択は弾く。
             allowed_tools=ctrl.get("displayed_tools", ctrl["allowed_tools"]),
@@ -761,6 +764,7 @@ def main():
                         state=state,
                         tools_dict=TOOLS,
                         fire_cause=fire_cause,
+                        fire_candidates=fire_candidates,
                         allowed_tools={chain_tool},
                         world_model=state.get("world_model"),
                         registry=_rt_registry,
@@ -1327,6 +1331,34 @@ def main():
             time.sleep(max(0.0, 1.0 - elapsed))
 
         # --- 閾値超過 or トンネル発火: 認知層起動 ---
+        # 段階13 Phase 4 commit 4 (PLAN §3-1 + §5-5 同時発火階層 literal):
+        # pressure 軸 + graph 軸の両軸並走 fire_candidates list を生成、LLM② に
+        # selection 委譲 (PLAN §5-5「selection = △ 1 cycle 1 つ、LLM② 判断」literal)。
+        # scalar fire_cause は既存 logic 維持 (PLAN spec 対象外、log line / state 用)。
+        try:
+            from core.dynamic_composition import (
+                compute_graph_maturity,
+                compute_graph_axis_candidates,
+                W_PRESSURE,
+            )
+            # PLAN §3-1 literal: pressure_axis.candidates(weight=w_pressure)
+            pressure_candidates = [
+                {"name": k, "score": float(v) * W_PRESSURE, "kind": "pressure"}
+                for k, v in (signals or {}).items()
+            ]
+            w_graph = compute_graph_maturity(state)
+            graph_candidates = compute_graph_axis_candidates(state, w_graph)
+            fire_candidates = pressure_candidates + graph_candidates
+        except Exception as e:
+            print(f"  [graph_axis] skip (error: {e})")
+            fire_candidates = [
+                {"name": k, "score": float(v), "kind": "pressure"}
+                for k, v in (signals or {}).items()
+            ]
+
+        # primary scalar fire_cause: 既存 logic 維持 (pressure 軸内 max のみ)。
+        # selection は LLM② が fire_candidates list を見て判断 (PLAN §5-5 literal)。
+        # scalar は log line / state["fire_cause"] 用 metadata のみ、selection の代理ではない。
         fire_cause = max(signals, key=signals.get) if signals else "entropy"
         if _tunnel_fire:
             fire_cause = "tunnel"
@@ -1346,8 +1378,12 @@ def main():
                       f"entropy={state.get('entropy', 0.65):.2f})")
                 break
 
+            # tunnel 発火時は fire_candidates=None で渡す: 既存 scalar 経路
+            # [発火原因: tunnel] が prompt 表示される (Codex review P2-1 fix、tunnel
+            # は PLAN STAGE13 対象外の既存 Noetic 特殊 trigger、backward compat 維持)。
             _fire_result = _run_one_fire(fire_cause, _tunnel_fire, pp,
-                                          threshold, tick_dt, _micro_iter)
+                                          threshold, tick_dt, _micro_iter,
+                                          fire_candidates=None if _tunnel_fire else fire_candidates)
 
             # LLM① エラーや tool 未実行なら break
             if not _fire_result or _fire_result.get("llm1_error"):
