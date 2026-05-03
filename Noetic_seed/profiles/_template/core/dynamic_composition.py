@@ -266,3 +266,189 @@ def compute_graph_maturity(state: dict) -> float:
         + WEIGHT_FRONTIER * frontier
         + WEIGHT_AVG_STRENGTH * avg_strength
     )
+
+
+# ============================================================
+# graph 軸 fire 候補 4 種 (PLAN §3-4 (a)-(d)、commit 3)
+#
+# 各 candidate format: {"name": str, "score": float, "kind": "graph"}
+# 統合 entry: compute_graph_axis_candidates(state, w_graph) -> list[dict]
+#
+# 新規マジックナンバーゼロ (ゆう gut 確定 2026-05-03):
+#   既存定数 (ANOMALY_HISTORY_WINDOW / LINK_SCAN_LIMIT) 流用 + 相対比正規化
+#   (degree / avg_degree、cluster_inter_ratio 等) で固定数値追加なし。
+# ============================================================
+
+
+def _anomaly_candidates(state: dict) -> list:
+    """PLAN §3-4 (a) anomaly: 予測誤差大の状態シグナル。
+
+    Phase 2 jepa_prediction_error_history (scalar list) は entry id 紐付けが
+    ないため、graph 軸全体の anomaly 度を **1 candidate** として返す
+    (link/entry 単位細粒度は Phase 4 後半 / Phase 7 smoke 後で改善余地)。
+
+    score = sigmoid(直近 ANOMALY_HISTORY_WINDOW の error mean)。
+    history 空なら graceful skip (空 list return、PLAN §3-3 整合)。
+    """
+    history = state.get("jepa_prediction_error_history", []) if isinstance(state, dict) else []
+    if not history:
+        return []
+    window = history[-ANOMALY_HISTORY_WINDOW:]
+    rate = sum(window) / len(window)
+    return [{
+        "name": "anomaly:recent_history",
+        "score": _sigmoid(rate),
+        "kind": "graph",
+    }]
+
+
+def _structural_tension_candidates(state: dict) -> list:
+    """PLAN §3-4 (b) structural tension: cluster 間の link 不均衡。
+
+    既存 state["phase6_metrics"] (段階11-D Phase 6、reflect 時更新) の
+    cluster_inter_ratio を流用、低い値 (cluster 間 link 少) = 緊張高い。
+    score = sigmoid(1.0 - inter_ratio) で緊張度表現。
+
+    phase6_metrics 未確立 (reflect 未走行) or inter_ratio 0 (= cluster なし
+    or 全孤立) では graceful skip (空 list、PLAN §3-3 整合)。
+    """
+    if not isinstance(state, dict):
+        return []
+    phase6 = state.get("phase6_metrics", {})
+    if not phase6:
+        return []
+    inter_ratio = float(phase6.get("cluster_inter_ratio", 0.0))
+    # inter_ratio == 0 = cluster なし or 全孤立、structural tension 概念成立せず
+    if inter_ratio <= 0.0:
+        return []
+    # tension = 1 - inter_ratio (cluster 間連結が薄い = 緊張)
+    tension = 1.0 - inter_ratio
+    return [{
+        "name": "structural_tension:cluster_inter_ratio",
+        "score": _sigmoid(tension),
+        "kind": "graph",
+    }]
+
+
+def _relational_salience_candidates(state: dict) -> list:
+    """PLAN §3-4 (c) relational salience: 特定 entity 中心の link 集中。
+
+    無向視 degree / avg_degree の **相対比** で正規化、avg を超える node
+    のみ candidate (hub 性、ego view ベース)。新規マジックナンバーなし
+    (avg_degree は graph 動的派生)。
+
+    Graceful skip: 有効 link 0 / avg_degree 0 → 空 list (PLAN §3-3 整合)。
+    """
+    from core.memory_links import list_links, LINK_SCAN_LIMIT
+
+    links = list_links(limit=LINK_SCAN_LIMIT)
+    adj: dict = {}
+    for link in links:
+        if link.get("link_type", "none") == "none":
+            continue
+        from_id = link.get("from_id")
+        to_id = link.get("to_id")
+        if not from_id or not to_id or from_id == to_id:
+            continue
+        adj.setdefault(from_id, set()).add(to_id)
+        adj.setdefault(to_id, set()).add(from_id)
+
+    if not adj:
+        return []
+    total_deg = sum(len(n) for n in adj.values())
+    node_count = len(adj)
+    if node_count == 0 or total_deg == 0:
+        return []
+    avg_deg = total_deg / node_count
+    if avg_deg <= 0.0:
+        return []
+
+    candidates = []
+    for node, neighbors in adj.items():
+        deg = len(neighbors)
+        relative = deg / avg_deg
+        # avg を超える hub 性のある node のみ candidate
+        if relative <= 1.0:
+            continue
+        # sigmoid(relative - 1.0): avg ちょうどで 0.5、avg の 2 倍で sigmoid(1)≈0.731
+        candidates.append({
+            "name": f"relational_salience:{node}",
+            "score": _sigmoid(relative - 1.0),
+            "kind": "graph",
+        })
+    return candidates
+
+
+def _predictive_frontier_candidates(state: dict) -> list:
+    """PLAN §3-4 (d) predictive frontier: graph 周縁の未踏領域 (leaf)。
+
+    Phase 4 commit 1 で確立した leaf 定義 (無向視 degree=1) 流用。
+    各 leaf node に candidate 1 件、score = sigmoid(その link の strength)。
+    leaf なし (空 graph or 三角形以上の密 graph) → 空 list (PLAN §3-3 整合)。
+    """
+    from core.memory_links import list_links, _link_strength, LINK_SCAN_LIMIT
+
+    links = list_links(limit=LINK_SCAN_LIMIT)
+    adj: dict = {}
+    # link strength を pair 単位で集約 (重複時は max、_frontier_count と整合)
+    pair_strength: dict = {}
+    for link in links:
+        if link.get("link_type", "none") == "none":
+            continue
+        from_id = link.get("from_id")
+        to_id = link.get("to_id")
+        if not from_id or not to_id or from_id == to_id:
+            continue
+        adj.setdefault(from_id, set()).add(to_id)
+        adj.setdefault(to_id, set()).add(from_id)
+        s = _link_strength(link)
+        for pair in [(from_id, to_id), (to_id, from_id)]:
+            pair_strength[pair] = max(pair_strength.get(pair, 0.0), s)
+
+    candidates = []
+    for node, neighbors in adj.items():
+        if len(neighbors) != 1:
+            continue
+        nbr = next(iter(neighbors))
+        strength = pair_strength.get((node, nbr), 0.0)
+        candidates.append({
+            "name": f"predictive_frontier:{node}",
+            "score": _sigmoid(strength),
+            "kind": "graph",
+        })
+    return candidates
+
+
+def compute_graph_axis_candidates(state: dict, w_graph: float) -> list:
+    """段階13 Phase 4 commit 3: graph 軸 fire 候補統合 entry (PLAN §3-1 + §3-4)。
+
+    PLAN §3-1 literal: fire_candidates = pressure_axis(weight=w_pressure) +
+    graph_axis(weight=w_graph)。本関数は graph 軸 list を返し、各 candidate
+    の score に w_graph を multiplicative 適用済 (graph 育成度に応じた重み)。
+
+    w_graph <= 0 (空 graph、graph_maturity = 0.0) では graph 軸寄与ゼロ =
+    空 list return (PLAN §3-3「空で 0.0、pressure 軸のみ動く」literal 整合)。
+
+    Args:
+        state: state dict
+        w_graph: ∈ [0.0, 1.0]、compute_graph_maturity の結果 (重み)
+
+    Returns:
+        list[dict]: 4 candidate 関数の結果連結 + score *= w_graph 適用済。
+        各 entry format: {"name": str, "score": float, "kind": "graph"}。
+        commit 4 (main.py 配線) で render 時に件数絞る、本関数では無制限 list。
+    """
+    if w_graph <= 0.0:
+        return []
+
+    candidates: list = []
+    candidates.extend(_anomaly_candidates(state))
+    candidates.extend(_structural_tension_candidates(state))
+    candidates.extend(_relational_salience_candidates(state))
+    candidates.extend(_predictive_frontier_candidates(state))
+
+    # w_graph multiplicative 重み付け
+    for c in candidates:
+        c["score"] = c["score"] * w_graph
+
+    return candidates
