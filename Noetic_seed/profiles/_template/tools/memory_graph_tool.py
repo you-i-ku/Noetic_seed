@@ -27,7 +27,7 @@ from typing import Optional
 
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.memory import list_records
-from core.memory_links import list_links
+from core.memory_links import list_links, LINK_SCAN_LIMIT
 from core.state import load_state
 from core.tag_registry import list_registered_tags
 
@@ -140,7 +140,7 @@ def _compute_memory_edges() -> list:
     follow_links 経路と統合検討。
     """
     edges = []
-    for l in list_links(limit=10000):
+    for l in list_links(limit=LINK_SCAN_LIMIT):
         lt = l.get("link_type", "none")
         if lt == "none":
             continue

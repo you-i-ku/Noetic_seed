@@ -44,6 +44,13 @@ PHYSARUM_ALPHA = 0.1                 # up rate (Tero 2007 + EMA 典型値 0.01-0
 PHYSARUM_BETA = 0.05                 # decay rate (Tero 2007 + 半減期 14 cycle)
 STRENGTH_CAP = 1.0                   # 数学派生 saturate ceiling (α=0.1 で 10 連続 hit で saturate)
 PRUNING_STRENGTH_RATIO = 0.15        # pruning threshold = initial × 0.15 (動的相対基準)
+# graph 全走査時の link 取得上限 (default list_links limit=200 では不足)。
+# 段階11-C G-lite Phase 1 (commit 40867f2c) で確立した慣習値。隠れ根拠は
+# 本 module の pruning 機構 (PHYSARUM_BETA + PRUNING_STRENGTH_RATIO) で
+# idle link が ≒ 56 cycle で削除される設計 = 実運用で 10000 行頭打ち想定。
+# smoke 観察で実値判明したら本定数を更新、全 5 利用箇所 (dynamic_composition /
+# tag_emergence_monitor / memory_graph_tool / reflection / 本 module) に一括反映。
+LINK_SCAN_LIMIT = 10000
 
 
 def _compute_pruning_idle_cycles() -> int:
@@ -512,7 +519,7 @@ def follow_links(
         return []
     visited = set(visited) if visited else set()
     visited.add(node_id)
-    all_links = list_links(limit=10000)
+    all_links = list_links(limit=LINK_SCAN_LIMIT)
     return _traverse_depth(
         node_id, 1, depth, all_links, visited,
         link_types, min_confidence, top_n_per_depth,

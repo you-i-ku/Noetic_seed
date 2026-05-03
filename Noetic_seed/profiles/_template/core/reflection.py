@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 from core.cluster_estimation import estimate_clusters
 from core.memory import load_all_memories, memory_store
-from core.memory_links import list_links
+from core.memory_links import list_links, LINK_SCAN_LIMIT
 from core.tag_emergence_monitor import compute_cluster_mutual_information
 from core.perspective import (
     default_self_perspective,
@@ -211,7 +211,7 @@ def reflect(state: dict, call_llm_fn) -> dict:
 
     # 段階11-D Phase 6 Step 6.2: cluster MI 計算 (観察のみ、log_cycle_metrics 経由 jsonl 永続化)
     # state["phase6_metrics"] に書き、log_cycle_metrics 側が次 cycle 以降拾う
-    mi_metrics = compute_cluster_mutual_information(clusters, list_links(limit=10000))
+    mi_metrics = compute_cluster_mutual_information(clusters, list_links(limit=LINK_SCAN_LIMIT))
     if isinstance(state, dict):
         state.setdefault("phase6_metrics", {})
         state["phase6_metrics"]["cluster_mi"] = mi_metrics["cluster_mi"]

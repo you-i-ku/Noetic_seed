@@ -85,8 +85,8 @@ def _density_score(state: dict) -> float:
     既存 helper: core.memory_links.list_links。
     state 引数は signature 統一のため受取のみ (現状未参照)。
     """
-    from core.memory_links import list_links
-    links = list_links(limit=10000)
+    from core.memory_links import list_links, LINK_SCAN_LIMIT
+    links = list_links(limit=LINK_SCAN_LIMIT)
     if not links:
         return 0.0
     return _sigmoid(len(links) / N_NORMALIZE_LINK)
@@ -113,11 +113,11 @@ def _structure_score(state: dict) -> float:
 
     state 引数は signature 統一のため受取のみ (現状未参照)。
     """
-    from core.memory_links import list_links
+    from core.memory_links import list_links, LINK_SCAN_LIMIT
     from core.tag_emergence_monitor import _compute_small_world_metrics
     from core.memory import load_all_memories
 
-    links = list_links(limit=10000)
+    links = list_links(limit=LINK_SCAN_LIMIT)
     memories = load_all_memories()
     # 早期 graceful skip: helper の (i) 条件と同等、不要呼出回避
     if not links or len(memories) < 2:
@@ -168,9 +168,9 @@ def _frontier_count(state: dict) -> int:
     (small_world と同 sanitize 規則)。
     state 引数は signature 統一のため受取のみ (現状未参照)。
     """
-    from core.memory_links import list_links
+    from core.memory_links import list_links, LINK_SCAN_LIMIT
 
-    links = list_links(limit=10000)
+    links = list_links(limit=LINK_SCAN_LIMIT)
     adj: dict = {}  # node_id → set(neighbor_ids) で重複/相互 link をユニーク化
     for link in links:
         if link.get("link_type", "none") == "none":
@@ -212,9 +212,9 @@ def _avg_strength_score(state: dict) -> float:
     「strength データなし」と「中庸の strength」を概念分離。
     state 引数は signature 統一のため受取のみ (現状未参照)。
     """
-    from core.memory_links import list_links, _link_strength
+    from core.memory_links import list_links, _link_strength, LINK_SCAN_LIMIT
 
-    links = list_links(limit=10000)
+    links = list_links(limit=LINK_SCAN_LIMIT)
     valid_strengths = [
         _link_strength(link) for link in links
         if link.get("link_type", "none") != "none"
