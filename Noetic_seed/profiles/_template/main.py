@@ -118,7 +118,7 @@ from core.entropy import (
     ENTROPY_PARAMS, tick_entropy, calc_dynamic_threshold,
     calc_pressure_signals, apply_negentropy
 )
-from core.memory import _record_entry, maybe_compress_log, get_relevant_memories, format_memories_for_prompt
+from core.memory import _record_entry, maybe_compress_log, get_relevant_memories, format_memories_for_prompt, non_empty_subjective_entries
 from core import event_emitter
 from core.perspective import make_perspective
 from core.reflection import should_reflect, reflect
@@ -382,9 +382,13 @@ def main():
         get_state_before=lambda: _hook_ctx["state_before"],
         call_llm_fn=partial(call_llm, role="llm3"),
         get_cycle_id=lambda: state.get("cycle_id", 0),
+        # 段階13 Phase 1: filter 順序 (filter → slice) を non_empty_subjective_entries
+        # 経由で集約 (raw event 起源 blank subj 混入時に LLM3 post 評価 context が空に
+        # なる同型 bug fix、Codex review 2 周目指摘 + 横断 grep 発見)。
         get_recent_intents=lambda: [
-            e.get("intent", "") for e in state.get("subjective_entries", [])[-3:]
-            if e.get("intent")
+            e["intent"] for e in non_empty_subjective_entries(
+                state.get("subjective_entries", [])
+            )[-3:] if e.get("intent")
         ],
     )
 

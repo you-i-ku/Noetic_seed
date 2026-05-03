@@ -34,6 +34,9 @@ SUBJECTIVE_FIELDS = frozenset({
     "actual_e2", "actual_ec",
     "prediction_error", "prediction_error_ec",
     "per_tool", "parse_error",
+    # 段階13 Phase 1: Layer B enrichment (memory.jsonl と同名で統一、
+    # _enrich_subjective_inline で entry mutate 経由 inline 注入される)
+    "keywords", "contextual_description", "embedding",
 })
 PARTITION_META_FIELDS = frozenset({"perspective", "to_perspective"})
 SCHEMA_META_FIELDS = frozenset({"_unclassified_fields"})
@@ -312,6 +315,63 @@ def load_all_memories() -> list:
     return all_entries
 
 
+def non_empty_subjective_entries(entries: list) -> list:
+    """段階13 Phase 1: subj entries list から intent / expect どちらか non-empty のみ抽出。
+
+    raw/subj 二層化 (Phase 0.1.A) で blank subj entry (id-only、raw event 起源) が
+    日常的に存在する構造 (`_split_entry_fields` の SUBJECTIVE_FIELDS に id 含まれる)
+    のため、subj 消費者は「filter → slice/limit」順序を必須とする。
+
+    本 helper で全消費者の semantic 契約を集約 (Phase 0 設計対称性継承、
+    Phase 2-7 で Layer C/D 消費者追加時にも再利用想定):
+      - state["subjective_entries"] (in-memory view) でも
+      - load_all_subjective_entries() (jsonl 全件) でも
+      同関数で扱えるよう list 経由 signature。
+
+    順序は元 list の順序維持 (slice/limit は呼出側で合わせる)。
+
+    Args:
+        entries: subj entry list (state["subjective_entries"] or
+                 load_all_subjective_entries() の出力等)
+    Returns:
+        intent または expect が non-empty な subj entry の list (元順序)
+    """
+    return [s for s in entries if (s.get("intent") or s.get("expect"))]
+
+
+def load_all_subjective_entries() -> list:
+    """段階13 Phase 1: subjective_entries.jsonl を全件 read して list で返す。
+
+    `load_all_memories` と同型 (cap なし、全件 reverse 順 = 新しい順)。
+    `find_similar_subjective` (entity_resolver) と get_relevant_memories の
+    subj 拡張で消費される。
+
+    cap なし設計 (Q2 ゆう判断 2026-04-26 継承): 「先に固定値を決めず観察 log で
+    cap 必要性を実証判断」=PLAN §11-4「マジックナンバー 0」精神延長。
+
+    Returns:
+        全 subjective entry の list (新しい順)。ファイル不在 / 読取失敗 / 壊れ
+        行は graceful skip (load_all_memories と同 isolation)。
+    """
+    MEMORY_DIR.mkdir(exist_ok=True)
+    fpath = MEMORY_DIR / "subjective_entries.jsonl"
+    if not fpath.exists():
+        return []
+    try:
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    entries: list = []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+    return entries
+
+
 def list_records(network, limit: int = 20) -> list:
     """指定ネットワークの jsonl を新しい順に読んで直近 limit 件を返す。
     WM の C-gradual 同期 (段階3) 等、検索ではなく全件走査系の消費者向け。
@@ -435,7 +495,13 @@ def get_relevant_memories(
       use_links=True と組み合わせて 3 経路 (semantic / link / tag-filtered)
       hybrid retrieval が成立。経路別 top-k=5 / 統合 top-k=8 (PLAN §11-1)。
     """
-    recent_intents = [e.get("intent", "") for e in state.get("subjective_entries", [])[-5:] if e.get("intent")]
+    # 段階13 Phase 1: filter 順序 (filter → slice) を non_empty_subjective_entries
+    # 経由で集約 (raw event 起源の blank subj 混入時に query が空になるのを防ぐ、
+    # Codex review 2 周目指摘の同型 bug fix を本箇所にも適用)。
+    recent_intents = [
+        e["intent"] for e in non_empty_subjective_entries(state.get("subjective_entries", []))[-5:]
+        if e.get("intent")
+    ]
 
     # archive からの最近の [external] 入力を優先的に取得
     external_mems = _recent_externals_from_archive(limit=3)
@@ -502,6 +568,23 @@ def get_relevant_memories(
                 merged.append(entry)
                 seen_ids.add(eid)
 
+    # 段階13 Phase 1: subjective entry 直近 N 件を kind='subjective' marker で append。
+    # PLAN §21-6 (d) literal「結果 list に subj entry も append」+ 案 b (concept-perception
+    # alignment) literal: subj は memory と概念分離、prompt 表示でも分離。
+    # Phase 1 lean = recent 直近 (find_similar_subjective による hybrid 統合は Phase 1+ で
+    # 別経路、memo §実装案 d-2 lean 採用)。固定 3 件 (limit の保守的な比率、未来の調整は
+    # kwarg 化で対応、Phase 1 では新規 kwarg 追加しない方針)。
+    # ★ Codex review 2 周目反映: filter 順序 (filter → slice) を non_empty_subjective_entries
+    # 経由で集約。slice 先 → blank skip だと「直近 3 件全部 raw event 起源」の場合に subj
+    # context 1 件も拾えない bug を解消 (filter 後に slice すれば real subj が常に直近 3 件
+    # 取得される、Phase 0.1.A 設計の構造的帰結への対応)。
+    for s in non_empty_subjective_entries(state.get("subjective_entries", []))[-3:]:
+        sid = s.get("id")
+        if not sid or sid in seen_ids:
+            continue
+        merged.append({**s, "kind": "subjective"})
+        seen_ids.add(sid)
+
     return merged
 
 
@@ -557,6 +640,18 @@ def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
     lines = []
     total = 0
     for m in memories:
+        # 段階13 Phase 1: subjective entry の専用 render 分岐 (案 b = concept-perception
+        # alignment、ゆう判断 2026-05-03)。memory との概念分離を prompt 上でも明示。
+        # subj entry は intent / expect 構造、memory の content とは別 schema。
+        if m.get("kind") == "subjective":
+            intent = (m.get("intent", "") or "")[:200]
+            expect = (m.get("expect", "") or "")[:200]
+            line = f"  [subjective] intent={intent} | expect={expect}"
+            if total + len(line) > max_chars:
+                break
+            lines.append(line)
+            total += len(line)
+            continue
         network = m.get("network", "?")
         content = m.get("content", "")[:300]
         meta = m.get("metadata", {})
@@ -734,12 +829,63 @@ def _archive_entries(entries: list):
     _update_jsonl_index("subjective_entries.jsonl", entries)
 
 
+def _enrich_subjective_inline(entry: dict) -> None:
+    """段階13 Phase 1: entry を mutate して subj 部分に keywords / contextual_description
+    / embedding を inline 注入する (Layer B enrichment)。
+
+    PLAN §18-A4 (iv') literal: 既存 _generate_memory_metadata (A-MEM 準拠) と
+    _embed_sync (bge-m3) を直流用、新規実装ほぼゼロ。
+
+    text 組み立ては `intent + expect` (Phase 0.4 check_raw_subjective_gap と
+    同 subj 側 text、PLAN §21-2 流用)。
+
+    graceful skip:
+      - intent / expect 両方空 → skip (raw event のみ entry も既存)
+      - LLM / embedding 失敗 → print + 該当 field 空 / 未注入で進む
+        (memory_store の既存 graceful pattern 流用、reflect 継続原則)
+      - is_vector_ready() False → embedding skip
+
+    entry を mutate するため、後続の _archive_entries / _record_entry の
+    _split_entry_fields で両端 (jsonl + state) に同 enriched subj_part が反映
+    される (Phase 0.1.D の id 共有契約維持、二重不整合リスク回避)。
+    """
+    intent = entry.get("intent", "") or ""
+    expect = entry.get("expect", "") or ""
+    if not intent and not expect:
+        return  # subj field なし、enrich 対象外
+
+    text = f"intent: {intent}\nexpect: {expect}"
+
+    # keywords + contextual_description (LLM 同期、A-MEM 準拠 _generate_memory_metadata 直流用)
+    if entry.get("keywords") is None and entry.get("contextual_description") is None:
+        try:
+            metadata = _generate_memory_metadata(text, "(subjective)")
+            entry["keywords"] = metadata.get("keywords", [])
+            entry["contextual_description"] = metadata.get("contextual_description", "")
+        except Exception as e:
+            print(f"  [phase1] subj metadata 生成 skip (error: {e})")
+            entry["keywords"] = []
+            entry["contextual_description"] = ""
+
+    # embedding (bge-m3、is_vector_ready チェック込み graceful)
+    if entry.get("embedding") is None and is_vector_ready():
+        try:
+            vecs = _embed_sync([text])
+            if vecs and len(vecs) == 1:
+                entry["embedding"] = list(vecs[0])
+        except Exception as e:
+            print(f"  [phase1] subj embedding 生成 skip (error: {e})")
+
+
 def _record_entry(state: dict, entry: dict) -> None:
     """段階13 Phase 0.1.D: entry を archive + raw/subj jsonl + in-memory views に同期記録。
 
     呼出側 (main.py × 5 site) を 1 行に集約 (Option A 精神継承)。
 
     挙動:
+      0. (段階13 Phase 1) _enrich_subjective_inline(entry): entry mutate で
+         subj 部分に keywords / contextual_description / embedding を inline 注入。
+         intent / expect 両方空なら skip (raw event のみ)。
       1. _archive_entries([entry]): archive_YYYYMMDD.jsonl + raw_events.jsonl
          + subjective_entries.jsonl + index.json (0.1.A dual emit + 0.1.B index)
       2. state["raw_events"].append(raw_part) + state["subjective_entries"]
@@ -749,6 +895,7 @@ def _record_entry(state: dict, entry: dict) -> None:
 
     save_state は呼出側責務 (site 毎に呼ぶ/呼ばない判断が異なる)。
     """
+    _enrich_subjective_inline(entry)
     _archive_entries([entry])
     raw_part, subj_part, _ = _split_entry_fields(entry)
     state["raw_events"].append(raw_part)
