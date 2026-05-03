@@ -230,6 +230,19 @@ def main():
     # で record_ec_prediction_error(source="raw_subj_gap") に流す (check_on_write sibling)。
     from core.reconciliation import check_raw_subjective_gap
     event_emitter.subscribe(check_raw_subjective_gap)
+    # 段階13 Phase 2: Layer C JEPA 流予測 observer。subscribe 順序 snapshot で
+    # check_raw_subjective_gap 後に発火、subj_part に embedding が enrich 済の
+    # 状態で「前回 predicted vs 今回 actual」cosine 距離計算 + 次 predict_next
+    # 計算 + train trigger を行う。Phase 0.4 check_raw_subjective_gap と同型の
+    # post-write subscriber pattern (entry mutate しない、判断 5 確定)。
+    # torch 未 install / sequence 不足 / 例外時は全 graceful skip (Phase 0/1
+    # 影響ゼロ保証、判断 4 案 Y 完全独立 module の boundary 維持)。
+    # link 接続 (prediction_error → update_link_strength_used) は Phase 3
+    # (TE + Bayesian) で「どの link を update するか」を意味的に確定させる
+    # 自然構造を壊さないため、Phase 2 では state history に蓄積するのみ
+    # (判断 8 案 a deferred、PLAN §4-3 「3 段重ね現実解」に着地)。
+    from core.jepa_runtime import jepa_observe_entry
+    event_emitter.subscribe(jepa_observe_entry)
     print(f"session: {state['session_id']}  cycle_id: {state['cycle_id']}")
     broadcast_state(state)
 

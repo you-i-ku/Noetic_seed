@@ -39,3 +39,9 @@ claude-agent-sdk
 
 # self-test (iku の自己診断経路)
 pytest
+
+# 段階13 Phase 2: Layer C JEPA 流予測 (next entry の bge-m3 embedding 位置予測、
+# 空間的予測誤差 = cosine 距離)。CPU 版 wheel を確実に install するため
+# extra-index-url で PyTorch CPU を優先 (Noetic CPU 動作前提)。
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
