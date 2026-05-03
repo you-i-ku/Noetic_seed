@@ -1044,6 +1044,16 @@ def main():
         # UPS v2 pending 淘汰
         pending_prune(state, current_cycle=cid)
 
+        # 段階13 Phase 3: TE + Bayesian maintenance (経路 B、毎 cycle 自動実行)
+        # graph 全 link の transfer entropy + Beta posterior 更新。
+        # PLAN §4-6 重畳: 既存 EMA + 新 Bayesian_TE (α_old/α_new = 0.5/0.5)。
+        # reflect 継続原則で例外は catch、メイン処理を止めない。
+        try:
+            from core.transfer_entropy import maybe_te_maintenance
+            maybe_te_maintenance(state, current_cycle=cid)
+        except Exception as e:
+            print(f"  [transfer_entropy] maintenance skip (error: {e})")
+
         # 段階11-D Phase 3 Step 3.5: 弱 link の prune (Physarum rule、cycle 終端 batch)
         # idle >= β 半減期 × 4 (≒56 cycle) かつ strength < initial × 0.15 で削除。
         # reflect 継続原則で例外は catch、メイン処理を止めない。
