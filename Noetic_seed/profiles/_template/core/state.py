@@ -196,8 +196,6 @@ def load_state() -> dict:
                 data["last_e3"] = 0.5
             if "last_e4" not in data:
                 data["last_e4"] = 0.5
-            if "tools_created" not in data:
-                data["tools_created"] = []
             if "entropy" not in data:
                 data["entropy"] = 0.65
             if "drives_state" not in data:
@@ -221,7 +219,7 @@ def load_state() -> dict:
         except json.JSONDecodeError:
             pass
     from core.world_model import init_world_model
-    fresh = {"raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "tools_created": [], "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
+    fresh = {"raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
     # 段階13 Phase 0.1.B: state.json が無くても jsonl があれば rebuild
     # (state.json 削除 + memory/ 残存ケースの safety net)
     _rebuild_views_from_jsonl(fresh)

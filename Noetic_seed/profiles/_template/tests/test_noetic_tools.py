@@ -33,7 +33,8 @@ def _fake_tools_dict():
         "camera_stream", "camera_stream_stop", "screen_peek",
         "auth_profile_info", "secret_read", "secret_write",
         # 余分 (noetic_ext 対象外、無視されるべき)
-        "elyth_post", "x_post", "create_tool",
+        # 段階13 Phase 6.1 で create_tool 撤廃に伴い elyth_post / x_post のみ残す
+        "elyth_post", "x_post",
     ]
     d = {}
     for n in names:
@@ -76,13 +77,12 @@ def test_registered_tool_names_match():
 
 
 def test_extra_tools_ignored():
-    print("== 対象外 tool (elyth_post / x_post / create_tool) は登録されない ==")
+    print("== 対象外 tool (elyth_post / x_post) は登録されない ==")
     reg = ToolRegistry()
     register_noetic_tools(reg, _fake_tools_dict())
     return all([
         _assert(not reg.has("elyth_post"), "elyth_post 登録なし"),
         _assert(not reg.has("x_post"), "x_post 登録なし"),
-        _assert(not reg.has("create_tool"), "create_tool 登録なし"),
     ])
 
 

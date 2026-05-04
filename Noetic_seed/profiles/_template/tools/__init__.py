@@ -3,7 +3,6 @@ from tools.builtin import _update_self, _wait_or_dismiss, _view_image, _listen_a
 from tools.x_tools import _x_timeline, _x_search, _x_get_notifications, _x_post, _x_reply, _x_quote, _x_like
 from tools.elyth_tools import _elyth_post, _elyth_reply, _elyth_like, _elyth_follow, _elyth_info, _elyth_get, _elyth_mark_read
 from tools.memory_tool import _search_memory, _tool_memory_store, _tool_memory_update, _tool_memory_forget, _tool_search_memory
-from tools.sandbox import _create_tool, _exec_code, _run_ai_tool, AI_CREATED_TOOLS, _DANGEROUS_PATTERNS
 from tools.ui_tools import _output_display
 from tools.device_tools import _camera_stream, _camera_stream_stop, _screen_peek, _mic_record
 from tools.http_tool import http_request
@@ -35,8 +34,6 @@ TOOLS = {
     "memory_update": {"desc": "記憶を更新。引数: memory_id= [content=] [confidence=]", "func": _tool_memory_update},
     "memory_forget": {"desc": "記憶を削除。引数: memory_id=", "func": _tool_memory_forget},
     "reflect":       {"desc": "自己を内省し、学びや気づきを記憶に保存する（引数なし）", "func": lambda args: "[reflect] main.pyで初期化されます"},
-    "create_tool":  {"desc": "AI製ツールを登録（Human-in-the-loop）。引数: name=ツール名 code=Pythonコード（またはfile=sandbox/tools/xxx.py）", "func": _create_tool},
-    "exec_code":    {"desc": "sandbox/内のPythonファイルを実行（Human-in-the-loop）。引数: file=sandbox/xxx.py（またはcode=インラインコード）intent=実行目的 [message=外部への説明]", "func": _exec_code},
     "output_display":    {"desc": "発話を channel 指定で届ける。送信先 channel は WM.channels を観察して決定、受信 channel に対応させて返す (log entry の [channel=X] header の X と同じ値を channel 引数に指定すると対応した相手に返る)。引数: content=メッセージ channel=送信先 channel id (必須)", "func": _output_display},
     "camera_stream":     {"desc": "端末のカメラ経由で連続撮影を非同期に開始する。最初のフレームは実行時に視覚入力（描写付きで返る）。後続フレームはローリング最新5枚として次サイクル以降の視覚入力に到着。観察中も他ツールを並行実行可能（read_file/reflect/memory_store等）。引数: [facing=back/front] [frames=枚数 0=無制限/1-30 default=5] [interval_sec=間隔 0.3-5.0 default=1.0] [message=外部への撮影依頼理由]。frames=0 は camera_stream_stop で明示終了（Android側絶対上限10分）、frames=1 は単発。承認必須。", "func": _camera_stream},
     "camera_stream_stop": {"desc": "アクティブな camera_stream / screen_peek を停止する。観察対象を把握した後、リソース節約のために呼ぶ。引数なし", "func": _camera_stream_stop},
@@ -58,20 +55,13 @@ TOOLS = {
 # H-2 C.4 Session A (2026-04-18): list_files/read_file/write_file は claw ネイティブ
 # (glob_search / read_file / write_file) に移行。Noetic ガードは file_access_guard
 # hook で再現。legacy handler は bridge から削除。
+# 段階13 Phase 6.1 (2026-05-04): exec_code / create_tool 撤廃に伴い、Level 4-6
+# (旧 sandbox 実行 + AI 製ツール登録 + 全 tool fullset) を Level 3 に統合。
+# 自己改変経路は write_file / edit_file / bash の 3 種に集約 (PLAN §5-4)。
 _CLAW_FILE_OPS = {"read_file", "write_file", "glob_search", "WebSearch", "WebFetch"}
-_LV3_TOOLS = (
-    set(TOOLS.keys()) - {"create_tool", "exec_code"}
-    | _CLAW_FILE_OPS
-)
 LEVEL_TOOLS = {
     0: {"glob_search", "read_file", "wait", "update_self", "output_display", "view_image", "listen_audio", "bash"},
     1: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_graph", "world_fact_view", "reflect", "output_display", "view_image", "listen_audio", "bash"},
     2: {"glob_search", "read_file", "wait", "update_self", "write_file", "search_memory", "memory_store", "memory_update", "memory_forget", "memory_graph", "world_fact_view", "reflect", "WebSearch", "WebFetch", "output_display", "view_image", "listen_audio", "bash", "reboot"},
-    3: _LV3_TOOLS | {"bash"},
-    4: _LV3_TOOLS | {"create_tool", "bash"},
-    # 段階12 Step 7: self_modify 撤廃により Level 5 = Level 6 = TOOLS 全部。
-    # Level 5/6 区別は将来の拡張余地として残置 (例: 存在基盤コード書換えに
-    # 別承認フラグを要求する場合の Level 切り分け、PLAN §15-2 罠③ 対策)。
-    5: set(TOOLS.keys()) | _CLAW_FILE_OPS | {"bash"},
-    6: set(TOOLS.keys()) | _CLAW_FILE_OPS | {"bash"},
+    3: set(TOOLS.keys()) | _CLAW_FILE_OPS | {"bash"},
 }

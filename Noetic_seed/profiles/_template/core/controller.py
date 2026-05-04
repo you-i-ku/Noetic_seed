@@ -1,7 +1,7 @@
 """Controller（制御層）+ controller_select + intent-conditioned scoring"""
 import re
 import random
-from core.config import SANDBOX_TOOLS_DIR, WORLD_MODEL_CFG
+from core.config import WORLD_MODEL_CFG
 from core.state import load_pref, merge_log_view
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.eval import predict_result_novelty
@@ -11,37 +11,19 @@ from core.predictor import get_predictor
 _PREDICTOR = get_predictor(WORLD_MODEL_CFG.get("predictor_mode", "light"))
 
 
-def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tools: dict, dangerous_patterns: list, run_ai_tool_fn) -> dict:
-    """E値とenergyから構造的制約を導出。ツール解放レベルを判定。"""
-    energy = state.get("energy", 50)
-    # 段階13 Phase 0.1.D: tool 別 e2 平均 + Level 6 解放判定で raw (tool/result) と
-    # subjective (e2) の両層 field を同時参照するため merge view を使う
-    log = merge_log_view(state)
+def controller(state: dict, tools_dict: dict, level_tools: dict) -> dict:
+    """E値とenergyから構造的制約を導出。ツール解放レベルを判定。
 
-    # --- sandbox/tools/ をスキャンしてAI製ツールを動的ロード ---
-    if SANDBOX_TOOLS_DIR.exists():
-        for tool_path in sorted(SANDBOX_TOOLS_DIR.glob("*.py")):
-            tname = tool_path.stem
-            if tname in tools_dict:
-                continue
-            try:
-                code = tool_path.read_text(encoding="utf-8")
-                dangerous = [p for p in dangerous_patterns if p in code]
-                if dangerous:
-                    print(f"  [scan] {tname}: 危険パターン検出、スキップ {dangerous}")
-                    continue
-                namespace: dict = {}
-                exec(compile(code, str(tool_path), "exec"), namespace)
-                func = namespace.get("run") or namespace.get(tname)
-                if func and callable(func):
-                    tdesc = namespace.get("DESCRIPTION", tname)
-                    ai_created_tools[tname] = func
-                    tools_dict[tname] = {
-                        "desc": f"[AI製] {tdesc}",
-                        "func": lambda a, f=func: run_ai_tool_fn(f, a),
-                    }
-            except Exception as e:
-                print(f"  [scan] {tname}: 読み込み失敗 ({e})")
+    段階13 Phase 6.1 (2026-05-04): exec_code / create_tool / 旧 self_modify
+    撤廃に伴い signature 簡素化 (ai_created_tools / dangerous_patterns /
+    run_ai_tool_fn 引数撤去)、sandbox/tools/ 動的 load 機構 + Level 4-6
+    昇格 logic を削除。Level 0-3 のみ残し、Level 3 = TOOLS 全 + bash + claw 系
+    を最終解放とする。
+    """
+    energy = state.get("energy", 50)
+    # 段階13 Phase 0.1.D: tool 別 e2 平均で raw (tool/result) と subjective (e2)
+    # の両層 field を同時参照するため merge view を使う
+    log = merge_log_view(state)
 
     # --- ツール順序: 各ツールの過去E2平均で並べる ---
     tool_e2 = {}
@@ -62,59 +44,17 @@ def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tool
 
     ranked = sorted(tools_dict.keys(), key=lambda t: tool_avg[t], reverse=True)
 
-    # --- tool_level による段階解放 ---
+    # --- tool_level による段階解放 (Level 0-3、Phase 6.1 で 0-6 から縮約) ---
     fr = set(state.get("files_read", []))
     fw = set(state.get("files_written", []))
     lv = state.get("tool_level", 0)
     new_lv = lv
-    tc = state.get("tools_created", [])
     if lv == 0 and len(fr) >= 1:
         new_lv = 1
     elif lv == 1 and len(fr) >= 2:
         new_lv = 2
     elif lv == 2 and len(fr) >= 1 and len(fw) >= 1 and len(fr) + len(fw) >= 5:
         new_lv = 3
-    elif lv == 3 and any(f.endswith(".py") for f in fw):
-        new_lv = 4
-    elif lv == 4 and len(tc) >= 1:
-        new_lv = 5
-
-    # Level 6: bash + 全 tool fullset (旧 self_modify 解放経路、段階12 Step 7 で
-    # 撤廃。Level 5 = Level 6 = TOOLS 全部、Level 区別は将来拡張余地として残置)
-    if lv == 5:
-        ec_entries = [e for e in log if e.get("tool") == "exec_code"]
-        ct_entries = [e for e in log if e.get("tool") == "create_tool"]
-        if len(ec_entries) + len(ct_entries) >= 7 and len(ec_entries) >= 2 and len(ct_entries) >= 2:
-            if tool_avg.get("exec_code", 0) >= 65 and tool_avg.get("create_tool", 0) >= 65:
-                def _e2_list(entries):
-                    result = []
-                    for e in entries:
-                        m = re.search(r'(\d+)%', str(e.get("e2", "")))
-                        if m:
-                            result.append(int(m.group(1)))
-                    return result
-                def _std(vals):
-                    if len(vals) < 2:
-                        return 0.0
-                    mean = sum(vals) / len(vals)
-                    return (sum((x - mean) ** 2 for x in vals) / len(vals)) ** 0.5
-                ec_std = _std(_e2_list(ec_entries[-3:]))
-                ct_std = _std(_e2_list(ct_entries[-3:]))
-                if ec_std < 20 and ct_std < 20:
-                    def _err_rate(entries, tool):
-                        valid = [e for e in entries if not str(e.get("result", "")).startswith("キャンセル")]
-                        if not valid:
-                            return 1.0
-                        if tool == "exec_code":
-                            errs = [e for e in valid if
-                                    str(e.get("result", "")).startswith("タイムアウト") or
-                                    "[stderr]" in str(e.get("result", ""))]
-                        else:
-                            errs = [e for e in valid if
-                                    str(e.get("result", "")).startswith(("コンパイルエラー", "エラー:"))]
-                        return len(errs) / len(valid)
-                    if _err_rate(ec_entries, "exec_code") <= 0.3 and _err_rate(ct_entries, "create_tool") <= 0.3:
-                        new_lv = 6
 
     allowed = set(level_tools[new_lv])
 

@@ -58,8 +58,9 @@ def list_auth_profile_names() -> list[str]:
 # === LLM クレデンシャル（内部専用、tools/ からは import 禁止）===
 # このファイルを介してのみ LLM キーにアクセスする。
 # tools/auth_tools.py は llm_providers セクションを絶対に露出しない。
-# iku が exec_code で直接 core.auth._load_secrets() を呼ぶことは原理的に可能だが、
-# その場合 exec_code の承認ゲートで人間がコードを確認する設計になっている。
+# 段階13 Phase 6.1 (2026-05-04) で exec_code 撤廃済。LLM クレデンシャルへの
+# 直接アクセスは bash 経由 (Level 3 解放後) でも file_access_guard +
+# bash_path_guard により sandbox/secrets/ + secrets.json は保護される。
 
 def get_llm_credentials(provider: str) -> dict | None:
     """LLM プロバイダのクレデンシャル取得（core/llm.py 専用）。

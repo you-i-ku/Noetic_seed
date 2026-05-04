@@ -130,9 +130,9 @@ def test_bridge_schema_has_approval_layer():
 
 def test_readonly_set_reasonable():
     print("== _READ_ONLY_LEGACY_TOOLS に危険 tool が含まれないこと ==")
-    # 段階12 Step 7: self_modify 撤廃に伴い dangerous set から除外
-    dangerous = {"exec_code", "create_tool",
-                 "elyth_post", "x_post", "output_display",
+    # 段階12 Step 7 で self_modify、段階13 Phase 6.1 で exec_code/create_tool
+    # を撤廃。残る危険 tool は SNS 投稿系 + UI/メディア系。
+    dangerous = {"elyth_post", "x_post", "output_display",
                  "mic_record", "camera_stream", "screen_peek"}
     overlap = dangerous & _READ_ONLY_LEGACY_TOOLS
     return _assert(not overlap, f"危険 tool なし (実={overlap})")

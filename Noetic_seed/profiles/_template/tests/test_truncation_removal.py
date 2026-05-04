@@ -166,17 +166,15 @@ def test_elyth_tools_src_no_content_truncation():
 
 def test_preserved_truncations_intact():
     print("== 維持対象の truncation が誤って撤去されてない ==")
-    from tools import http_tool, elyth_tools, sandbox
-    # http_tool の error msg 切り詰めは維持
+    # 段階13 Phase 6.1 (2026-05-04): tools.sandbox 撤廃に伴い sandbox の
+    # output[:5000] check を除外。残る維持対象は http_tool error msg と
+    # elyth JSON response の 2 件。
+    from tools import http_tool, elyth_tools
     http_src = inspect.getsource(http_tool)
-    # elyth の JSON[:3000] は維持
     elyth_src = inspect.getsource(elyth_tools)
-    # sandbox の output[:5000] は維持
-    sandbox_src = inspect.getsource(sandbox)
     return all([
         _assert("str(e)[:200]" in http_src, "http_tool error msg 切り詰め維持"),
         _assert("[:3000]" in elyth_src, "elyth JSON response 切り詰め維持"),
-        _assert("[:5000]" in sandbox_src, "sandbox bash output 切り詰め維持"),
     ])
 
 

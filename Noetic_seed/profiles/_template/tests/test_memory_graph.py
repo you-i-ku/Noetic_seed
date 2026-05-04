@@ -377,7 +377,6 @@ def _build_minimal_controller_args(state_overrides: dict = None):
         "energy": 50,
         "files_read": ["file1", "file2", "file3"],   # tool_level >=2 確保
         "files_written": ["w1", "w2"],
-        "tools_created": [],
         "tool_level": 2,                              # memory_graph が level 1+ なので 2 で十分
         "voluntary_memory_store_count": 0,
         "self": {},
@@ -388,9 +387,6 @@ def _build_minimal_controller_args(state_overrides: dict = None):
         "state": state,
         "tools_dict": dict(TOOLS),
         "level_tools": LEVEL_TOOLS,
-        "ai_created_tools": {},
-        "dangerous_patterns": [],
-        "run_ai_tool_fn": lambda f, a: "",
     }
 
 
