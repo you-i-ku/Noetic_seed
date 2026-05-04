@@ -435,46 +435,75 @@ def make_file_access_guard(
     """
     from pathlib import Path
 
+    # W3-min (PLAN §5-4 Codex rescue 提案): file_access_guard は path
+    # 評価を path_resolver helper と共有。secrets.json / sandbox/secrets/
+    # 判定も canonical な workspace 相対 POSIX で行うため、Windows case /
+    # traversal / whitespace / 等の path quirk が approval_rules / git_auto_stash
+    # / pending_body_modify と完全一致する。
+    import os
+    from core.runtime.path_resolver import path_resolve_for_policy
+
     root = Path(workspace_root).resolve()
-    secrets_dir = (root / sandbox_dir_name / secrets_subdir).resolve()
-    secrets_json = (root / secrets_json_name).resolve()
-
-    def _resolve(path_str: str):
-        if not path_str:
-            return None
-        try:
-            return (root / path_str).resolve()
-        except Exception:
-            return None
-
-    def _is_inside(target, base) -> bool:
-        try:
-            target.relative_to(base)
-            return True
-        except ValueError:
-            return False
+    # secrets.json / sandbox/secrets/ も canonical 相対 POSIX (Windows lowercase)
+    # で比較する基準値を pre-compile。
+    # Codex review 7 周目 P1 fix: secrets dir は **完全一致 + prefix 両方** で
+    # deny する必要 (`path: "sandbox/secrets"` 末尾 / なしも directory 自体への
+    # アクセスとして禁止、grep_search/glob_search で directory enumerate 防御)。
+    secrets_json_rel = secrets_json_name.lower() if os.name == "nt" else secrets_json_name
+    secrets_dir_rel = (
+        f"{sandbox_dir_name}/{secrets_subdir}".lower()
+        if os.name == "nt"
+        else f"{sandbox_dir_name}/{secrets_subdir}"
+    )
+    secrets_dir_rel_prefix = secrets_dir_rel + "/"
 
     def _check(tool_name: str, tool_input: dict) -> HookRunResult:
         if tool_name not in set(guarded_read_tools) | set(guarded_write_tools):
             return HookRunResult.allow()
 
-        # tool 別に path / pattern 引数を取得
+        # tool 別に path / pattern 引数を取得 (raw、resolver 内 strip)
         if tool_name in ("glob_search", "grep_search"):
-            path_arg = str(tool_input.get("path") or tool_input.get("pattern") or "").strip()
+            path_arg = str(tool_input.get("path") or tool_input.get("pattern") or "")
         else:
-            path_arg = str(tool_input.get("path") or "").strip()
+            path_arg = str(tool_input.get("path") or "")
 
-        if not path_arg:
+        if not path_arg.strip():
             return HookRunResult.allow()
-
-        target = _resolve(path_arg)
-        if target is None:
-            return HookRunResult.allow()  # claw 側の boundary check に委譲
 
         is_write = tool_name in guarded_write_tools
 
-        # 1. secrets.json 保護
-        if target == secrets_json:
+        # path_resolver 経由で canonical workspace 相対 POSIX 取得
+        # (workspace 外 / disallowed char / resolve error → None)
+        rel = path_resolve_for_policy(path_arg, root)
+
+        # workspace 外 path
+        if rel is None:
+            if is_write:
+                # 段階12 Step 2 (PLAN §3-2): write 系 tool は profile 境界内のみ。
+                # disallowed char (null byte / 制御 byte) も None になるため
+                # 同じ deny 経路に流れる (一律「profile 外」扱い、安全側)。
+                return HookRunResult.deny([
+                    f"[file_guard] {tool_name} はプロファイル境界外への書込みを"
+                    f"禁止しています (指定パス: {path_arg}, profile_root: {root})。"
+                    f"パスを profile 配下に変更してください "
+                    f"(例: sandbox/<file>, core/<file>, tools/<file>, etc.)。"
+                ])
+            return HookRunResult.allow()  # read は claw 側 boundary check に委譲
+
+        # 0. workspace root 全 scan の deny (Codex rescue 7 周目 RISK-2 fix)
+        # grep_search/glob_search で path="." (= workspace root 相対 = ".")
+        # を渡すと、root 配下全 scan に sandbox/secrets/ が含まれる。
+        # 具体的 dir 指定を強制して root 全 scan を防御。
+        if tool_name in ("glob_search", "grep_search") and rel == ".":
+            return HookRunResult.deny([
+                f"[file_guard] {tool_name} は workspace root 全 scan できません "
+                f"(sandbox/{secrets_subdir}/ 配下が含まれるため)。"
+                f"具体的な dir / path を指定してください "
+                f"(例: path='core', path='memory', path='sandbox', etc.)。"
+            ])
+
+        # 1. secrets.json 保護 (canonical 相対 POSIX で比較、Windows case 対応)
+        if rel == secrets_json_rel:
             return HookRunResult.deny([
                 f"[file_guard] secrets.json は直接アクセスできません "
                 f"(tool={tool_name}, path={path_arg})。"
@@ -482,25 +511,14 @@ def make_file_access_guard(
                 f"(機密フィールドは隠されます)。"
             ])
 
-        # 2. sandbox/secrets/ 保護
-        if _is_inside(target, secrets_dir):
+        # 2. sandbox/secrets/ 保護 (Codex 7 周目 P1 fix: 完全一致 + prefix 両方)
+        if rel == secrets_dir_rel or rel.startswith(secrets_dir_rel_prefix):
             redirect = "secret_write" if is_write else "secret_read"
             action = "書き込む" if is_write else "読む"
             return HookRunResult.deny([
                 f"[file_guard] sandbox/{secrets_subdir}/ には直接アクセスできません "
                 f"(tool={tool_name}, path={path_arg})。"
                 f"{redirect} を使って {action} (引数は name=<secret名>)。"
-            ])
-
-        # 3. 段階12 Step 2 (PLAN §3-2): write 系 tool は profile 境界内のみ
-        #    許可。target は既に resolve() 済 (canonical 化されてる) ため、
-        #    symbolic link / .. / ジャンクション抜けも relative_to で網羅判定。
-        if is_write and not _is_inside(target, root):
-            return HookRunResult.deny([
-                f"[file_guard] {tool_name} はプロファイル境界外への書込みを"
-                f"禁止しています (指定パス: {path_arg}, profile_root: {root})。"
-                f"パスを profile 配下に変更してください "
-                f"(例: sandbox/<file>, core/<file>, tools/<file>, etc.)。"
             ])
 
         return HookRunResult.allow()
@@ -592,19 +610,18 @@ def make_git_auto_stash_hook(
         rel_profile = profile_name
     pathspec = rel_profile.rstrip("/") + "/"
 
+    # 段階13 Phase 6.2 W 案 (PLAN §5-4): 身体改変 path 判定は単一 helper
+    # (path_classifier.is_body_modify_path) に集約。Path.resolve() canonical
+    # 化 + Windows case 対応 + traversal 透過で、approval_rules / git_auto_stash
+    # / pending_body_modify の 3 hook が同じ判定を共有する。
+    from core.runtime.path_resolver import is_body_modify_path as _is_body_modify_helper
+
     def _is_body_modify(path_arg: str) -> bool:
-        if not path_arg:
-            return False
-        # Windows backslash → POSIX forward slash のみ正規化。
-        # `lstrip("./")` は ".mcp.json" の先頭 "." まで削るため使わない。
-        normalized = path_arg.replace("\\", "/")
-        for name in body_modify_filenames:
-            if normalized == name or normalized.endswith(f"/{name}"):
-                return True
-        for prefix in body_modify_dir_prefixes:
-            if normalized.startswith(prefix):
-                return True
-        return False
+        return _is_body_modify_helper(
+            path_arg, profile_root,
+            dir_prefixes=body_modify_dir_prefixes,
+            filenames=body_modify_filenames,
+        )
 
     def _drop_old_generations() -> None:
         try:
@@ -739,17 +756,27 @@ def make_post_body_modify_pending_hook(
     Returns:
         PostHandler — 該当時に pending 追加、失敗してもエラー伝播しない。
     """
+    # 段階13 Phase 6.2 W 案 (PLAN §5-4): 身体改変 path 判定は単一 helper
+    # (path_classifier.is_body_modify_path) に集約。git_auto_stash hook /
+    # approval_rules / pending_body_modify が全部同じ判定を共有する設計。
+    from core.runtime.path_resolver import is_body_modify_path as _is_body_modify_helper
+
+    # state_getter() で profile_root が取れる場合は使う、取れない場合は
+    # state["profile_root"] / fallback で None。state 構造に依存せず、
+    # path_classifier 側で None なら raw fallback (test 後方互換)。
+    def _get_profile_root():
+        try:
+            from core.config import BASE_DIR
+            return BASE_DIR
+        except Exception:
+            return None
+
     def _is_body_modify(path_arg: str) -> bool:
-        if not path_arg:
-            return False
-        normalized = path_arg.replace("\\", "/")
-        for name in body_modify_filenames:
-            if normalized == name or normalized.endswith(f"/{name}"):
-                return True
-        for prefix in body_modify_dir_prefixes:
-            if normalized.startswith(prefix):
-                return True
-        return False
+        return _is_body_modify_helper(
+            path_arg, _get_profile_root(),
+            dir_prefixes=body_modify_dir_prefixes,
+            filenames=body_modify_filenames,
+        )
 
     def _check(tool_name: str, tool_input: dict, output: str) -> HookRunResult:
         if tool_name not in target_tool_names:

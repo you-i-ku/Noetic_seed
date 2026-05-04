@@ -45,7 +45,50 @@
     "pause_on_await": true,
     "missing_field_policy": "deny",
     "auto_fill_on_missing": false,
-    "auto_approve_all": true
+    "_comment_auto_approve_all": "★ smoke 13 用の意図的設計 (PLAN §5-4 + ゆう 2026-05-04 確定): true で全 tool 呼出を無条件 bypass、approval.rules は評価されない (approval_callback 内で auto_approve_all が policy_fn より前に早期 return)。本番運用 iku では false に切替えて AgentSpec DSL rules を有効化、HITL → HOOTL 軌跡を実現する。Codex rescue 7 周目 P1 評価で「rules を bypass する」指摘あり (technical 妥当)、ただし smoke 用 design intent のため commit ブロック対象外。",
+    "auto_approve_all": true,
+    "_comment_rules": "段階13 Phase 6.2 (PLAN §5-4) AgentSpec DSL pattern。rules を順次評価、最初に hit したものを採用。default は safe-by-default approval (HITL fallback)。auto_approve_all=true 時は rules 評価せず全 bypass (smoke 13 用、上記 _comment_auto_approve_all 参照)。本番運用は auto_approve_all=false にして rules 有効化。",
+    "rules": [
+      {
+        "tools": ["bash", "reboot", "secret_write"],
+        "action": "approve",
+        "_comment": "destructive: 任意 cmd / プロセス操作 / secret 書込"
+      },
+      {
+        "tools": ["write_file", "edit_file"],
+        "body_modify": true,
+        "action": "approve",
+        "_comment": "body_modify path: 自己改変経路 (path_classifier 委譲、Windows case / traversal / absolute 全対応)"
+      },
+      {
+        "tools": ["write_file", "edit_file"],
+        "action": "auto",
+        "_comment": "body_modify 以外の path (memory/*.jsonl / sandbox/* 等)"
+      },
+      {
+        "tools": ["camera_stream", "camera_stream_stop", "screen_peek", "mic_record", "http_request"],
+        "action": "approve",
+        "_comment": "端末ハードウェア干渉 (camera/screen/mic) + 外部 network POST/PUT"
+      },
+      {
+        "tools": [
+          "memory_store", "memory_update", "memory_forget",
+          "update_self", "reflect", "output_display",
+          "search_memory", "memory_graph", "world_fact_view",
+          "view_image", "listen_audio", "wait",
+          "auth_profile_info", "secret_read",
+          "glob_search", "grep_search", "read_file",
+          "WebSearch", "WebFetch",
+          "x_post", "x_reply", "x_quote", "x_like",
+          "elyth_post", "elyth_reply", "elyth_like", "elyth_follow",
+          "elyth_info", "elyth_get", "elyth_mark_read",
+          "x_timeline", "x_search", "x_get_notifications"
+        ],
+        "action": "auto",
+        "_comment": "通常 tool: read_only + write_safe + SNS (X/Elyth は端末干渉なし、auto)"
+      }
+    ],
+    "default": "approve"
   },
   "tool_use": {
     "strict_mode": true,

@@ -428,10 +428,24 @@ def main():
         get_cycle_id=lambda: state.get("cycle_id", 0),
     ))
 
-    # Approval callback (pause_on_await + 3 層 UI + smoke auto_approve_all)
+    # Approval callback (pause_on_await + 3 層 UI + smoke auto_approve_all
+    # + 段階13 Phase 6.2 AgentSpec DSL policy_fn)
+    # PLAN §5-4: settings.json approval.rules から policy_fn を生成、
+    # tool_name + path のみで approval 要否を判定 (LLM 由来 field 影響ゼロ)
+    from core.runtime.approval_rules import make_policy_fn
+    # ★ workspace_root=BASE_DIR は **本番運用必須** (Codex rescue 7 周目
+    # RISK-6 評価): None だと path_resolver が raw fallback で canonical 化
+    # されず、path traversal / Windows case / whitespace 等 path quirk family
+    # で bypass 発生。test 後方互換 (None) は単体 test 限定。
+    _policy_fn = make_policy_fn(
+        rules=_approval_cfg.get("rules", []),
+        default_action=_approval_cfg.get("default", "approve"),
+        workspace_root=BASE_DIR,
+    )
     _approval_cb = make_approval_callback(
         pause_on_await=_approval_cfg.get("pause_on_await", True),
         auto_approve_all=_approval_cfg.get("auto_approve_all", False),
+        policy_fn=_policy_fn,
     )
 
     # ConversationRuntime (system_prompt は fire 毎に assemble 差替)

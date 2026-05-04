@@ -192,6 +192,42 @@ def test_glob_search_in_secrets_denied():
     return _assert(r.denied, "denied=True")
 
 
+def test_glob_search_secrets_dir_exact_denied():
+    print("== glob_search(sandbox/secrets) 末尾 / なしも deny ==")
+    # Codex review 7 周目 P1 fix: secrets dir 完全一致 (末尾 / なし) でも
+    # directory enumerate 防御。`startswith("sandbox/secrets/")` 単独だと
+    # `path: "sandbox/secrets"` (末尾 / なし) が hit せず bypass されてた。
+    root = _setup_workspace()
+    guard = make_file_access_guard(root)
+    return all([
+        _assert(guard("glob_search", {"pattern": "sandbox/secrets"}).denied,
+                "glob_search sandbox/secrets → denied"),
+        _assert(guard("grep_search", {"path": "sandbox/secrets"}).denied,
+                "grep_search sandbox/secrets → denied"),
+        _assert(guard("read_file", {"path": "sandbox/secrets"}).denied,
+                "read_file sandbox/secrets → denied"),
+    ])
+
+
+def test_workspace_root_search_denied():
+    print("== grep_search/glob_search で workspace root 全 scan は deny ==")
+    # Codex rescue 7 周目 RISK-2 fix: path="." で root 全 scan に
+    # sandbox/secrets/ 配下が含まれる、具体的 dir 指定強制で防御
+    root = _setup_workspace()
+    guard = make_file_access_guard(root)
+    return all([
+        _assert(guard("grep_search", {"path": "."}).denied,
+                "grep_search path='.' → denied (root scan 防御)"),
+        _assert(guard("glob_search", {"pattern": "."}).denied,
+                "glob_search pattern='.' → denied"),
+        # 具体的 dir 指定なら通る (sandbox/secrets/ じゃない限り)
+        _assert(not guard("grep_search", {"path": "core"}).denied,
+                "grep_search path='core' → allow (具体的 dir、secrets 含まず)"),
+        _assert(not guard("glob_search", {"pattern": "memory"}).denied,
+                "glob_search pattern='memory' → allow"),
+    ])
+
+
 def test_non_file_tool_passthrough():
     print("== 非 file 系 tool (bash 等) は allow passthrough ==")
     root = _setup_workspace()
@@ -210,6 +246,10 @@ def test_empty_path_allow():
 
 if __name__ == "__main__":
     groups = [
+        ("Codex 7周目 P1 fix: sandbox/secrets 末尾/なし deny",
+         test_glob_search_secrets_dir_exact_denied),
+        ("Codex rescue RISK-2 fix: workspace root 全 scan deny",
+         test_workspace_root_search_denied),
         ("read: secrets.json 拒否", test_read_secrets_json_denied),
         ("read: sandbox/secrets/ 拒否", test_read_sandbox_secrets_denied),
         ("write: secrets.json 拒否", test_write_secrets_json_denied),
