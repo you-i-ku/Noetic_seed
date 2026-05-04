@@ -477,6 +477,116 @@ def test_memory_graph_output_no_natural_language_keys():
 
 
 # ============================================================
+# 段階13 Phase 5: graph_maturity natural unit + frontier_node_count
+# (PLAN §3-2 5 軸 sigmoid + 集約 scalar、CLAUDE.md §5 識別力 + §6 docstring 同期)
+#
+# 想定誤実装 (識別力 fixture cover):
+#   M1: global view に graph_maturity を出さない実装
+#   M2: breakdown を 4 軸しか出さない / typo / extra (literal 名整合不全)
+#   M3: 集約 scalar が breakdown 5 軸 weighted_avg と一致しない実装
+#   M4: frontier_node_count が float / bool / negative
+#   M5: ego view にも Phase 5 fields が漏れる (view 分岐ミス)
+#   M6: both view で Phase 5 fields が抜ける (重畳漏れ)
+# ============================================================
+
+def test_memory_graph_global_view_has_graph_maturity():
+    print("== _memory_graph: global view に graph_maturity scalar (Phase 5、M1 cover) ==")
+    result = _memory_graph({"view": "global"})
+    data = json.loads(result)
+    maturity = data.get("graph_maturity")
+    return all([
+        _assert("graph_maturity" in data, "graph_maturity key 存在"),
+        _assert(isinstance(maturity, (int, float)) and not isinstance(maturity, bool),
+                f"graph_maturity が numeric (actual type: {type(maturity).__name__})"),
+        _assert(maturity is not None and 0.0 <= float(maturity) <= 1.0,
+                f"graph_maturity in [0, 1] (actual: {maturity})"),
+    ])
+
+
+def test_memory_graph_global_view_breakdown_5_axes():
+    print("== _memory_graph: breakdown 5 軸 literal name (Phase 5、M2 cover、§5 識別力) ==")
+    result = _memory_graph({"view": "global"})
+    data = json.loads(result)
+    breakdown = data.get("graph_maturity_breakdown", {})
+    expected_keys = {"density", "structure", "anomaly", "frontier", "avg_strength"}
+    actual_keys = set(breakdown.keys()) if isinstance(breakdown, dict) else set()
+    return all([
+        _assert("graph_maturity_breakdown" in data, "breakdown key 存在"),
+        _assert(isinstance(breakdown, dict), "breakdown が dict"),
+        _assert(actual_keys == expected_keys,
+                f"PLAN §3-2 literal 5 軸完全一致 (expected: {sorted(expected_keys)}, actual: {sorted(actual_keys)})"),
+        _assert(all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    for v in breakdown.values()),
+                "各 sub-score が numeric (bool 除外)"),
+        _assert(all(0.0 <= float(v) <= 1.0 for v in breakdown.values()),
+                f"各 sub-score in [0, 1] (actual: {breakdown})"),
+    ])
+
+
+def test_memory_graph_global_view_maturity_consistency():
+    print("== _memory_graph: 集約 == 5 軸 weighted_avg (Phase 5、M3 cover、§5 識別力) ==")
+    result = _memory_graph({"view": "global"})
+    data = json.loads(result)
+    maturity = data.get("graph_maturity")
+    breakdown = data.get("graph_maturity_breakdown", {})
+    if not isinstance(breakdown, dict) or maturity is None:
+        return _assert(False, "breakdown / maturity 構造前提不足")
+    # PLAN §3-2 literal weight: uniform 0.2 × 5、本 test は重み構造の同期検証
+    expected = 0.2 * (
+        breakdown.get("density", 0.0)
+        + breakdown.get("structure", 0.0)
+        + breakdown.get("anomaly", 0.0)
+        + breakdown.get("frontier", 0.0)
+        + breakdown.get("avg_strength", 0.0)
+    )
+    return _assert(
+        abs(float(maturity) - expected) < 1e-9,
+        f"集約 {maturity} ~= weighted_avg(breakdown) {expected} (差 < 1e-9)",
+    )
+
+
+def test_memory_graph_global_view_has_frontier_node_count():
+    print("== _memory_graph: global view に frontier_node_count (Phase 5、M4 cover) ==")
+    result = _memory_graph({"view": "global"})
+    data = json.loads(result)
+    count = data.get("frontier_node_count")
+    return all([
+        _assert("frontier_node_count" in data, "frontier_node_count key 存在"),
+        _assert(isinstance(count, int) and not isinstance(count, bool),
+                f"frontier_node_count が int (bool 除外、actual type: {type(count).__name__})"),
+        _assert(count is not None and count >= 0,
+                f"frontier_node_count >= 0 (actual: {count})"),
+    ])
+
+
+def test_memory_graph_both_view_has_phase5_fields():
+    print("== _memory_graph: both view にも Phase 5 fields (Phase 5、M6 cover) ==")
+    result = _memory_graph({"view": "both"})
+    data = json.loads(result)
+    return all([
+        _assert("graph_maturity" in data, "both view に graph_maturity"),
+        _assert("graph_maturity_breakdown" in data, "both view に breakdown"),
+        _assert("frontier_node_count" in data, "both view に frontier_node_count"),
+        _assert("self" in data, "both view に self (ego payload 重畳)"),
+        _assert("memory_total" in data, "both view に memory_total (global payload 重畳)"),
+    ])
+
+
+def test_memory_graph_ego_view_no_phase5_fields():
+    print("== _memory_graph: ego view には Phase 5 fields なし (Phase 5、M5 cover、§5 識別力) ==")
+    result = _memory_graph({"view": "ego"})
+    data = json.loads(result)
+    return all([
+        _assert("graph_maturity" not in data,
+                "ego view に graph_maturity なし (global 限定)"),
+        _assert("graph_maturity_breakdown" not in data,
+                "ego view に breakdown なし"),
+        _assert("frontier_node_count" not in data,
+                "ego view に frontier_node_count なし"),
+    ])
+
+
+# ============================================================
 # 実行
 # ============================================================
 
@@ -506,6 +616,12 @@ if __name__ == "__main__":
         ("Step 0.4 hotfix: count=0 で displayed != allowed (description 維持)", test_controller_displayed_tools_keeps_memory_graph_at_count_zero),
         ("Step 0.4 hotfix: count>=1 で displayed == allowed (両方含む)", test_controller_displayed_tools_equals_allowed_when_unlocked),
         ("_memory_graph: 自然言語 key なし", test_memory_graph_output_no_natural_language_keys),
+        ("Phase 5: global view に graph_maturity scalar (M1)", test_memory_graph_global_view_has_graph_maturity),
+        ("Phase 5: breakdown 5 軸 literal name (§5 識別力 M2)", test_memory_graph_global_view_breakdown_5_axes),
+        ("Phase 5: 集約 == 5 軸 weighted_avg (§5 識別力 M3)", test_memory_graph_global_view_maturity_consistency),
+        ("Phase 5: global view に frontier_node_count int (M4)", test_memory_graph_global_view_has_frontier_node_count),
+        ("Phase 5: both view にも Phase 5 fields (M6)", test_memory_graph_both_view_has_phase5_fields),
+        ("Phase 5: ego view には Phase 5 fields なし (§5 識別力 M5)", test_memory_graph_ego_view_no_phase5_fields),
     ]
     results = []
     for _label, fn in groups:

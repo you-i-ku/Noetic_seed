@@ -1,4 +1,6 @@
-"""memory_graph — 段階11-D Phase 0 Step 0.2 + 段階13 軽減 2: ego/global/both view.
+"""memory_graph — 段階11-D Phase 0 Step 0.2 + 段階13 軽減 2 + 段階13 Phase 5.
+
+view: ego / global / both (3 mode 配線完成)、global/both で graph_maturity natural unit を表示。
 
 self / memory を unified node とした graph 構造 tool。
 self virtual entries は state.self を描画時に on-the-fly で生成 (永続化なし)。
@@ -9,13 +11,23 @@ memory ↔ memory edges は memory_links.jsonl の永続 link を参照。
   nodes   : self (continuous, id 不変) + memory (kind 区別)
   edges   : memory↔memory (永続) + self↔memory (on-the-fly, similarity only)
   clusters: cluster_estimation 経由 (Phase 5 既実装、global/both view で表示)
-  frontier: Phase 4 で本実装、現状 section 出さない
+  frontier: Phase 4 で _frontier_count 確立、段階13 Phase 5 で global/both view に
+            frontier_node_count (leaf 整数) として表示
   trace   : 直近 memory / link 総数 (簡易 MVP)
 
 view:
   ego    : self 中心 (self facets + edges_self_to_memory + edges_memory_to_memory)
-  global : graph 全体俯瞰 (memory_total + clusters + topology summary)
+  global : graph 全体俯瞰 (memory_total + clusters + topology summary
+           + graph_maturity scalar + graph_maturity_breakdown 5 軸 + frontier_node_count)
   both   : ego + global の重畳
+
+PLAN §3-2 natural unit (graph_maturity 5 軸 + 集約 scalar) は段階13 Phase 5 で
+global/both view に追加 (Phase 4 で確立した compute_graph_maturity の breakdown 同梱版
+``compute_graph_maturity_with_breakdown`` を glue、新規計算なし)。``args.cluster_count`` /
+``args.frontier_count`` / ``args.focus_node`` placeholder は段階11-D Phase 0 Step 0.3 で
+ゆう判断採用された「案 b' (signature placeholder + future_views 明示)」の意図的後送り
+status を継続、本実装は別 Phase 候補 (perspective.viewer 統合 = 段階11-A Theory of Mind
+との橋渡しも別 Phase 候補)。
 
 channel は描画対象外 (channel = 界面 layer、self/memory = internal layer、layer 違反回避)。
 channel 永続化廃止論点は reserved memo に温存。
@@ -207,11 +219,19 @@ def _memory_graph(args: dict) -> str:
     """memory_graph tool 本体。出力は JSON 構造化 text (中立、自然言語ゼロ).
 
     args (PLAN §6-6 signature 互換):
-        view: "ego" (Step 0.2 で実装)、global / both は Phase 4/5 で descended
+        view: "ego" / "global" / "both" (段階13 軽減 2 で全 mode 配線完成)
         depth: int (default 2)
-        focus_node: ego view 中心切替用 (Phase 1+ で使用、Step 0.2 では受取のみ)
-        cluster_count: global view cluster 件数上限 (Phase 5 で使用、Step 0.2 では受取のみ)
-        frontier_count: frontier 候補件数上限 (Phase 4 で使用、Step 0.2 では受取のみ)
+        focus_node: ego view 中心切替用 (placeholder、案 b' 11-D 後送り status 継続)
+        cluster_count: global view cluster 件数上限 (placeholder、同上)
+        frontier_count: frontier 候補件数上限 (placeholder、同上)
+
+    出力 fields:
+        全 view 共通: ``view``, ``depth``, ``trace_recent``
+        ego/both: ``self``, ``edges_self_to_memory``, ``edges_memory_to_memory``
+        global/both (段階13 軽減 2): ``memory_total``, ``clusters``, ``topology``
+        global/both (段階13 Phase 5): ``graph_maturity`` (scalar),
+            ``graph_maturity_breakdown`` (5 軸 sigmoid 値 dict),
+            ``frontier_node_count`` (leaf 整数)
     """
     view = args.get("view", "ego")
     try:
@@ -249,6 +269,17 @@ def _memory_graph(args: dict) -> str:
         output["memory_total"] = len(all_memory)
         output["clusters"] = _compute_clusters_with_label(all_memory)
         output["topology"] = _compute_topology_summary(memory_edges)
+        # 段階13 Phase 5: PLAN §3-2 natural unit (5 軸 sigmoid + 集約 scalar) を
+        # global/both view に追加。Phase 4 で確立した graph_maturity / sub-score を
+        # tool 表示層に glue (新規計算なし、既存関数呼出のみ)。
+        from core.dynamic_composition import (
+            compute_graph_maturity_with_breakdown,
+            _frontier_count,
+        )
+        maturity = compute_graph_maturity_with_breakdown(state)
+        output["graph_maturity"] = maturity["graph_maturity"]
+        output["graph_maturity_breakdown"] = maturity["breakdown"]
+        output["frontier_node_count"] = _frontier_count(state)
 
     output["trace_recent"] = trace
     return json.dumps(output, ensure_ascii=False, indent=2)

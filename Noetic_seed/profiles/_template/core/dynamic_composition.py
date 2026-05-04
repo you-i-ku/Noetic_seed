@@ -273,6 +273,58 @@ def compute_graph_maturity(state: dict) -> float:
     )
 
 
+def compute_graph_maturity_with_breakdown(state: dict) -> dict:
+    """段階13 Phase 5: graph_maturity + 5 軸 sigmoid 値内訳を 1 dict で返す.
+
+    PLAN §3-2 literal の natural unit (5 sub-score + 集約 scalar) を
+    memory_graph_tool global view に表示するための glue 関数。
+
+    Phase 4 既存 ``compute_graph_maturity`` は LLM② fire_candidates 配線
+    (main.py 動的合成経路) で使われているため signature を変更しない。
+    本関数は breakdown 同梱版として並走、既存関数は touched ず保護
+    (Phase 4 既存契約 100% 保護)。
+
+    重み構造は Phase 4 と同一 (WEIGHT_DENSITY 等 uniform 0.2 × 5)、
+    sub-score 関数を 1 度ずつ呼出、dict 内で集約。graph_maturity 値は
+    既存 ``compute_graph_maturity`` と同一 (重み構造 + 同 sub-score)。
+
+    Graceful skip 統一 (PLAN §3-3 整合): 全 5 sub-score「データなし → 0.0」
+    pattern 継承、空 graph で graph_maturity = 0.0 + breakdown 全 0.0。
+
+    Args:
+        state: state dict (jepa_prediction_error_history 等を参照)。
+
+    Returns:
+        ``{"graph_maturity": float ∈ [0.0, 1.0],
+            "breakdown": {density, structure, anomaly, frontier, avg_strength}}``
+        各 breakdown 値も [0.0, 1.0]、graph_maturity は重み合計 1.0 + 各
+        sub-score [0, 1] で範囲保証。
+    """
+    density = _density_score(state)
+    structure = _structure_score(state)
+    anomaly = _anomaly_score(state)
+    frontier = _frontier_score(state)
+    avg_strength = _avg_strength_score(state)
+
+    graph_maturity = (
+        WEIGHT_DENSITY * density
+        + WEIGHT_STRUCTURE * structure
+        + WEIGHT_ANOMALY * anomaly
+        + WEIGHT_FRONTIER * frontier
+        + WEIGHT_AVG_STRENGTH * avg_strength
+    )
+    return {
+        "graph_maturity": graph_maturity,
+        "breakdown": {
+            "density": density,
+            "structure": structure,
+            "anomaly": anomaly,
+            "frontier": frontier,
+            "avg_strength": avg_strength,
+        },
+    }
+
+
 # ============================================================
 # graph 軸 fire 候補 4 種 (PLAN §3-4 (a)-(d)、commit 3)
 #
