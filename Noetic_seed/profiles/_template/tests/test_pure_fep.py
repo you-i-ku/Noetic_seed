@@ -1159,6 +1159,215 @@ def test_energy_runaway_detection_via_beta_cap():
 
 
 # ============================================================
+# 段階14.6 (F-006 fix): tool 別 β scope (PLAN §10-4 literal「tool 別
+# (predictor_confidence 同型)」)
+# ============================================================
+# §5 識別力 (discrimination): 想定誤実装で fail する fixture を意識:
+#   - per_tool 更新を忘れて global のみ動く誤実装 → test_per_tool_cig_isolation fail
+#   - candidate.tool を ignore して global 参照する誤実装 → test_per_tool_beta_isolation fail
+#   - per_tool history が cap されない誤実装 → test_per_tool_history_capped fail
+
+
+def test_per_tool_cig_isolation():
+    """tool 別 cig が global と独立して flat_streak / window_mean を track。
+
+    識別力: tool A だけ連続小誤差 (flat 候補) で update、tool B は大誤差。
+    global は両方混在 → flat_signal=False (window_mean=13.25 > 5.0)。
+    per_tool[A] は A の history のみで flat_signal=True / flat_streak=3、
+    per_tool[B] は flat_signal=False / flat_streak=0。
+    per_tool 更新を忘れて global のみ動く誤実装で fail する。
+    """
+    print("== 段階14.6: per_tool cig が global と独立 ==")
+    from core.predictor import update_predictor_confidence
+
+    state = {}
+    for _ in range(3):
+        update_predictor_confidence(state, "tool_A", 1.0)
+    update_predictor_confidence(state, "tool_B", 50.0)
+
+    cig = state.get("cumulative_information_gain", {})
+    per_tool = cig.get("per_tool", {})
+
+    return all([
+        _assert("tool_A" in per_tool, "per_tool[tool_A] entry 存在"),
+        _assert("tool_B" in per_tool, "per_tool[tool_B] entry 存在"),
+        _assert(abs(per_tool.get("tool_A", {}).get("e2_window_mean", 0) - 1.0) < 1e-9,
+                f"tool_A e2_window_mean=1.0 ({per_tool.get('tool_A', {}).get('e2_window_mean')})"),
+        _assert(per_tool.get("tool_A", {}).get("flat_signal") is True,
+                "tool_A flat_signal=True"),
+        _assert(per_tool.get("tool_A", {}).get("flat_streak") == 3,
+                f"tool_A flat_streak=3 ({per_tool.get('tool_A', {}).get('flat_streak')})"),
+        _assert(abs(per_tool.get("tool_B", {}).get("e2_window_mean", 0) - 50.0) < 1e-9,
+                f"tool_B e2_window_mean=50.0"),
+        _assert(per_tool.get("tool_B", {}).get("flat_signal") is False,
+                "tool_B flat_signal=False"),
+        _assert(per_tool.get("tool_B", {}).get("flat_streak") == 0,
+                "tool_B flat_streak=0"),
+        _assert(cig.get("e2_window_mean", 0) > 5.0,
+                f"global e2_window_mean > 5.0 (混在で {cig.get('e2_window_mean')})"),
+        _assert(cig.get("flat_signal") is False,
+                "global flat_signal=False (混在で flat じゃない)"),
+    ])
+
+
+def test_per_tool_beta_isolation():
+    """_compute_dynamic_beta が candidate.tool で per_tool 参照、tool ごと β 違う。
+
+    識別力: tool A flat_streak=3 / tool B flat_streak=0 で β を取ると、
+    tool A は β > BETA_BASE (動的化発火)、tool B は β = BETA_BASE。
+    candidate.tool を ignore して global 参照する誤実装で fail する
+    (global flat_signal=False で両方 BETA_BASE になってしまう)。
+    """
+    print("== 段階14.6: tool 別 β が candidate.tool で分岐 ==")
+    from core.predictor import (
+        update_predictor_confidence,
+        _compute_dynamic_beta,
+        BETA_BASE,
+    )
+
+    state = {}
+    for _ in range(3):
+        update_predictor_confidence(state, "tool_A", 1.0)
+    update_predictor_confidence(state, "tool_B", 50.0)
+
+    beta_a = _compute_dynamic_beta(state, {"tool": "tool_A"})
+    beta_b = _compute_dynamic_beta(state, {"tool": "tool_B"})
+
+    return all([
+        _assert(beta_a > BETA_BASE,
+                f"tool_A β > BETA_BASE ({beta_a} > {BETA_BASE})"),
+        _assert(abs(beta_b - BETA_BASE) < 1e-9,
+                f"tool_B β = BETA_BASE ({beta_b} == {BETA_BASE})"),
+        _assert(beta_a > beta_b,
+                f"tool_A β > tool_B β で tool 別動的化が分離 ({beta_a} > {beta_b})"),
+    ])
+
+
+def test_compute_dynamic_beta_global_fallback_on_unknown_tool():
+    """candidate に tool 名なし / per_tool entry 不在 → global cig fallback。
+
+    識別力: per_tool 不在で fail する誤実装 (KeyError) や、global を
+    ignore する誤実装で fail する。backward compat 確認。
+    """
+    print("== 段階14.6: per_tool 不在で global cig fallback (backward compat) ==")
+    from core.predictor import _compute_dynamic_beta, BETA_BASE
+
+    state = {
+        "cumulative_information_gain": {
+            "e2_total": 9.0, "ec_total": 0.0,
+            "e2_window_mean": 3.0,  # < 5.0 で flat
+            "ec_window_mean": 0.0,
+            "flat_signal": True, "flat_streak": 3,
+        },
+        "prediction_error_history_e2": [3.0, 3.0, 3.0],
+    }
+
+    beta_no_cand = _compute_dynamic_beta(state, {})
+    beta_unknown = _compute_dynamic_beta(state, {"tool": "unknown_tool"})
+
+    return all([
+        _assert(beta_no_cand > BETA_BASE,
+                f"candidate 空 → global flat_streak=3 で動的化 ({beta_no_cand})"),
+        _assert(beta_unknown > BETA_BASE,
+                f"unknown tool → per_tool 不在で global fallback 動的化 ({beta_unknown})"),
+        _assert(abs(beta_no_cand - beta_unknown) < 1e-9,
+                "candidate 空と unknown tool で同じ β (両方 global)"),
+    ])
+
+
+def test_per_tool_history_capped_at_window():
+    """per_tool mini history は CIG_WINDOW (=10) で FIFO cap。
+
+    識別力: cap せず全履歴蓄積する誤実装、または cap 値を間違える誤実装で fail。
+    """
+    print("== 段階14.6: per_tool history は CIG_WINDOW で FIFO cap ==")
+    from core.predictor import update_predictor_confidence, CIG_WINDOW
+
+    state = {}
+    for _ in range(15):
+        update_predictor_confidence(state, "tool_A", 2.0)
+
+    history = (
+        state.get("cumulative_information_gain", {})
+        .get("per_tool", {})
+        .get("tool_A", {})
+        .get("history_e2", [])
+    )
+
+    return all([
+        _assert(len(history) == CIG_WINDOW,
+                f"history len = CIG_WINDOW={CIG_WINDOW} ({len(history)})"),
+        _assert(all(abs(x - 2.0) < 1e-9 for x in history),
+                "全 entry が 2.0 (FIFO で古いの捨てて新しいの維持)"),
+    ])
+
+
+def test_per_tool_call_count_for_i_avg_window_alignment():
+    """per_tool call_count が累積 update 数を track、history FIFO cap と独立。
+
+    Codex P2 fix (段階14.6): i_avg = e2_total / call_count で分子分母の
+    時間窓を整合。history_e2 は FIFO CIG_WINDOW=10 で cap されるが、
+    call_count は all-time なので、11 update 目以降も i_avg が水増し
+    されない。
+
+    識別力: call_count を len(history_e2) で代用する誤実装で fail
+    (15 update 後 history_e2 len=10 で固まり、i_avg が真値の 1.5x になる)。
+    """
+    print("== 段階14.6 P2 fix: per_tool call_count が all-time 累積 ==")
+    from core.predictor import update_predictor_confidence, CIG_WINDOW
+
+    state = {}
+    for _ in range(15):
+        update_predictor_confidence(state, "tool_A", 2.0)
+
+    tcig = (
+        state.get("cumulative_information_gain", {})
+        .get("per_tool", {})
+        .get("tool_A", {})
+    )
+
+    # call_count = 15 (all-time)、history_e2 len = CIG_WINDOW=10 (FIFO)
+    # → i_avg 計算で分子分母の時間窓が整合 (累積 e2_total / 累積 call_count)
+    return all([
+        _assert(tcig.get("call_count") == 15,
+                f"call_count = 15 ({tcig.get('call_count')}、all-time)"),
+        _assert(len(tcig.get("history_e2", [])) == CIG_WINDOW,
+                f"history_e2 len = CIG_WINDOW={CIG_WINDOW} (FIFO cap)"),
+        _assert(abs(tcig.get("e2_total", 0) - 30.0) < 1e-9,
+                f"e2_total = 15 * 2.0 = 30.0 ({tcig.get('e2_total')})"),
+        _assert(tcig.get("call_count", 0) > len(tcig.get("history_e2", [])),
+                "call_count > history len で all-time vs FIFO の独立確認"),
+    ])
+
+
+def test_per_tool_no_pollution_when_tool_name_omitted():
+    """tool_name 未指定 (None / 空文字) → per_tool 不変、global のみ更新。
+
+    識別力: tool_name 必須化する誤実装、または None 時に per_tool 作る誤実装で fail。
+    backward compat: 既存呼出 (Step A test 群) は tool_name 渡してないので
+    per_tool が作られない動作を保証。
+    """
+    print("== 段階14.6: tool_name 未指定で per_tool 不変 (backward compat) ==")
+    from core.predictor import update_cumulative_information_gain
+
+    state = {}
+    update_cumulative_information_gain(state, 3.0, None, tool_name=None)
+    update_cumulative_information_gain(state, 3.0, None)  # default None
+    update_cumulative_information_gain(state, 3.0, None, tool_name="")
+
+    cig = state.get("cumulative_information_gain", {})
+
+    return all([
+        _assert(abs(cig.get("e2_total", 0) - 9.0) < 1e-9,
+                f"global e2_total 累積 ({cig.get('e2_total')} == 9.0)"),
+        _assert(
+            "per_tool" not in cig or cig.get("per_tool") == {},
+            f"per_tool が空 / 未作成 ({cig.get('per_tool')})",
+        ),
+    ])
+
+
+# ============================================================
 # main runner
 # ============================================================
 
@@ -1193,6 +1402,13 @@ def main():
         test_k2_subject_diversity_via_basin_visit_history,
         test_k6_phase_transition_pending_fires_at_least_once,
         test_energy_runaway_detection_via_beta_cap,
+        # 段階14.6 (F-006 fix): tool 別 β scope (PLAN §10-4 literal)
+        test_per_tool_cig_isolation,
+        test_per_tool_beta_isolation,
+        test_compute_dynamic_beta_global_fallback_on_unknown_tool,
+        test_per_tool_history_capped_at_window,
+        test_per_tool_call_count_for_i_avg_window_alignment,
+        test_per_tool_no_pollution_when_tool_name_omitted,
     ]
     print(f"Running {len(tests)} test groups (Step A)...\n")
     passed = 0

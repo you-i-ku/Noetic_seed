@@ -97,7 +97,10 @@ def update_predictor_confidence(state: dict, tool_name: str,
         _append_history(state, prediction_error_ec, "ec")
 
     # 段階14 Step A: cumulative information gain を同時 update (PLAN §3-2)
-    update_cumulative_information_gain(state, prediction_error, prediction_error_ec)
+    # 段階14.6: tool_name を渡して per_tool cig も更新 (PLAN §10-4 literal、F-006 fix)
+    update_cumulative_information_gain(
+        state, prediction_error, prediction_error_ec, tool_name=tool_name
+    )
 
 
 # ============================================================
@@ -118,10 +121,20 @@ CIG_WINDOW = 10
 CIG_THRESHOLD_RAW = 0.05  # PLAN §10-7、e2 軸 0-100 scale で × 100 適用
 
 
+def _new_cig_entry() -> dict:
+    """cig entry (global / per-tool) の初期スキーマ。"""
+    return {
+        "e2_total": 0.0, "ec_total": 0.0,
+        "e2_window_mean": 0.0, "ec_window_mean": 0.0,
+        "flat_signal": False, "flat_streak": 0,
+    }
+
+
 def update_cumulative_information_gain(
     state: dict,
     prediction_error: float,
     prediction_error_ec: Optional[float] = None,
+    tool_name: Optional[str] = None,
 ) -> None:
     """予測誤差から ∑I_t / window mean / flat_signal / flat_streak を更新。
 
@@ -129,32 +142,68 @@ def update_cumulative_information_gain(
     呼出し点は update_predictor_confidence() 末尾 (history append 後)。
     Step C (β 動的化) / Step D (basin transition) の入力源。
 
+    段階14.6 (PLAN §10-4 literal「tool 別 (predictor_confidence 同型)」、
+    F-006 fix): tool_name 指定時は cig["per_tool"][tool_name] にも同 logic
+    で update。tool 別 mini history (FIFO CIG_WINDOW) を持って window_mean /
+    flat_signal / flat_streak を計算、global cig と独立して動く。Step C tool
+    別 β scope の入力源。tool_name 未指定 (None / 空文字) なら global のみ更新
+    (backward compat、Step D / 既存 test 維持)。
+
     Args:
         state: state dict
         prediction_error: E2 軸の予測誤差 (abs 値、0-100 scale)
         prediction_error_ec: EC 軸の予測誤差 (abs 値、0-1 scale)。None なら
             ec_total は不変、ec_window_mean は history があれば再計算
+        tool_name: 段階14.6 tool 別 cig 入力源。指定なしで global のみ
     """
-    cig = state.setdefault("cumulative_information_gain", {
-        "e2_total": 0.0, "ec_total": 0.0,
-        "e2_window_mean": 0.0, "ec_window_mean": 0.0,
-        "flat_signal": False, "flat_streak": 0,
-    })
+    cig = state.setdefault("cumulative_information_gain", _new_cig_entry())
+    threshold = CIG_THRESHOLD_RAW * 100
+
+    # global: 既存 logic (history は state global、Step D / 既存 test 互換)
     cig["e2_total"] += abs(float(prediction_error))
     if prediction_error_ec is not None:
         cig["ec_total"] += abs(float(prediction_error_ec))
-
-    # window mean は history (FIFO 100 件) の直近 N=CIG_WINDOW から計算
     h_e2 = state.get("prediction_error_history_e2", [])[-CIG_WINDOW:]
     cig["e2_window_mean"] = sum(h_e2) / len(h_e2) if h_e2 else 0.0
     h_ec = state.get("prediction_error_history_ec", [])[-CIG_WINDOW:]
     cig["ec_window_mean"] = sum(h_ec) / len(h_ec) if h_ec else 0.0
-
-    # flat 判定: e2_window_mean が閾値 (0-100 scale で 5.0) 未満なら flat
-    threshold = CIG_THRESHOLD_RAW * 100
     flat = cig["e2_window_mean"] < threshold
     cig["flat_signal"] = flat
     cig["flat_streak"] = cig["flat_streak"] + 1 if flat else 0
+
+    # 段階14.6: tool 別 cig を per_tool に同 logic で更新 (PLAN §10-4 literal)
+    if tool_name:
+        per_tool = cig.setdefault("per_tool", {})
+        tcig = per_tool.setdefault(tool_name, {
+            **_new_cig_entry(),
+            "history_e2": [], "history_ec": [],
+            # call_count: 累積 update 回数 (Codex P2 fix、PLAN §5-2 literal
+            # 「cycle 数」直訳)。history_e2 は FIFO CIG_WINDOW で cap されるが
+            # call_count は all-time、i_avg = e2_total / call_count で
+            # 分子分母の時間窓を整合させる。
+            "call_count": 0,
+        })
+        tcig["call_count"] += 1
+        tcig["e2_total"] += abs(float(prediction_error))
+        tcig["history_e2"].append(abs(float(prediction_error)))
+        if len(tcig["history_e2"]) > CIG_WINDOW:
+            del tcig["history_e2"][0]
+        tcig["e2_window_mean"] = (
+            sum(tcig["history_e2"]) / len(tcig["history_e2"])
+            if tcig["history_e2"] else 0.0
+        )
+        if prediction_error_ec is not None:
+            tcig["ec_total"] += abs(float(prediction_error_ec))
+            tcig["history_ec"].append(abs(float(prediction_error_ec)))
+            if len(tcig["history_ec"]) > CIG_WINDOW:
+                del tcig["history_ec"][0]
+            tcig["ec_window_mean"] = (
+                sum(tcig["history_ec"]) / len(tcig["history_ec"])
+                if tcig["history_ec"] else 0.0
+            )
+        flat_tool = tcig["e2_window_mean"] < threshold
+        tcig["flat_signal"] = flat_tool
+        tcig["flat_streak"] = tcig["flat_streak"] + 1 if flat_tool else 0
 
 
 # ============================================================
@@ -185,16 +234,29 @@ def _compute_dynamic_beta(state: dict, candidate: dict) -> float:
     flat_signal/streak ベースで動的算出。flat_streak < BETA_TRIGGER_STREAK
     で β = BETA_BASE (現挙動維持、対症療法回避)、>= で動的増、cap = BETA_CAP。
 
+    段階14.6 (PLAN §10-4 literal「tool 別 (predictor_confidence 同型)」、
+    F-006 fix): candidate.tool が cig["per_tool"][tool] に entry あれば
+    tool 別 cig を入力源に、なければ global cig fallback。各 tool が独立
+    した flat_streak / window_mean を持つので、ある tool だけ flat になって
+    その tool に対してのみ β > BETA_BASE が出る挙動が成立する。
+
     Args:
         state: state dict
-        candidate: 当該 candidate (PLAN §10-4 tool 別 β 拡張用、現実装は
-            state.cumulative_information_gain のみ参照)
+        candidate: 当該 candidate (candidate["tool"] で per_tool cig を選択)
 
     Returns:
-        β float (BETA_BASE <= β <= BETA_CAP)
+        β float (BETA_BASE <= β <= BETA_CAP、phase_transition 時 BETA_TRANSITION_CAP)
     """
     cig = state.get("cumulative_information_gain", {})
-    flat_streak = cig.get("flat_streak", 0)
+
+    # 段階14.6: tool 別 cig 優先 (PLAN §10-4 literal「predictor_confidence 同型」)
+    tool_name = str(candidate.get("tool", "")) if candidate else ""
+    per_tool_cig = (
+        cig.get("per_tool", {}).get(tool_name) if tool_name else None
+    )
+    source_cig = per_tool_cig if per_tool_cig else cig
+
+    flat_streak = source_cig.get("flat_streak", 0)
 
     if flat_streak < BETA_TRIGGER_STREAK:
         # flat_streak 閾値未達: β=BETA_BASE 起点 (現挙動維持、対症療法回避)
@@ -203,9 +265,16 @@ def _compute_dynamic_beta(state: dict, candidate: dict) -> float:
         # lower bound β >= E[h] / I を直訳 (PLAN §5-2 literal)
         # E[h] ~= window_mean (予測の不確実性、e2 軸 0-100 scale を 0-1 に normalize)
         # I ~= e2_total / cycle 数 (累積情報利得率、同 normalize)
-        e_h = max(0.01, cig.get("e2_window_mean", 50.0) / 100.0)
-        history = state.get("prediction_error_history_e2", [])
-        i_avg = max(0.01, cig.get("e2_total", 1.0) / max(1, len(history)))
+        e_h = max(0.01, source_cig.get("e2_window_mean", 50.0) / 100.0)
+        # i_avg の divisor: PLAN §5-2 literal「cycle 数」(全 update 数) 直訳。
+        # per_tool は tcig["call_count"] (Codex P2 fix、累積 update 数で
+        # e2_total と窓整合)、global は state.prediction_error_history_e2 の
+        # len (FIFO 100 cap、HISTORY_CAP 内なら全 update 数と一致)。
+        if per_tool_cig:
+            cycle_count = per_tool_cig.get("call_count", 1)
+        else:
+            cycle_count = len(state.get("prediction_error_history_e2", []))
+        i_avg = max(0.01, source_cig.get("e2_total", 1.0) / max(1, cycle_count))
         i_avg_norm = i_avg / 100.0
 
         beta_required = e_h / max(0.01, i_avg_norm)
