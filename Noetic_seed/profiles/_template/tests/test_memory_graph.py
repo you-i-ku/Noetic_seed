@@ -20,6 +20,7 @@
 """
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -30,6 +31,7 @@ from tools.memory_graph_tool import (
     _compute_self_to_memory_edges,
     _compute_memory_edges,
     _compute_trace,
+    _list_all_memory_entries,
     _memory_graph,
 )
 
@@ -214,6 +216,46 @@ def test_compute_trace_basic():
         _assert(trace.get("memory_total") == 3, "memory_total=3"),
         _assert(trace.get("link_total") == 1, "link_total=1"),
     ])
+
+
+def test_list_all_memory_entries_includes_untagged():
+    print("== _list_all_memory_entries: untagged memory も graph 対象 ==")
+    import core.memory as memory_mod
+    import core.tag_registry as tr
+    from core.memory import UNTAGGED_NETWORK, memory_store
+
+    original_memory_dir = memory_mod.MEMORY_DIR
+    original_registry_file = tr._REGISTRY_FILE
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            memory_mod.MEMORY_DIR = tmp
+            tr._reset_for_testing(registry_file=tmp / "registered_tags.json")
+            tr.register_standard_tags()
+
+            tagged = memory_store(
+                network="opinion",
+                content="tagged graph memory",
+                _auto_metadata=False,
+            )
+            untagged = memory_store(
+                network=None,
+                content="untagged graph memory",
+                _auto_metadata=False,
+            )
+
+            entries = _list_all_memory_entries(limit_per_tag=10)
+            ids = {e.get("id") for e in entries}
+            networks = {e.get("network") for e in entries}
+            return all([
+                _assert(tagged["id"] in ids, "tagged memory を含む"),
+                _assert(untagged["id"] in ids, "untagged memory を含む"),
+                _assert(UNTAGGED_NETWORK in networks,
+                        f"{UNTAGGED_NETWORK} network を含む"),
+            ])
+    finally:
+        memory_mod.MEMORY_DIR = original_memory_dir
+        tr._reset_for_testing(registry_file=original_registry_file)
 
 
 # ============================================================
@@ -598,6 +640,7 @@ if __name__ == "__main__":
         ("_compute_self_to_memory_edges: empty", test_self_to_memory_edges_empty_inputs),
         ("_compute_memory_edges: list 返却", test_compute_memory_edges_no_links),
         ("_compute_trace: 総数", test_compute_trace_basic),
+        ("_list_all_memory_entries: untagged も graph 対象", test_list_all_memory_entries_includes_untagged),
         ("_memory_graph: ego view shape", test_memory_graph_ego_view_shape),
         ("_memory_graph: default view", test_memory_graph_default_view),
         ("_memory_graph: 不正 view で error", test_memory_graph_invalid_view_error),

@@ -38,7 +38,7 @@ import json
 from typing import Optional
 
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
-from core.memory import list_records
+from core.memory import UNTAGGED_NETWORK, list_records
 from core.memory_links import list_links, LINK_SCAN_LIMIT
 from core.state import load_state
 from core.tag_registry import list_registered_tags
@@ -89,9 +89,9 @@ def _build_self_node(state: dict, virtual_entries: list) -> dict:
 
 
 def _list_all_memory_entries(limit_per_tag: int = ALL_MEMORY_LIMIT_PER_TAG) -> list:
-    """全登録 tag の memory entry を集約取得 (新しい順)."""
+    """全登録 tag + untagged の memory entry を集約取得 (新しい順)."""
     out = []
-    for tag in list_registered_tags():
+    for tag in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
         try:
             recs = list_records(tag, limit=limit_per_tag)
         except Exception:
