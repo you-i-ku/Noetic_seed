@@ -81,10 +81,17 @@ def test_cig_flat_signal_threshold():
     update_cumulative_information_gain(state_above, 5.01, None)
     above_flat = state_above["cumulative_information_gain"]["flat_signal"]
 
+    # 閾値同値 (Codex review P2-1 fix): mean=5.0 で flat=False を強制
+    # (誤実装 `<=` だと pass せず、識別力 up)
+    state_equal = {"prediction_error_history_e2": [5.0] * 10}
+    update_cumulative_information_gain(state_equal, 5.0, None)
+    equal_flat = state_equal["cumulative_information_gain"]["flat_signal"]
+
     return all([
         _assert(high_flat is False, "mean=10.0 → flat=False"),
         _assert(low_flat is True, "mean=1.0 → flat=True"),
         _assert(below_flat is True, "mean=4.99 (閾値直下) → flat=True"),
+        _assert(equal_flat is False, "mean=5.0 (閾値同値、strict <) → flat=False"),
         _assert(above_flat is False, "mean=5.01 (閾値直上) → flat=False"),
     ])
 
@@ -125,6 +132,50 @@ def test_cig_flat_streak_increment_and_reset():
     ])
 
 
+def test_cig_end_to_end_via_update_predictor_confidence():
+    """update_predictor_confidence() 経由で CIG が history append 後に走る順序を検証。
+
+    Codex review P2-2 fix: production wiring (history append → CIG update) の
+    ordering 整合性を end-to-end で確認。直接 helper 呼出し test は history を
+    bypass してたため、ordering regression を検出できなかった。
+
+    識別力: CIG を history append 前に呼ぶ誤実装 (= 最新 error が window_mean
+    に含まれない) で window_mean が想定値と乖離 → fail する。
+    """
+    print("== Step A: end-to-end (update_predictor_confidence → CIG) ==")
+    from core.predictor import update_predictor_confidence
+
+    state = {}
+    # 1 cycle 目: error=4.0、history は空から append、window_mean=4.0 想定
+    update_predictor_confidence(state, "reflect", 4.0)
+    cig_after_first = dict(state["cumulative_information_gain"])
+
+    # 2 cycle 目: error=2.0、history=[4.0, 2.0]、window_mean=3.0 想定
+    update_predictor_confidence(state, "reflect", 2.0)
+    cig_after_second = dict(state["cumulative_information_gain"])
+
+    # 3 cycle 目: error=10.0、window_mean=(4+2+10)/3≒5.33 で flat=False 切替想定
+    update_predictor_confidence(state, "reflect", 10.0)
+    cig_after_third = dict(state["cumulative_information_gain"])
+
+    return all([
+        _assert(abs(cig_after_first["e2_window_mean"] - 4.0) < 1e-9,
+                f"1 cycle 後 mean=4.0 ({cig_after_first['e2_window_mean']})"),
+        _assert(cig_after_first["flat_signal"] is True,
+                "1 cycle 後 mean=4.0 < 5.0 で flat=True"),
+        _assert(abs(cig_after_second["e2_window_mean"] - 3.0) < 1e-9,
+                f"2 cycle 後 mean=3.0 ({cig_after_second['e2_window_mean']})"),
+        _assert(cig_after_second["flat_streak"] == 2,
+                f"2 cycle 連続 flat で streak=2 ({cig_after_second['flat_streak']})"),
+        _assert(cig_after_third["flat_signal"] is False,
+                f"3 cycle 後 mean≒5.33 で flat=False ({cig_after_third['e2_window_mean']:.2f})"),
+        _assert(cig_after_third["flat_streak"] == 0,
+                "flat=False で streak リセット"),
+        _assert(abs(cig_after_third["e2_total"] - 16.0) < 1e-9,
+                f"e2_total 累積 16.0 ({cig_after_third['e2_total']})"),
+    ])
+
+
 # ============================================================
 # main runner
 # ============================================================
@@ -134,6 +185,7 @@ def main():
         test_cig_total_monotonic,
         test_cig_flat_signal_threshold,
         test_cig_flat_streak_increment_and_reset,
+        test_cig_end_to_end_via_update_predictor_confidence,
     ]
     print(f"Running {len(tests)} test groups (Step A)...\n")
     passed = 0
