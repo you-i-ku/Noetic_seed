@@ -32,7 +32,7 @@ from core.prompt import (
 _APPROVAL_PROTOCOL = (
     "## Approval Protocol (必須)\n"
     "\n"
-    "Tool を呼び出す際、以下 3 フィールドを tool_input に必ず含めること:\n"
+    "Tool を呼び出す際、以下 3 フィールドを tool 引数のトップレベルに必ず含めること:\n"
     "\n"
     "- tool_intent:           (あなたの内部理由を 1 文で)\n"
     "- tool_expected_outcome: (期待する結果を 1 文で)\n"
@@ -200,7 +200,7 @@ def build_force_directive(force_tool: Optional[str]) -> str:
         f"controller は本ターンでツール「{force_tool}」の実行を選定済みです。\n"
         "必ずこのツールを呼び出してください。\n"
         "tool_use ブロックを 1 つ生成し、3 フィールド (tool_intent /\n"
-        "tool_expected_outcome / message) を tool_input に含めてください。\n"
+        "tool_expected_outcome / message) を tool 引数のトップレベルに含めてください。\n"
         "text のみの応答は許可されません。"
     )
 
