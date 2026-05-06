@@ -127,7 +127,7 @@ def _call_openai_compat(prompt: str, max_tokens: int, temperature: float = 0.7, 
             "max_tokens": max_tokens,
             "temperature": temperature,
         },
-        timeout=300,
+        timeout=6000,
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
@@ -166,7 +166,7 @@ def _call_claude(prompt: str, max_tokens: int, image_paths: list = None) -> str:
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": content}],
         },
-        timeout=300,
+        timeout=6000,
     )
     resp.raise_for_status()
     return resp.json()["content"][0]["text"]
