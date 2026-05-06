@@ -6,7 +6,8 @@ claw-code 参照:
   - rust/crates/runtime/src/remote_trigger.rs
 
 厳密 claw-code 準拠。Noetic 既存 tools/web.py への forward は**しない**。
-WebSearch は Phase 2 では DuckDuckGo HTML endpoint を使った簡易実装。
+WebSearch は Brave Search API (auth_profiles.brave 経由)。description 取得 +
+count/offset 調整対応 (段階13 Phase 6 hotfix で DuckDuckGo HTML scrape から差替)。
 """
 import re
 from typing import Optional
@@ -92,53 +93,86 @@ def web_search(inp: dict) -> str:
     if not query:
         return "Error: query is required"
 
+    # 副次改善 D: count / offset 調整可能 (Brave 仕様 count 1-20 / offset 0-9)
+    raw_count = inp.get("count", 10)
+    try:
+        count = int(raw_count) if raw_count is not None else 10
+    except (ValueError, TypeError):
+        return "Error: count must be an integer (1-20)"
+    count = max(1, min(20, count))
+
+    raw_offset = inp.get("offset", 0)
+    try:
+        offset = int(raw_offset) if raw_offset is not None else 0
+    except (ValueError, TypeError):
+        return "Error: offset must be an integer (0-9)"
+    offset = max(0, min(9, offset))
+
     allowed = inp.get("allowed_domains") or []
     blocked = inp.get("blocked_domains") or []
 
+    # 認証 (auth_profiles.brave から API key 取得)
+    from core.auth import apply_auth
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    params = {"q": query, "count": count, "offset": offset}
+    headers, params, err = apply_auth(headers, params, "brave")
+    if err:
+        return (f"Error: {err}。secrets.json の auth_profiles.brave.key に "
+                f"Brave Search API key を設定してください "
+                f"(取得元: https://api-dashboard.search.brave.com)。")
+
     try:
         resp = httpx.get(
-            f"https://html.duckduckgo.com/html/?q={quote_plus(query)}",
+            "https://api.search.brave.com/res/v1/web/search",
+            headers=headers,
+            params=params,
             timeout=30,
-            headers={"User-Agent": USER_AGENT},
             follow_redirects=True,
         )
         resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            return ("Error: Brave Search rate limit (429)。"
+                    "1 req/sec 制限を超過しました。数秒待ってから再試行してください。")
+        if e.response.status_code in (401, 403):
+            return (f"Error: Brave 認証失敗 (HTTP {e.response.status_code})。"
+                    f"secrets.json の auth_profiles.brave.key を確認してください。")
+        return f"Error: Brave HTTP {e.response.status_code}"
     except Exception as e:
         return f"Error: {type(e).__name__}: {e}"
 
-    # 簡易パース: <a class="result__a" href="..." ... > title </a>
+    try:
+        data = resp.json()
+    except ValueError as e:
+        return f"Error: Brave JSON parse 失敗: {e}"
+
+    web_results = (data.get("web") or {}).get("results") or []
+
+    # 副次改善 C: description (抜粋) を含めて返す
     results: list = []
-    pattern = re.compile(
-        r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.+?)</a>',
-        re.IGNORECASE | re.DOTALL,
-    )
-    for m in pattern.finditer(resp.text):
-        raw_url = m.group(1)
-        title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        # DuckDuckGo は uddg= でリダイレクト URL を返すことがある
-        redirect = re.search(r"uddg=([^&]+)", raw_url)
-        if redirect:
-            from urllib.parse import unquote
-            actual_url = unquote(redirect.group(1))
-        else:
-            actual_url = raw_url
+    for r in web_results:
+        url = r.get("url") or ""
+        title = (r.get("title") or "").strip()
+        description = (r.get("description") or "").strip()
+        # description には <strong> 等のハイライトタグが混じる場合があるため除去
+        description = re.sub(r"<[^>]+>", "", description).strip()
 
-        if allowed and not any(d in actual_url for d in allowed):
+        if allowed and not any(d in url for d in allowed):
             continue
-        if blocked and any(d in actual_url for d in blocked):
+        if blocked and any(d in url for d in blocked):
             continue
 
-        results.append((title, actual_url))
-        if len(results) >= 10:
-            break
+        results.append((title, url, description))
 
     if not results:
         return f"No search results for: {query}"
 
-    lines = [f"Search results for: {query}"]
-    for title, url in results:
+    lines = [f"Search results for: {query} (count={count}, offset={offset})"]
+    for title, url, description in results:
         lines.append(f"  - {title}")
         lines.append(f"    {url}")
+        if description:
+            lines.append(f"    {description}")
     return "\n".join(lines)
 
 
@@ -203,11 +237,27 @@ def register(registry: ToolRegistry) -> None:
         ),
         ToolSpec(
             name="WebSearch",
-            description="Search the web and return ranked results with citations.",
+            description=(
+                "Brave Search API でウェブ検索し、title / url / description を返す。"
+                "count (1-20、default 10) / offset (0-9、default 0) で件数とページを"
+                "調整可能。API key は secrets.json の auth_profiles.brave.key で管理。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
+                    "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "description": "結果件数 (1-20、default 10)",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9,
+                        "description": "ページオフセット (0-9、default 0)",
+                    },
                     "allowed_domains": {"type": "array",
                                         "items": {"type": "string"}},
                     "blocked_domains": {"type": "array",
