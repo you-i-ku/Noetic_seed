@@ -170,9 +170,12 @@ def update_cumulative_information_gain(
 # 出力: β (PLAN §10-4 tool 別拡張時 candidate 引数活用)、
 # controller._predicted_outcome_multiplier で combined / beta に逆作用。
 
-BETA_BASE = 0.5            # 既存挙動相当 (PLAN §5-2 literal)
-BETA_CAP = 2.0             # runaway 抑制 cap (PLAN §5-2 literal)
-BETA_TRIGGER_STREAK = 2    # flat_streak >= で動的化発火 (PLAN §5-2 literal)
+BETA_BASE = 0.5                # 既存挙動相当 (PLAN §5-2 literal)
+BETA_CAP = 2.0                 # runaway 抑制 cap (PLAN §5-2 literal)
+BETA_TRIGGER_STREAK = 2        # flat_streak >= で動的化発火 (PLAN §5-2 literal)
+# 段階14 Step D: phase_transition_pending 時の β boost (PLAN §6-2 literal)
+BETA_TRANSITION_BOOST = 1.5    # transition pending で β を 1.5x boost
+BETA_TRANSITION_CAP = 3.0      # transition pending 時のみの最大 cap (通常 cap=2.0)
 
 
 def _compute_dynamic_beta(state: dict, candidate: dict) -> float:
@@ -194,18 +197,29 @@ def _compute_dynamic_beta(state: dict, candidate: dict) -> float:
     flat_streak = cig.get("flat_streak", 0)
 
     if flat_streak < BETA_TRIGGER_STREAK:
-        return BETA_BASE
+        # flat_streak 閾値未達: β=BETA_BASE 起点 (現挙動維持、対症療法回避)
+        beta_dynamic = BETA_BASE
+    else:
+        # lower bound β >= E[h] / I を直訳 (PLAN §5-2 literal)
+        # E[h] ~= window_mean (予測の不確実性、e2 軸 0-100 scale を 0-1 に normalize)
+        # I ~= e2_total / cycle 数 (累積情報利得率、同 normalize)
+        e_h = max(0.01, cig.get("e2_window_mean", 50.0) / 100.0)
+        history = state.get("prediction_error_history_e2", [])
+        i_avg = max(0.01, cig.get("e2_total", 1.0) / max(1, len(history)))
+        i_avg_norm = i_avg / 100.0
 
-    # lower bound β >= E[h] / I を直訳 (PLAN §5-2 literal)
-    # E[h] ~= window_mean (予測の不確実性、e2 軸 0-100 scale を 0-1 に normalize)
-    # I ~= e2_total / cycle 数 (累積情報利得率、同 normalize)
-    e_h = max(0.01, cig.get("e2_window_mean", 50.0) / 100.0)
-    history = state.get("prediction_error_history_e2", [])
-    i_avg = max(0.01, cig.get("e2_total", 1.0) / max(1, len(history)))
-    i_avg_norm = i_avg / 100.0
+        beta_required = e_h / max(0.01, i_avg_norm)
+        beta_dynamic = min(BETA_CAP, max(BETA_BASE, beta_required))
 
-    beta_required = e_h / max(0.01, i_avg_norm)
-    beta_dynamic = min(BETA_CAP, max(BETA_BASE, beta_required))
+    # 段階14 Step D: phase_transition_pending で β を更に boost (PLAN §6-2 literal)。
+    # basin 滞留閾値超過 → 確率的脱出促進 (強制脱出でなく β 経由間接誘導、
+    # memo line 138-140「対症療法でない」+ feedback_freedom_to_die 整合)。
+    # Step C の flat_streak < trigger 経路 (β=BETA_BASE) でも適用 = basin 単独
+    # 滞留 (情報利得 flat ではない but 同 cluster 滞留) で脱出促進発火。
+    bs = state.get("basin_state", {})
+    if bs.get("phase_transition_pending"):
+        beta_dynamic = min(BETA_TRANSITION_CAP, beta_dynamic * BETA_TRANSITION_BOOST)
+
     return beta_dynamic
 
 

@@ -31,6 +31,44 @@ from core.perspective import (
 from core.state import append_debug_log
 
 
+# 段階14 Step D Codex review P1-1 fix: stale subject filter
+# read_file 等の non-memory action 後に reflect 発火すると memories[-1] は
+# 現 cycle と無関係な古い memory (stale subject) で、basin classify が誤判定
+# → false phase transition の危険。本 helper で「現 cycle で created な memory」
+# のみ subject 認定、stale なら set しない → main.py で None pop → 非 reflect
+# cycle 経路 fallback (basin 不変、dwell 単純カウント)。
+STALE_SUBJECT_THRESHOLD_SEC = 30  # smoke で tune 可 (PLAN §7 K6 観察対象)
+
+
+def _is_recent_memory(
+    memory: dict,
+    threshold_sec: int = STALE_SUBJECT_THRESHOLD_SEC,
+) -> bool:
+    """memory の created_at が現時刻から threshold_sec 以内なら True。
+
+    PLAN §6-2 「current_subject_embedding」の概念整合 = 「現 cycle の認知焦点」。
+    Codex review P1-1 fix (Area 1 + Area 2)。
+
+    Args:
+        memory: memory entry dict、"created_at" キー想定
+            ("YYYY-MM-DD HH:MM:SS" 形式)
+        threshold_sec: stale 判定閾値 (default STALE_SUBJECT_THRESHOLD_SEC)
+
+    Returns:
+        True: created_at が threshold_sec 以内 (現 cycle 認知焦点候補)
+        False: stale / parse 失敗 / created_at 不在
+    """
+    created_at = memory.get("created_at", "")
+    if not created_at:
+        return False
+    try:
+        created = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+        diff = (datetime.now() - created).total_seconds()
+        return 0 <= diff <= threshold_sec
+    except (ValueError, TypeError):
+        return False
+
+
 def should_reflect(state: dict, interval: int = 10) -> bool:
     """内省を実行すべきか判定。"""
     cycles_since = state.get("reflection_cycle", 0)
@@ -218,6 +256,20 @@ def reflect(state: dict, call_llm_fn) -> dict:
         state["phase6_metrics"]["cluster_inter_ratio"] = mi_metrics["cluster_inter_ratio"]
         state["phase6_metrics"]["last_cluster_link_pairs"] = mi_metrics["cluster_link_pairs"]
         state["phase6_metrics"]["last_reflect_cycle"] = state.get("cycle_id")
+
+        # 段階14 Step D: cluster snapshot + 直近 subject memory_id を state に
+        # 一時保存 (basin transition 検知用、main.py cycle 末尾で消費)。
+        # memo line 56「reflection.py / memory_graph_tool.py、cluster_estimation
+        # 流用元」literal、Phase 5「非永続 posterior cluster」整合 (snapshot は
+        # 1 cycle 限定で main.py 側 pop で消費、永続化しない)。
+        state["last_clusters_snapshot"] = clusters
+        # Codex review P1-1 fix: stale subject 判定で現 cycle 認知焦点のみ渡す。
+        # stale (read_file 後 reflect 等で memories[-1] が古い場合) なら set
+        # しない → main.py pop で None → 非 reflect cycle 経路 fallback。
+        if memories and _is_recent_memory(memories[-1]):
+            state["last_subject_memory_id"] = str(memories[-1].get("id", ""))
+        # else: stale or memory 不在で set しない、前 cycle 値があっても
+        # main.py 側 pop で消費されてるので残らない
 
     prompt = f"""あなたは自律AIシステムの内省モジュールです。以下の直近の行動 + memory cluster 整理を振り返り、各項目を出力してください。
 

@@ -308,3 +308,118 @@ def render_for_prompt(wm: Optional[dict], max_entities: int = 10,
     if len(lines) == 1:
         return ""
     return "\n".join(lines)
+
+
+# ============================================================
+# 段階14 Step D: Basin Migration / Phase Transition
+# ============================================================
+#
+# STAGE14 PLAN §6 の実装。iku が同 basin (= subject cluster) に N cycle 滞留
+# したら強制脱出でなく phase transition として状態を表現、Step C の β 動的化
+# と相補して自然な basin 移行を促す。Ramstead 系 FEP の局所エルゴード性違反
+# を「memory 形成中→転移」の二相モデルで表現。
+#
+# basin_id は cluster_estimation の cluster_id (uuid hex 8 文字 str) を流用
+# (memo line 154-156「触らない」literal、Phase 5 非永続 posterior 整合)。
+# state は JSON-safe (memo line 144「再起動でも保持」literal、Step B BLOCKER
+# 同種注意点)。
+
+BASIN_TRANSITION_THRESHOLD = 5     # 同 basin 滞留閾値 (PLAN §10-7 確定値)
+BASIN_VISIT_HISTORY_CAP = 50       # FIFO 履歴上限 (PLAN §6-2 literal)
+
+
+def update_basin_state(
+    state: dict,
+    current_subject_id: Optional[str] = None,
+    clusters_snapshot: Optional[list] = None,
+) -> dict:
+    """同 basin 滞留検知 + phase transition pending 判定 (PLAN §6-2 literal)。
+
+    呼出経路 2 つ:
+    - reflect 発火時: clusters_snapshot=estimate_clusters() 結果 +
+      current_subject_id=直近 memory_id を渡す。subject の cluster 所属を
+      再計算、basin 切替検知 + dwell 更新 + history append。
+    - 非 reflect cycle: 引数なし or None で呼出、basin 不変で dwell カウント
+      のみ (basin_id 不在時は no-op)。
+
+    state["basin_state"] フィールド (JSON-safe、memo line 144「再起動でも保持」):
+      current_basin_id (str): cluster_id (uuid hex 8 文字) or "" (unknown)
+      current_basin_dwell (int): 同 basin 滞留 cycle 数
+      basin_transition_threshold (int): 閾値 (default BASIN_TRANSITION_THRESHOLD)
+      phase_transition_pending (bool): 閾値超過 = Step C β boost trigger
+      basin_visit_history (list[str]): 過去 basin_id (FIFO)
+
+    Args:
+        state: state dict (破壊的更新)
+        current_subject_id: reflect 発火時の subject memory_id (= 直近 memory_id)
+        clusters_snapshot: estimate_clusters() 戻り値 list
+
+    Returns:
+        更新後 basin_state dict (state["basin_state"] と同参照)
+    """
+    bs = state.setdefault("basin_state", {
+        "current_basin_id": "",
+        "current_basin_dwell": 0,
+        "basin_transition_threshold": BASIN_TRANSITION_THRESHOLD,
+        "phase_transition_pending": False,
+        "basin_visit_history": [],
+    })
+
+    if clusters_snapshot is not None and current_subject_id:
+        # reflect 経路: subject の cluster 所属を再計算
+        new_basin = _classify_basin_from_snapshot(
+            current_subject_id, clusters_snapshot,
+        )
+        if not new_basin:
+            # subject が cluster の memory_ids に含まれない (新規 memory 等):
+            # basin 不変、dwell も update せず safe no-op (basin_id="" のまま、
+            # phase_transition_pending も既存値維持)
+            pass
+        elif new_basin == bs["current_basin_id"]:
+            bs["current_basin_dwell"] += 1
+        else:
+            # basin 切替: 旧 basin を history に保存 (空 id は履歴に入れない)
+            if bs["current_basin_id"]:
+                bs["basin_visit_history"].append(bs["current_basin_id"])
+                if len(bs["basin_visit_history"]) > BASIN_VISIT_HISTORY_CAP:
+                    del bs["basin_visit_history"][0]
+            bs["current_basin_id"] = new_basin
+            bs["current_basin_dwell"] = 1
+            bs["phase_transition_pending"] = False  # transition 完了
+    else:
+        # 非 reflect cycle: dwell カウントのみ (basin 不変)
+        if bs["current_basin_id"]:
+            bs["current_basin_dwell"] += 1
+
+    # 閾値超過判定 (両経路共通、Step C _compute_dynamic_beta の boost trigger)
+    if bs["current_basin_dwell"] >= bs["basin_transition_threshold"]:
+        bs["phase_transition_pending"] = True
+
+    return bs
+
+
+def _classify_basin_from_snapshot(
+    subject_id: str,
+    clusters: list,
+) -> str:
+    """subject_id がどの cluster の memory_ids に含まれるかで basin 判定。
+
+    PLAN §6-2 概念 literal の `_classify_basin` 概念実装、cluster_estimation
+    流用 (memo line 154-156「触らない」literal、Phase 5 非永続 posterior 整合)。
+    実コード `cluster_id` は uuid hex 8 文字 str (PLAN literal int との乖離は
+    Step B/C 同様の概念呼称解釈)。
+
+    Args:
+        subject_id: subject memory_id (str)
+        clusters: estimate_clusters の戻り値
+            [{"cluster_id": str, "label": str, "memory_ids": [...], "method": str}, ...]
+
+    Returns:
+        cluster_id (str) or "" (subject が cluster に含まれない / 入力空)
+    """
+    if not subject_id or not clusters:
+        return ""
+    for cluster in clusters:
+        if subject_id in cluster.get("memory_ids", []):
+            return str(cluster.get("cluster_id", ""))
+    return ""

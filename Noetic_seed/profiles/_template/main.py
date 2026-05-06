@@ -987,6 +987,32 @@ def main():
         if lv_msg:
             result_str += f"\n{lv_msg}"
 
+        # 段階14 Step D: basin migration 検知 (reflect 経路 / 非 reflect 経路両対応、
+        # PLAN §6-2 literal、memo line 56「basin_id 流用元」整合)。
+        # reflect 発火時 reflection.py が state に snapshot 保存、ここで pop で消費
+        # (1 cycle 限定、永続化しない、Phase 5「非永続 posterior」整合)。
+        from core.world_model import update_basin_state
+        _clusters_snap = state.pop("last_clusters_snapshot", None)
+        _subject_id = state.pop("last_subject_memory_id", None)
+        update_basin_state(
+            state,
+            current_subject_id=_subject_id,
+            clusters_snapshot=_clusters_snap,
+        )
+        # Codex review P1-2 fix: basin migration を smoke raw_log で観察可能化
+        # (PLAN §7 K6「basin_state log」literal)。basin 切替 (dwell=1) or pending=True
+        # の状態のみ log (毎 cycle 出力じゃなく観察 trigger、smoke noise 抑制)。
+        _bs = state.get("basin_state", {})
+        _bid = _bs.get("current_basin_id", "")
+        _bdwell = _bs.get("current_basin_dwell", 0)
+        _bpending = _bs.get("phase_transition_pending", False)
+        if _bid and (_bpending or _bdwell == 1):
+            _basin_line = (
+                f"  [basin] id={_bid[:8]} dwell={_bdwell} pending={_bpending}"
+            )
+            print(_basin_line)
+            broadcast_log(_basin_line)
+
         cid = state.get("cycle_id", 0) + 1
         state["cycle_id"] = cid
         entry = {

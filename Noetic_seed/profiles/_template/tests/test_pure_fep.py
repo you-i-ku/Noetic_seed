@@ -747,6 +747,284 @@ def test_predicted_outcome_multiplier_ec_present_with_dynamic_beta():
 
 
 # ============================================================
+# Step D — Basin Migration / Phase Transition
+# ============================================================
+# PLAN §6-4 検証要件 + memo line 124「5 cycle 滞留 → transition pending → reset」literal:
+# - 同 cluster 5 cycle 滞留で phase_transition_pending=True
+# - 別 cluster へ動いたら dwell リセット + history append
+# - transition_pending=True 時の β 1.5x 動作 (BETA_TRANSITION_BOOST)
+# - state JSON-safe (memo line 144「再起動でも保持」literal)
+
+def test_basin_state_init_and_dwell_increment():
+    """update_basin_state 初回呼出で state 初期化、同 basin で dwell 増加。
+
+    識別力: state setdefault 漏れ / dwell インクリメント漏れの誤実装で fail。
+    """
+    print("== Step D: basin_state 初期化 + 同 basin で dwell 増加 ==")
+    from core.world_model import update_basin_state, BASIN_TRANSITION_THRESHOLD
+
+    state = {}
+    clusters = [
+        {"cluster_id": "abc12345", "memory_ids": ["mem_X"], "label": "L"},
+    ]
+
+    # 1 cycle 目: subject mem_X を cluster abc12345 に分類
+    update_basin_state(state, current_subject_id="mem_X", clusters_snapshot=clusters)
+    bs1 = dict(state["basin_state"])
+
+    # 2 cycle 目: 同 cluster 滞留で dwell++
+    update_basin_state(state, current_subject_id="mem_X", clusters_snapshot=clusters)
+    bs2 = dict(state["basin_state"])
+
+    # 3 cycle 目: 非 reflect cycle (引数 None) でも basin_id 維持で dwell++
+    update_basin_state(state)
+    bs3 = dict(state["basin_state"])
+
+    return all([
+        _assert(bs1["current_basin_id"] == "abc12345",
+                f"初回 basin_id=abc12345 ({bs1['current_basin_id']})"),
+        _assert(bs1["current_basin_dwell"] == 1, f"初回 dwell=1 ({bs1['current_basin_dwell']})"),
+        _assert(bs1["basin_transition_threshold"] == BASIN_TRANSITION_THRESHOLD,
+                "threshold default"),
+        _assert(bs1["phase_transition_pending"] is False, "初回 pending=False"),
+        _assert(bs2["current_basin_dwell"] == 2, f"2 cycle dwell=2 ({bs2['current_basin_dwell']})"),
+        _assert(bs3["current_basin_dwell"] == 3,
+                f"非 reflect cycle で dwell++ ({bs3['current_basin_dwell']})"),
+    ])
+
+
+def test_basin_transition_pending_at_threshold():
+    """同 basin に BASIN_TRANSITION_THRESHOLD (=5) cycle 滞留で
+    phase_transition_pending=True (PLAN §6-4 + memo line 124)。
+
+    識別力: 閾値判定ズレ (== / > / < の誤り) で fail。
+    """
+    print("== Step D: 5 cycle 滞留で phase_transition_pending=True ==")
+    from core.world_model import update_basin_state, BASIN_TRANSITION_THRESHOLD
+
+    state = {}
+    clusters = [{"cluster_id": "x", "memory_ids": ["m1"], "label": "L"}]
+
+    pendings = []
+    for i in range(BASIN_TRANSITION_THRESHOLD + 1):
+        update_basin_state(state, current_subject_id="m1", clusters_snapshot=clusters)
+        pendings.append(state["basin_state"]["phase_transition_pending"])
+
+    return all([
+        _assert(pendings[0] is False, f"1 cycle pending=False ({pendings[0]})"),
+        _assert(pendings[BASIN_TRANSITION_THRESHOLD - 2] is False,
+                f"{BASIN_TRANSITION_THRESHOLD-1} cycle pending=False (閾値直下)"),
+        _assert(pendings[BASIN_TRANSITION_THRESHOLD - 1] is True,
+                f"{BASIN_TRANSITION_THRESHOLD} cycle pending=True (閾値到達)"),
+        _assert(pendings[BASIN_TRANSITION_THRESHOLD] is True,
+                f"{BASIN_TRANSITION_THRESHOLD+1} cycle pending=True (閾値超過維持)"),
+    ])
+
+
+def test_basin_switch_resets_dwell_and_appends_history():
+    """異なる cluster へ subject 移動で dwell リセット + history append +
+    pending=False 復帰 (PLAN §6-4 literal)。
+
+    識別力: history append 漏れ / dwell リセット漏れ / pending リセット漏れで fail。
+    """
+    print("== Step D: basin 切替で dwell reset + history append ==")
+    from core.world_model import update_basin_state
+
+    state = {}
+    clusters_a = [{"cluster_id": "AAA", "memory_ids": ["m1"], "label": "A"}]
+    clusters_b = [{"cluster_id": "BBB", "memory_ids": ["m2"], "label": "B"}]
+
+    # 6 cycle で AAA に滞留 + pending=True
+    for _ in range(6):
+        update_basin_state(state, current_subject_id="m1", clusters_snapshot=clusters_a)
+    bs_pending = dict(state["basin_state"])
+
+    # cluster BBB に切替
+    update_basin_state(state, current_subject_id="m2", clusters_snapshot=clusters_b)
+    bs_switched = dict(state["basin_state"])
+
+    return all([
+        _assert(bs_pending["current_basin_id"] == "AAA",
+                f"切替前 basin=AAA ({bs_pending['current_basin_id']})"),
+        _assert(bs_pending["phase_transition_pending"] is True,
+                "切替前 pending=True"),
+        _assert(bs_switched["current_basin_id"] == "BBB",
+                f"切替後 basin=BBB ({bs_switched['current_basin_id']})"),
+        _assert(bs_switched["current_basin_dwell"] == 1,
+                f"切替後 dwell=1 (リセット、{bs_switched['current_basin_dwell']})"),
+        _assert(bs_switched["phase_transition_pending"] is False,
+                "切替後 pending=False (transition 完了)"),
+        _assert("AAA" in bs_switched["basin_visit_history"],
+                f"history に旧 basin AAA 記録 ({bs_switched['basin_visit_history']})"),
+    ])
+
+
+def test_basin_state_json_safe():
+    """state["basin_state"] が json.dumps を通る contract (memo line 144
+    「再起動でも保持」literal、Step B BLOCKER と同種注意点)。
+
+    識別力: cluster_id を int にする / history を tuple にする等、
+    JSON 不可な型を入れた誤実装で fail。
+    """
+    print("== Step D: basin_state が JSON-safe (再起動 contract) ==")
+    import json
+    from core.world_model import update_basin_state
+
+    state = {}
+    clusters = [{"cluster_id": "deadbeef", "memory_ids": ["m1"], "label": "L"}]
+    for _ in range(3):
+        update_basin_state(state, current_subject_id="m1", clusters_snapshot=clusters)
+
+    try:
+        json.dumps(state)
+        json_ok = True
+        json_err = None
+    except TypeError as e:
+        json_ok = False
+        json_err = str(e)
+
+    bs = state["basin_state"]
+    return all([
+        _assert(json_ok, f"json.dumps(state) 成功 (err={json_err})"),
+        _assert(isinstance(bs["current_basin_id"], str),
+                f"current_basin_id は str ({type(bs['current_basin_id']).__name__})"),
+        _assert(isinstance(bs["basin_visit_history"], list),
+                "basin_visit_history list 型"),
+        _assert(isinstance(bs["current_basin_dwell"], int),
+                "current_basin_dwell int 型"),
+    ])
+
+
+def test_basin_pending_boosts_beta_in_compute_dynamic_beta():
+    """phase_transition_pending=True 時、_compute_dynamic_beta が β を
+    BETA_TRANSITION_BOOST (=1.5) 倍 + cap BETA_TRANSITION_CAP (=3.0) で boost
+    (PLAN §6-2 literal)。
+
+    識別力: boost 倍率ミス / cap 抜け / pending 不参照の誤実装で fail。
+    """
+    print("== Step D: pending=True で β boost (BETA_TRANSITION_BOOST=1.5) ==")
+    from core.predictor import (
+        _compute_dynamic_beta,
+        BETA_BASE,
+        BETA_CAP,
+        BETA_TRANSITION_BOOST,
+        BETA_TRANSITION_CAP,
+    )
+
+    # case A: flat_streak<2 + pending=True → β = BETA_BASE * 1.5 = 0.75
+    state_a = {
+        "basin_state": {"phase_transition_pending": True},
+    }
+    beta_a = _compute_dynamic_beta(state_a, {"tool": "reflect"})
+    expected_a = min(BETA_TRANSITION_CAP, BETA_BASE * BETA_TRANSITION_BOOST)
+
+    # case B: flat_streak=2 (β=1.0) + pending=True → β = 1.0 * 1.5 = 1.5
+    state_b = {
+        "cumulative_information_gain": {
+            "flat_streak": 2, "e2_window_mean": 50.0, "e2_total": 500.0,
+        },
+        "prediction_error_history_e2": [50.0] * 10,
+        "basin_state": {"phase_transition_pending": True},
+    }
+    beta_b = _compute_dynamic_beta(state_b, {"tool": "reflect"})
+
+    # case C: pending=True + 既に通常 cap (BETA_CAP=2.0) 到達 → cap で 3.0 まで上昇
+    state_c = {
+        "cumulative_information_gain": {
+            "flat_streak": 5, "e2_window_mean": 100.0, "e2_total": 1.0,
+        },
+        "prediction_error_history_e2": [0.01] * 100,
+        "basin_state": {"phase_transition_pending": True},
+    }
+    beta_c = _compute_dynamic_beta(state_c, {"tool": "reflect"})
+
+    # case D: pending=False (デフォルト) → boost 発火しない
+    state_d = {"basin_state": {"phase_transition_pending": False}}
+    beta_d = _compute_dynamic_beta(state_d, {"tool": "reflect"})
+
+    return all([
+        _assert(abs(beta_a - expected_a) < 1e-9,
+                f"BASE * 1.5 = {expected_a} ({beta_a})"),
+        _assert(abs(beta_b - 1.5) < 1e-9, f"flat=2 + pending: 1.0*1.5=1.5 ({beta_b})"),
+        _assert(beta_c == BETA_TRANSITION_CAP,
+                f"runaway + pending: cap=BETA_TRANSITION_CAP ({beta_c} == {BETA_TRANSITION_CAP})"),
+        _assert(beta_d == BETA_BASE,
+                f"pending=False は boost 発火しない ({beta_d} == {BETA_BASE})"),
+    ])
+
+
+def test_basin_unknown_subject_returns_empty_id():
+    """subject が clusters の memory_ids に含まれない場合 cluster_id="" 維持。
+
+    識別力: 未一致時に最初の cluster_id を返す誤実装、または
+    例外 raise の誤実装で fail。
+    """
+    print("== Step D: subject 未一致時の安全 fallback ==")
+    from core.world_model import update_basin_state, _classify_basin_from_snapshot
+
+    # subject_id が clusters のどの memory_ids にも含まれない
+    clusters = [{"cluster_id": "AAA", "memory_ids": ["other_id"], "label": "L"}]
+    classified = _classify_basin_from_snapshot("unknown_subject", clusters)
+
+    # update 経路: 不在 subject では basin 不変 (空文字)
+    state = {}
+    update_basin_state(state, current_subject_id="unknown_subject", clusters_snapshot=clusters)
+
+    return all([
+        _assert(classified == "", f"未一致で cluster_id 空 ({classified})"),
+        _assert(state["basin_state"]["current_basin_id"] == "",
+                f"state basin_id 空 ({state['basin_state']['current_basin_id']})"),
+        _assert(state["basin_state"]["current_basin_dwell"] == 0,
+                "未一致で dwell=0 維持"),
+    ])
+
+
+def test_is_recent_memory_filter():
+    """_is_recent_memory が threshold (30 秒) 内 / 外で True/False 判定
+    (Codex review P1-1 fix、stale subject filter)。
+
+    識別力: threshold 比較ミス (上限 / 下限) / parse 失敗時の False fallback
+    ミス / created_at 不在時の例外漏れで fail。
+    """
+    print("== Step D: _is_recent_memory stale filter (Codex P1-1 fix) ==")
+    from datetime import datetime, timedelta
+    from core.reflection import _is_recent_memory, STALE_SUBJECT_THRESHOLD_SEC
+
+    now = datetime.now()
+    fmt = "%Y-%m-%d %H:%M:%S"
+
+    # case A: 5 秒前 created → recent (threshold=30 内)
+    recent_mem = {"created_at": (now - timedelta(seconds=5)).strftime(fmt)}
+    # case B: 100 秒前 created → stale (threshold=30 超過)
+    stale_mem = {"created_at": (now - timedelta(seconds=100)).strftime(fmt)}
+    # case C: created_at 不在
+    missing_mem = {}
+    # case D: parse 失敗 (非標準 format)
+    invalid_mem = {"created_at": "not a date"}
+    # case E: 閾値直下 (29 秒、recent 維持)
+    edge_in = {"created_at": (now - timedelta(seconds=29)).strftime(fmt)}
+    # case F: 閾値直上 (31 秒、stale)
+    edge_out = {"created_at": (now - timedelta(seconds=31)).strftime(fmt)}
+
+    return all([
+        _assert(STALE_SUBJECT_THRESHOLD_SEC == 30,
+                f"threshold default 30 ({STALE_SUBJECT_THRESHOLD_SEC})"),
+        _assert(_is_recent_memory(recent_mem) is True,
+                f"5 秒前 created → recent"),
+        _assert(_is_recent_memory(stale_mem) is False,
+                f"100 秒前 created → stale"),
+        _assert(_is_recent_memory(missing_mem) is False,
+                "created_at 不在で False"),
+        _assert(_is_recent_memory(invalid_mem) is False,
+                "parse 失敗で False (例外回避)"),
+        _assert(_is_recent_memory(edge_in) is True,
+                "29 秒前 (閾値直下) → recent"),
+        _assert(_is_recent_memory(edge_out) is False,
+                "31 秒前 (閾値直上) → stale"),
+    ])
+
+
+# ============================================================
 # main runner
 # ============================================================
 
@@ -770,6 +1048,13 @@ def main():
         test_predicted_outcome_multiplier_floor_with_beta,
         test_dynamic_beta_penalty_includes_beta_value,
         test_predicted_outcome_multiplier_ec_present_with_dynamic_beta,
+        test_basin_state_init_and_dwell_increment,
+        test_basin_transition_pending_at_threshold,
+        test_basin_switch_resets_dwell_and_appends_history,
+        test_basin_state_json_safe,
+        test_basin_pending_boosts_beta_in_compute_dynamic_beta,
+        test_basin_unknown_subject_returns_empty_id,
+        test_is_recent_memory_filter,
     ]
     print(f"Running {len(tests)} test groups (Step A)...\n")
     passed = 0
