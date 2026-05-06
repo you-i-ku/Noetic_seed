@@ -472,6 +472,281 @@ def test_attractor_redundancy_empty_and_fallback():
 
 
 # ============================================================
+# Step C — Dynamic β Lower Bound (EFE-Internal)
+# ============================================================
+# PLAN §5-4 検証要件 + ゆう要件「厚い identifying fixture」(条件 1):
+# lower bound 違反 / upper bound / runaway / リセット / floor 経路を 7 case
+# で deterministic 検証。
+
+def test_dynamic_beta_base_below_trigger():
+    """flat_streak < BETA_TRIGGER_STREAK で β = BETA_BASE (現挙動維持、
+    対症療法回避の核心)。
+
+    識別力: flat_streak >= 1 で β を上げる誤実装 (trigger 閾値ズレ) で fail。
+    cig field 空 / flat_streak=0 / flat_streak=1 の 3 case 同時検証。
+    """
+    print("== Step C: flat_streak<2 で β=BETA_BASE (現挙動維持) ==")
+    from core.predictor import _compute_dynamic_beta, BETA_BASE
+
+    state_empty = {}
+    beta_a = _compute_dynamic_beta(state_empty, {"tool": "reflect"})
+
+    state_0 = {"cumulative_information_gain": {
+        "flat_streak": 0, "e2_window_mean": 1.0, "e2_total": 100.0}}
+    beta_b = _compute_dynamic_beta(state_0, {"tool": "reflect"})
+
+    state_1 = {"cumulative_information_gain": {
+        "flat_streak": 1, "e2_window_mean": 1.0, "e2_total": 100.0}}
+    beta_c = _compute_dynamic_beta(state_1, {"tool": "reflect"})
+
+    return all([
+        _assert(beta_a == BETA_BASE, f"cig 空 β=BETA_BASE ({beta_a})"),
+        _assert(beta_b == BETA_BASE, f"flat_streak=0 β=BETA_BASE ({beta_b})"),
+        _assert(beta_c == BETA_BASE,
+                f"flat_streak=1 (閾値直下) β=BETA_BASE ({beta_c})"),
+    ])
+
+
+def test_dynamic_beta_trigger_at_streak_2():
+    """flat_streak >= BETA_TRIGGER_STREAK (=2) で β 動的増 (lower bound
+    不等式 β >= e_h/i_avg を直訳)。
+
+    識別力: BETA_TRIGGER_STREAK を 3 等ずらした誤実装、または flat_streak=2
+    で β=BETA_BASE 維持の誤実装で fail。numerical e_h/i_avg 計算ミスでも fail。
+    """
+    print("== Step C: flat_streak>=2 で β 動的増 (lower bound trigger) ==")
+    from core.predictor import _compute_dynamic_beta, BETA_BASE, BETA_CAP
+
+    # window_mean=50, e2_total=500, N=10 → e_h=0.5, i_avg=(500/10)/100=0.5
+    # β_required = 0.5/0.5 = 1.0
+    state = {
+        "cumulative_information_gain": {
+            "flat_streak": 2, "e2_window_mean": 50.0, "e2_total": 500.0,
+        },
+        "prediction_error_history_e2": [50.0] * 10,
+    }
+    beta = _compute_dynamic_beta(state, {"tool": "reflect"})
+
+    return all([
+        _assert(beta > BETA_BASE, f"β > BETA_BASE ({beta} > {BETA_BASE})"),
+        _assert(beta <= BETA_CAP, f"β <= BETA_CAP ({beta} <= {BETA_CAP})"),
+        _assert(abs(beta - 1.0) < 1e-6,
+                f"β = e_h/i_avg_norm = 1.0 ({beta})"),
+    ])
+
+
+def test_dynamic_beta_cap_runaway():
+    """e_h 高 / i_avg 低の極端 case で β = BETA_CAP (runaway 抑制)。
+
+    識別力: cap 制約を実装し忘れた誤実装で β >> 2.0 → fail。
+    """
+    print("== Step C: runaway pattern で β=BETA_CAP cap 発火 ==")
+    from core.predictor import _compute_dynamic_beta, BETA_CAP
+
+    # window_mean=100 (max), e2_total=1, N=100
+    # e_h = max(0.01, 100/100) = 1.0
+    # i_avg = max(0.01, 1/100) = 0.01, i_avg_norm = 0.01/100 = 0.0001
+    # β_required = 1.0 / max(0.01, 0.0001) = 1.0/0.01 = 100 → cap=2.0
+    # (Codex P3 fix: 旧コメント「10000」は誤、max(0.01, ...) clamp で 100)
+    state = {
+        "cumulative_information_gain": {
+            "flat_streak": 5, "e2_window_mean": 100.0, "e2_total": 1.0,
+        },
+        "prediction_error_history_e2": [0.01] * 100,
+    }
+    beta = _compute_dynamic_beta(state, {"tool": "reflect"})
+
+    return all([
+        _assert(beta == BETA_CAP, f"β = BETA_CAP ({beta} == {BETA_CAP})"),
+    ])
+
+
+def test_dynamic_beta_lower_bound_clamped():
+    """e_h < i_avg で β_required < BETA_BASE のとき max(BETA_BASE, ...) で
+    BETA_BASE に clamped (情報利得が高い時に β 過剰減算を防ぐ)。
+
+    識別力: max(BETA_BASE, ...) を抜いた誤実装で β < 0.5 → fail。
+    """
+    print("== Step C: β_required < BETA_BASE で BETA_BASE に clamped ==")
+    from core.predictor import _compute_dynamic_beta, BETA_BASE
+
+    # window_mean=10 (e_h=0.1), e2_total=10000, N=10 → i_avg=(10000/10)/100=10
+    # β_required = 0.1/10 = 0.01 < 0.5 → max(0.5, 0.01) = 0.5
+    state = {
+        "cumulative_information_gain": {
+            "flat_streak": 3, "e2_window_mean": 10.0, "e2_total": 10000.0,
+        },
+        "prediction_error_history_e2": [1000.0] * 10,
+    }
+    beta = _compute_dynamic_beta(state, {"tool": "reflect"})
+
+    return all([
+        _assert(beta == BETA_BASE,
+                f"β = BETA_BASE clamped ({beta} == {BETA_BASE})"),
+    ])
+
+
+def test_predicted_outcome_multiplier_with_beta():
+    """_predicted_outcome_multiplier が combined / beta で計算する end-to-end。
+    flat_streak=0 (β=0.5) と flat_streak=2/β=1.0 で mult 抑制を比較。
+
+    識別力: β を combined に乗算する誤実装 (× beta)、または beta 計算 skip
+    で fail。numerical 値 1.6 / 0.8 で deterministic 検証。
+    """
+    print("== Step C: _predicted_outcome_multiplier の β 反映 ==")
+    from core.controller import _predicted_outcome_multiplier
+
+    cfg = {"predicted_e2_floor": 0.05}
+    prediction = {"predicted_e2": 80}  # pe2_ratio=0.8、ec=None で combined=0.8
+    candidate_a = {"tool": "reflect"}
+
+    # case A: flat_streak=0 (β=0.5) → mult = max(0.05, 0.8/0.5) = 1.6
+    state_a = {"predictor_confidence": {
+        "reflect": {"e2_conf": 0.7, "ec_conf": 0.7}}}
+    mult_a = _predicted_outcome_multiplier(prediction, candidate_a, state_a, cfg)
+
+    # case B: flat_streak=2/β=1.0 → mult = max(0.05, 0.8/1.0) = 0.8
+    candidate_b = {"tool": "reflect"}
+    state_b = {
+        "predictor_confidence": {"reflect": {"e2_conf": 0.7, "ec_conf": 0.7}},
+        "cumulative_information_gain": {
+            "flat_streak": 2, "e2_window_mean": 50.0, "e2_total": 500.0,
+        },
+        "prediction_error_history_e2": [50.0] * 10,
+    }
+    mult_b = _predicted_outcome_multiplier(prediction, candidate_b, state_b, cfg)
+
+    return all([
+        _assert(abs(mult_a - 1.6) < 1e-6,
+                f"flat_streak=0: mult=1.6 ({mult_a})"),
+        _assert(abs(mult_b - 0.8) < 1e-6,
+                f"flat_streak=2/β=1.0: mult=0.8 ({mult_b})"),
+        _assert(mult_b < mult_a,
+                f"β 上昇で mult 抑制 ({mult_b} < {mult_a})"),
+    ])
+
+
+def test_predicted_outcome_multiplier_floor_with_beta():
+    """β 動的化下でも floor が機能 (PLAN literal「predicted_e2_floor 触らない」
+    整合)。combined / beta が floor 未満なら mult = floor で clamp。
+
+    識別力: floor を抜いた誤実装、または β を floor 計算に巻き込む誤実装で fail。
+    """
+    print("== Step C: floor が β 下でも機能 ==")
+    from core.controller import _predicted_outcome_multiplier
+
+    cfg = {"predicted_e2_floor": 0.05}
+    prediction = {"predicted_e2": 5}  # pe2_ratio=0.05
+    candidate = {"tool": "reflect"}
+
+    # β=BETA_CAP=2.0 で combined/β = 0.05/2.0 = 0.025 < floor → mult=0.05
+    state = {
+        "predictor_confidence": {"reflect": {"e2_conf": 0.7, "ec_conf": 0.7}},
+        "cumulative_information_gain": {
+            "flat_streak": 5, "e2_window_mean": 100.0, "e2_total": 1.0,
+        },
+        "prediction_error_history_e2": [0.01] * 100,
+    }
+    mult = _predicted_outcome_multiplier(prediction, candidate, state, cfg)
+
+    return all([
+        _assert(abs(mult - 0.05) < 1e-6,
+                f"floor 0.05 適用 ({mult})"),
+    ])
+
+
+def test_dynamic_beta_penalty_includes_beta_value():
+    """combined < 0.4 で penalty メッセージに β 値が含まれる (PLAN §5-2 literal)。
+
+    Codex review P2-1 fix: 文字列 'beta=' のみ assertion から、
+    具体 value 'beta=0.5' (基底) と 'beta=1.0' (動的 case) literal 強化。
+    識別力: rounding 誤差 / 値計算ミス / β 計算 skip の誤実装で fail。
+    """
+    print("== Step C: penalty に β 値 literal 含む (基底 + 動的) ==")
+    from core.controller import _predicted_outcome_multiplier
+
+    cfg = {"predicted_e2_floor": 0.05}
+
+    # case A: flat_streak=0 (β=BETA_BASE=0.5)
+    candidate_a = {"tool": "reflect"}
+    state_a = {
+        "predictor_confidence": {"reflect": {"e2_conf": 0.7, "ec_conf": 0.7}},
+    }
+    # combined / β = 0.3 / 0.5 = 0.6、ただし combined=0.3 < 0.4 で penalty 追記
+    _predicted_outcome_multiplier({"predicted_e2": 30}, candidate_a, state_a, cfg)
+    penalties_a = candidate_a.get("penalties", [])
+
+    # case B: flat_streak=2 (β=1.0、test_dynamic_beta_trigger_at_streak_2 同設定)
+    candidate_b = {"tool": "reflect"}
+    state_b = {
+        "predictor_confidence": {"reflect": {"e2_conf": 0.7, "ec_conf": 0.7}},
+        "cumulative_information_gain": {
+            "flat_streak": 2, "e2_window_mean": 50.0, "e2_total": 500.0,
+        },
+        "prediction_error_history_e2": [50.0] * 10,
+    }
+    _predicted_outcome_multiplier({"predicted_e2": 30}, candidate_b, state_b, cfg)
+    penalties_b = candidate_b.get("penalties", [])
+
+    return all([
+        _assert(len(penalties_a) > 0 and len(penalties_b) > 0,
+                "両 case で penalty 追記される"),
+        _assert(any("beta=0.5" in p for p in penalties_a),
+                f"case A: penalty に 'beta=0.5' 含む ({penalties_a})"),
+        _assert(any("beta=1.0" in p for p in penalties_b),
+                f"case B: penalty に 'beta=1.0' 含む ({penalties_b})"),
+    ])
+
+
+def test_predicted_outcome_multiplier_ec_present_with_dynamic_beta():
+    """predicted_ec あり + 不均等 conf + 動的 β の組合せで combined / β 計算
+    が正しく走る end-to-end (Codex review P2-3 fix)。
+
+    識別力: predicted_ec 経路で β を skip / combined 計算ミス / conf 重み
+    無視の誤実装で fail。numerical literal で deterministic 検証。
+    """
+    print("== Step C: EC-present 動的 β 経路 end-to-end ==")
+    from core.predictor import BETA_BASE
+    from core.controller import _predicted_outcome_multiplier
+
+    cfg = {"predicted_e2_floor": 0.05}
+    candidate = {"tool": "reflect"}
+
+    # 不均等 conf: e2_conf=0.9, ec_conf=0.3
+    # pe2=80, pec=0.4 → combined = (0.8*0.9 + 0.4*0.3) / 1.2 = (0.72 + 0.12)/1.2 = 0.7
+    # flat_streak=2, e_h=0.5, i_avg=0.5 → β = 1.0
+    # mult = max(0.05, 0.7 / 1.0) = 0.7
+    state = {
+        "predictor_confidence": {"reflect": {"e2_conf": 0.9, "ec_conf": 0.3}},
+        "cumulative_information_gain": {
+            "flat_streak": 2, "e2_window_mean": 50.0, "e2_total": 500.0,
+        },
+        "prediction_error_history_e2": [50.0] * 10,
+    }
+    prediction = {"predicted_e2": 80, "predicted_ec": 0.4}
+    mult_dynamic = _predicted_outcome_multiplier(prediction, candidate, state, cfg)
+
+    # 比較対照: 同じ state から cig 抜いた case (flat_streak=0 → β=BETA_BASE=0.5)
+    state_base = {
+        "predictor_confidence": {"reflect": {"e2_conf": 0.9, "ec_conf": 0.3}},
+    }
+    candidate_base = {"tool": "reflect"}
+    mult_base = _predicted_outcome_multiplier(prediction, candidate_base, state_base, cfg)
+
+    # 数値: combined ≈ 0.7
+    # base: 0.7 / 0.5 = 1.4
+    # dynamic: 0.7 / 1.0 = 0.7
+    return all([
+        _assert(abs(mult_base - 0.7 / BETA_BASE) < 1e-9,
+                f"base β=0.5 で mult=1.4 ({mult_base})"),
+        _assert(abs(mult_dynamic - 0.7) < 1e-9,
+                f"dynamic β=1.0 で mult=0.7 ({mult_dynamic})"),
+        _assert(mult_dynamic < mult_base,
+                f"動的 β で抑制 ({mult_dynamic} < {mult_base})"),
+    ])
+
+
+# ============================================================
 # main runner
 # ============================================================
 
@@ -487,6 +762,14 @@ def main():
         test_attractor_redundancy_state_persist_json_safe,
         test_attractor_redundancy_malformed_vecs_fallback,
         test_attractor_redundancy_empty_and_fallback,
+        test_dynamic_beta_base_below_trigger,
+        test_dynamic_beta_trigger_at_streak_2,
+        test_dynamic_beta_cap_runaway,
+        test_dynamic_beta_lower_bound_clamped,
+        test_predicted_outcome_multiplier_with_beta,
+        test_predicted_outcome_multiplier_floor_with_beta,
+        test_dynamic_beta_penalty_includes_beta_value,
+        test_predicted_outcome_multiplier_ec_present_with_dynamic_beta,
     ]
     print(f"Running {len(tests)} test groups (Step A)...\n")
     passed = 0

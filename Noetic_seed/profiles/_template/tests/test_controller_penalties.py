@@ -28,6 +28,8 @@ from core.controller import (
 from core.config import WORLD_MODEL_CFG
 from core.world_model import init_world_model, ensure_channel
 from core.channel_registry import channel_from_device_input
+# 段階14 Step C: mult = combined / BETA_BASE で multiplier 算出。
+from core.predictor import BETA_BASE
 
 
 def _wm_with_test_channels():
@@ -147,9 +149,12 @@ def test_predicted_outcome_low_e2_penalizes():
     pred = {"category": "error", "confidence": 0.6, "detail": "light",
             "predicted_e2": 20}
     # 段階10 柱 C: signature に state 追加、penalty ラベル "low_outcome" に変更
+    # 段階14 Step C: mult = combined / BETA_BASE = 0.2 / 0.5 = 0.4
     mult = _predicted_outcome_multiplier(pred, cand, {}, WORLD_MODEL_CFG)
+    expected = 0.2 / BETA_BASE
     return all([
-        _assert(abs(mult - 0.2) < 1e-9, f"multiplier=0.2 (actual: {mult})"),
+        _assert(abs(mult - expected) < 1e-9,
+                f"combined=0.2, β=BETA_BASE → {expected} (actual: {mult})"),
         _assert(any("low_outcome" in p for p in cand.get("penalties", [])),
                 "low_outcome 記録 (段階10 柱 C で low_predicted_e2 から改名)"),
     ])
@@ -159,9 +164,12 @@ def test_predicted_outcome_mid_e2_moderate_penalty():
     print("== predicted_outcome (段階9): 中 predicted_e2=30 → 0.3 + penalty ==")
     cand = {"tool": "x_post"}
     pred = {"category": "no_response", "confidence": 0.5, "predicted_e2": 30}
+    # 段階14 Step C: mult = 0.3 / BETA_BASE = 0.6
     mult = _predicted_outcome_multiplier(pred, cand, {}, WORLD_MODEL_CFG)
+    expected = 0.3 / BETA_BASE
     return all([
-        _assert(abs(mult - 0.3) < 1e-9, f"multiplier=0.3 (actual: {mult})"),
+        _assert(abs(mult - expected) < 1e-9,
+                f"combined=0.3, β=BETA_BASE → {expected} (actual: {mult})"),
         _assert(any("low_outcome" in p for p in cand.get("penalties", [])),
                 "low_outcome 記録 (< 0.4)"),
     ])
@@ -178,10 +186,14 @@ def test_predicted_outcome_continuous_scaling():
         {"category": "positive_reply", "predicted_e2": 70}, cand2, {}, WORLD_MODEL_CFG)
     m3 = _predicted_outcome_multiplier(
         {"category": "positive_reply", "predicted_e2": 100}, cand3, {}, WORLD_MODEL_CFG)
+    # 段階14 Step C: mult = combined / BETA_BASE
+    e1 = 0.5 / BETA_BASE
+    e2 = 0.7 / BETA_BASE
+    e3 = 1.0 / BETA_BASE
     return all([
-        _assert(abs(m1 - 0.5) < 1e-9, f"pe2=50 → 0.5 (actual: {m1})"),
-        _assert(abs(m2 - 0.7) < 1e-9, f"pe2=70 → 0.7 (actual: {m2})"),
-        _assert(abs(m3 - 1.0) < 1e-9, f"pe2=100 → 1.0 (actual: {m3})"),
+        _assert(abs(m1 - e1) < 1e-9, f"combined=0.5, β=BETA_BASE → {e1} (actual: {m1})"),
+        _assert(abs(m2 - e2) < 1e-9, f"combined=0.7, β=BETA_BASE → {e2} (actual: {m2})"),
+        _assert(abs(m3 - e3) < 1e-9, f"combined=1.0, β=BETA_BASE → {e3} (actual: {m3})"),
         _assert("penalties" not in cand2 or not cand2["penalties"],
                 "pe2=70 (>=0.4) で penalty 記録なし"),
     ])
@@ -203,9 +215,11 @@ def test_predicted_outcome_missing_pe2_defaults_to_50():
     print("== predicted_outcome (段階9): predicted_e2 欠損 → default 50 = 0.5 ==")
     cand = {"tool": "x_post"}
     pred = {"category": "error"}  # 段階5 互換、predicted_e2 なし
+    # 段階14 Step C: mult = 0.5 / BETA_BASE = 1.0
     mult = _predicted_outcome_multiplier(pred, cand, {}, WORLD_MODEL_CFG)
-    return _assert(abs(mult - 0.5) < 1e-9,
-                   f"欠損時 default 50 → 0.5 (actual: {mult})")
+    expected = 0.5 / BETA_BASE
+    return _assert(abs(mult - expected) < 1e-9,
+                   f"欠損時 default 50, combined=0.5, β=BETA_BASE → {expected} (actual: {mult})")
 
 
 # ============================================================

@@ -688,6 +688,12 @@ def main():
                 print(f"    ics: {c['tool']}({c['reason'][:30]}) = {ics_v}")
         selected = controller_select(candidates, ctrl, state)
         _sel_line = f"  選択: {selected['tool']} - {selected['reason'][:60]}"
+        # 段階14 Step C: penalty (β 値含む) を smoke raw_log で観察可能化
+        # (memo line 142-144 「β を第一級観測量として扱う」literal 整合、
+        # Codex review P2-2 fix)
+        _sel_penalties = selected.get("penalties") or []
+        if _sel_penalties:
+            _sel_line += f" [{', '.join(_sel_penalties)}]"
         print(_sel_line)
         broadcast_log(_sel_line)
 

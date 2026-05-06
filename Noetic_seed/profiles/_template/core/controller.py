@@ -369,10 +369,16 @@ def _predicted_outcome_multiplier(prediction: dict, candidate: dict,
         # predicted_ec 欠如 (Light fallback や古い LLM 応答) は段階9 挙動維持
         combined = pe2_ratio
 
+    # 段階14 Step C: β を pragmatic value に逆作用 (β 高 = pragmatic 抑制)、
+    # Curiosity is Knowledge 2026 の lower bound 不等式直訳 (PLAN §5-2 literal)。
+    from core.predictor import _compute_dynamic_beta
+    beta = _compute_dynamic_beta(state, candidate)
     floor = float(cfg.get("predicted_e2_floor", 0.05))
-    mult = max(floor, combined)
+    mult = max(floor, combined / beta)
     if combined < 0.4:
-        candidate.setdefault("penalties", []).append(f"low_outcome={round(combined, 3)}")
+        candidate.setdefault("penalties", []).append(
+            f"low_outcome={round(combined, 3)} beta={round(beta, 2)}"
+        )
     return mult
 
 

@@ -158,6 +158,58 @@ def update_cumulative_information_gain(
 
 
 # ============================================================
+# 段階14 Step C: Dynamic β Lower Bound (EFE-Internal)
+# ============================================================
+#
+# STAGE14 PLAN §5 の実装。Curiosity is Knowledge (2026) の不等式
+# β >= E[h(y)] / I(s; (x,y)) を直訳、flat_signal=True (情報利得 flat) なら
+# β を上げて pragmatic value 抑制 = epistemic value 相対的増加 = 候補空間
+# expand。β は cap で runaway 抑制。
+#
+# 入力: Step A の state["cumulative_information_gain"]
+# 出力: β (PLAN §10-4 tool 別拡張時 candidate 引数活用)、
+# controller._predicted_outcome_multiplier で combined / beta に逆作用。
+
+BETA_BASE = 0.5            # 既存挙動相当 (PLAN §5-2 literal)
+BETA_CAP = 2.0             # runaway 抑制 cap (PLAN §5-2 literal)
+BETA_TRIGGER_STREAK = 2    # flat_streak >= で動的化発火 (PLAN §5-2 literal)
+
+
+def _compute_dynamic_beta(state: dict, candidate: dict) -> float:
+    """β = max(β_base, E[h]/I) の lower bound 直訳 (PLAN §5-2 literal)。
+
+    Curiosity is Knowledge (2026) の不等式 β >= E[h(y)] / I(s; (x,y)) を
+    flat_signal/streak ベースで動的算出。flat_streak < BETA_TRIGGER_STREAK
+    で β = BETA_BASE (現挙動維持、対症療法回避)、>= で動的増、cap = BETA_CAP。
+
+    Args:
+        state: state dict
+        candidate: 当該 candidate (PLAN §10-4 tool 別 β 拡張用、現実装は
+            state.cumulative_information_gain のみ参照)
+
+    Returns:
+        β float (BETA_BASE <= β <= BETA_CAP)
+    """
+    cig = state.get("cumulative_information_gain", {})
+    flat_streak = cig.get("flat_streak", 0)
+
+    if flat_streak < BETA_TRIGGER_STREAK:
+        return BETA_BASE
+
+    # lower bound β >= E[h] / I を直訳 (PLAN §5-2 literal)
+    # E[h] ~= window_mean (予測の不確実性、e2 軸 0-100 scale を 0-1 に normalize)
+    # I ~= e2_total / cycle 数 (累積情報利得率、同 normalize)
+    e_h = max(0.01, cig.get("e2_window_mean", 50.0) / 100.0)
+    history = state.get("prediction_error_history_e2", [])
+    i_avg = max(0.01, cig.get("e2_total", 1.0) / max(1, len(history)))
+    i_avg_norm = i_avg / 100.0
+
+    beta_required = e_h / max(0.01, i_avg_norm)
+    beta_dynamic = min(BETA_CAP, max(BETA_BASE, beta_required))
+    return beta_dynamic
+
+
+# ============================================================
 # カテゴリ定数 (WORLD_MODEL.md §6 段階5)
 # ============================================================
 

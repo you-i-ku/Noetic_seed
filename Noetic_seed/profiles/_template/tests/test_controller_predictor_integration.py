@@ -21,6 +21,8 @@ from core.controller import (
 )
 from core.config import WORLD_MODEL_CFG
 from core.world_model import init_world_model
+# 段階14 Step C: mult = combined / BETA_BASE で multiplier 算出。
+from core.predictor import BETA_BASE
 
 
 def _assert(cond, label):
@@ -73,9 +75,14 @@ def test_low_predicted_e2_suppresses_weight():
         {"predicted_e2": 10}, cand_low, {}, WORLD_MODEL_CFG)
     m_high = _predicted_outcome_multiplier(
         {"predicted_e2": 90}, cand_high, {}, WORLD_MODEL_CFG)
+    # 段階14 Step C: mult = combined / BETA_BASE
+    e_low = 0.1 / BETA_BASE
+    e_high = 0.9 / BETA_BASE
     return all([
-        _assert(abs(m_low - 0.1) < 1e-9, f"pe2=10 → 0.1 (actual: {m_low})"),
-        _assert(abs(m_high - 0.9) < 1e-9, f"pe2=90 → 0.9 (actual: {m_high})"),
+        _assert(abs(m_low - e_low) < 1e-9,
+                f"combined=0.1, β=BETA_BASE → {e_low} (actual: {m_low})"),
+        _assert(abs(m_high - e_high) < 1e-9,
+                f"combined=0.9, β=BETA_BASE → {e_high} (actual: {m_high})"),
         _assert(m_high / m_low > 8.0,
                 f"pe2 高低の比 9 倍 (actual ratio: {m_high/m_low:.1f}x)"),
         _assert(any("low_outcome" in p for p in cand_low.get("penalties", [])),
