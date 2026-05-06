@@ -1025,6 +1025,140 @@ def test_is_recent_memory_filter():
 
 
 # ============================================================
+# smoke 検証 (PLAN §7、ゆう ack 済 (Y) 案: 中間 smoke 代替 + 最終 smoke 観察)
+# ============================================================
+# K1-K8 のうち deterministic に test 化可能な K2 / K6 / 条件 2 (energy 暴走検知)
+# を fixture 化、K4 / K5 は既存 test で carbured、K1 / K3 / K8 は smoke 観察項目
+# (raw_log 解析、PLAN §7-1「20 cycle 自然観察」literal、ゆう実走 smoke で verify)。
+
+def test_k2_subject_diversity_via_basin_visit_history():
+    """PLAN §7-2 K2: subject diversity ≥ 5 cluster / 20 cycle、basin_visit_history
+    の uniq count で計算可能 (PLAN §7-2 literal)。
+
+    識別力: history append 漏れ / uniq 計算ミス / 切替時 reset 漏れで fail。
+    """
+    print("== smoke 検証 K2: subject diversity (basin_visit_history uniq) ==")
+    from core.world_model import update_basin_state
+
+    state = {}
+    visited = ["c1", "c2", "c3", "c4", "c5"]
+    # 5 cluster を順次 visit、切替で旧 basin が history append される
+    for cluster_id in visited:
+        clusters = [
+            {"cluster_id": cluster_id, "memory_ids": ["m"], "label": "L"}
+        ]
+        update_basin_state(state, current_subject_id="m", clusters_snapshot=clusters)
+
+    bs = state["basin_state"]
+    history_uniq = len(set(bs["basin_visit_history"]))
+    # current_basin_id は最後 (c5)、history は c1-c4 (切替時に旧 basin が入る)
+    total_visited_uniq = history_uniq + (1 if bs["current_basin_id"] else 0)
+
+    return all([
+        _assert(total_visited_uniq >= 5,
+                f"K2: subject diversity >= 5 ({total_visited_uniq})"),
+        _assert(bs["current_basin_id"] == "c5",
+                f"current は最後の visit (c5) ({bs['current_basin_id']})"),
+        _assert(set(bs["basin_visit_history"]) == {"c1", "c2", "c3", "c4"},
+                f"history に c1-c4 (切替時記録、{bs['basin_visit_history']})"),
+    ])
+
+
+def test_k6_phase_transition_pending_fires_at_least_once():
+    """PLAN §7-2 K6: phase_transition_pending=True が少なくとも 1 回発火。
+
+    Step D test (20) と機能重複だが、PLAN §7 K1-K8 の literal mapping を test
+    docstring で明示し、K6 として参照可能化。
+    """
+    print("== smoke 検証 K6: phase_transition_pending 発火 ==")
+    from core.world_model import update_basin_state, BASIN_TRANSITION_THRESHOLD
+
+    state = {}
+    clusters = [{"cluster_id": "x", "memory_ids": ["m"], "label": "L"}]
+    fired_at_cycle = -1
+    for i in range(BASIN_TRANSITION_THRESHOLD + 2):
+        update_basin_state(state, current_subject_id="m", clusters_snapshot=clusters)
+        if state["basin_state"]["phase_transition_pending"]:
+            fired_at_cycle = i + 1
+            break
+
+    return _assert(
+        fired_at_cycle >= 1,
+        f"K6: phase_transition_pending fires (at cycle {fired_at_cycle})",
+    )
+
+
+def test_energy_runaway_detection_via_beta_cap():
+    """PLAN §7-3 rollback 条件: β 動的化で energy 暴走 (cycle あたり -10 以下)
+    を防ぐ β cap の identifying。条件 2 (ゆう ack 済 (Y) 案 literal):
+    smoke 中間検証を test で代替、boundary deterministic 検証。
+
+    識別力: β cap 漏れ / mult 上限なし / floor 計算ミスで mult 暴走、
+    energy delta -10/cycle 突破リスク。本 fixture で抑制を確認。
+    """
+    print("== smoke 検証 PLAN §7-3 rollback: β cap で energy 暴走抑制 ==")
+    from core.predictor import (
+        _compute_dynamic_beta,
+        BETA_TRANSITION_CAP,
+        BETA_CAP,
+    )
+    from core.controller import _predicted_outcome_multiplier
+
+    cfg = {"predicted_e2_floor": 0.05}
+
+    # 極端 state: runaway + pending=True (β は最大)
+    state_extreme = {
+        "predictor_confidence": {"reflect": {"e2_conf": 0.7, "ec_conf": 0.7}},
+        "cumulative_information_gain": {
+            "flat_streak": 5, "e2_window_mean": 100.0, "e2_total": 1.0,
+        },
+        "prediction_error_history_e2": [0.01] * 100,
+        "basin_state": {"phase_transition_pending": True},
+    }
+
+    beta_extreme = _compute_dynamic_beta(state_extreme, {"tool": "reflect"})
+
+    # max combined (= 1.0) を β=3.0 で割って mult、最大 mult が想定範囲内
+    mult_max = _predicted_outcome_multiplier(
+        {"predicted_e2": 100, "predicted_ec": 1.0},
+        {"tool": "reflect"}, state_extreme, cfg,
+    )
+    # min combined (= 0.0) で floor 適用、mult 最小値 = floor
+    mult_min = _predicted_outcome_multiplier(
+        {"predicted_e2": 0, "predicted_ec": 0.0},
+        {"tool": "reflect"}, state_extreme, cfg,
+    )
+
+    # 通常 state (pending=False) と比較、β boost あり/なし両端
+    state_normal = {
+        "predictor_confidence": {"reflect": {"e2_conf": 0.7, "ec_conf": 0.7}},
+    }
+    beta_normal = _compute_dynamic_beta(state_normal, {"tool": "reflect"})
+    mult_normal = _predicted_outcome_multiplier(
+        {"predicted_e2": 100, "predicted_ec": 1.0},
+        {"tool": "reflect"}, state_normal, cfg,
+    )
+
+    return all([
+        _assert(beta_extreme == BETA_TRANSITION_CAP,
+                f"extreme + pending で β=CAP=3.0 ({beta_extreme})"),
+        _assert(mult_max <= 1.0 / BETA_TRANSITION_CAP + 1e-9,
+                f"extreme で mult <= 1/CAP=0.333 ({mult_max})"),
+        _assert(abs(mult_min - cfg["predicted_e2_floor"]) < 1e-9,
+                f"extreme で min combined → floor=0.05 ({mult_min})"),
+        # 通常 state では β=BETA_BASE=0.5 で max mult = 1.0/0.5 = 2.0
+        _assert(abs(mult_normal - 2.0) < 1e-9,
+                f"normal: max combined / BETA_BASE = 2.0 ({mult_normal})"),
+        _assert(mult_normal > mult_max,
+                f"β cap で extreme < normal で抑制 ({mult_max} < {mult_normal})"),
+        # PLAN §7-3 「-10/cycle 以下で rollback」: mult 範囲 [0.05, 2.0]
+        # (normal) / [0.05, 0.333] (extreme + pending) で安全側に収束
+        _assert(0.0 < mult_max < 1.0 and 0.0 < mult_normal <= 2.0,
+                "mult 範囲が β cap で確定的に有限、energy 暴走リスク抑制"),
+    ])
+
+
+# ============================================================
 # main runner
 # ============================================================
 
@@ -1055,6 +1189,10 @@ def main():
         test_basin_pending_boosts_beta_in_compute_dynamic_beta,
         test_basin_unknown_subject_returns_empty_id,
         test_is_recent_memory_filter,
+        # smoke 検証 (PLAN §7 K1-K8、ゆう ack 済 (Y) 案で deterministic 化)
+        test_k2_subject_diversity_via_basin_visit_history,
+        test_k6_phase_transition_pending_fires_at_least_once,
+        test_energy_runaway_detection_via_beta_cap,
     ]
     print(f"Running {len(tests)} test groups (Step A)...\n")
     passed = 0
