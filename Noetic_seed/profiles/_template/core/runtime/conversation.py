@@ -47,6 +47,25 @@ class TurnSummary:
 ApprovalCallback = Callable[[str, dict, list], bool]
 
 
+def _format_pre_hook_detail(messages: list) -> str:
+    """pre.denied 時に rejected output へ append する detail 文字列を組立て。
+
+    各 message は str() でラップしてから改行を空白置換 (raw_log 行ずれ防止)、
+    複数 message は "; " 区切りで結合。messages が空 / None なら空文字を返す。
+    str() ラップで None / 数値 / dict 等の非 str 要素にも安全。
+
+    Args:
+        messages: pre.messages list
+
+    Returns:
+        ": <m1>; <m2>; ..." 形式 (先頭 ": " 含む)、空時は ""
+    """
+    if not messages:
+        return ""
+    parts = [str(m).replace("\n", " ") for m in messages]
+    return ": " + "; ".join(parts)
+
+
 class ConversationRuntime:
     """エージェントループ本体。"""
 
@@ -305,7 +324,8 @@ class ConversationRuntime:
         current_input = pre.updated_input or tool_input
 
         if pre.denied:
-            self._finalize(rec, "[REJECTED] denied by pre hook",
+            detail = _format_pre_hook_detail(pre.messages)
+            self._finalize(rec, f"[REJECTED] denied by pre hook{detail}",
                            is_error=True, push_session=push_session)
             return rec
         if pre.failed:

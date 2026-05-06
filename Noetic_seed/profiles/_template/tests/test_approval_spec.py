@@ -21,6 +21,7 @@ from core.runtime.hooks import (
     HookRunResult,
     make_pre_tool_use_approval_check,
 )
+from core.runtime.conversation import _format_pre_hook_detail
 
 
 def _assert(cond, label):
@@ -278,6 +279,74 @@ def test_hook_runner_deny_stops_chain():
 
 
 # ============================================================
+# _format_pre_hook_detail (段階14.5 hotfix、conversation.py)
+# ------------------------------------------------------------
+# pre.denied 時の rejected output に append する detail 文字列の組立て
+# ロジックを単独関数化、§5 識別力ある unit test で検証する。
+# ============================================================
+
+
+def test_format_pre_hook_detail_empty():
+    print("== format_pre_hook_detail: 空 messages → '' ==")
+    return all([
+        _assert(_format_pre_hook_detail([]) == "", "[] → ''"),
+        _assert(_format_pre_hook_detail(None) == "", "None → ''"),
+    ])
+
+
+def test_format_pre_hook_detail_single():
+    print("== format_pre_hook_detail: 単一 message ==")
+    return all([
+        _assert(
+            _format_pre_hook_detail(["hello"]) == ": hello",
+            "['hello'] → ': hello'",
+        ),
+    ])
+
+
+def test_format_pre_hook_detail_multi():
+    print("== format_pre_hook_detail: 複数 messages '; ' 区切り ==")
+    return all([
+        _assert(
+            _format_pre_hook_detail(["a", "b", "c"]) == ": a; b; c",
+            "['a','b','c'] → ': a; b; c'",
+        ),
+    ])
+
+
+def test_format_pre_hook_detail_newline_to_space():
+    print("== format_pre_hook_detail: 改行 → 空白置換 (raw_log 行ずれ防止) ==")
+    return all([
+        _assert(
+            _format_pre_hook_detail(["line1\nline2"]) == ": line1 line2",
+            "改行 → 空白",
+        ),
+        _assert(
+            _format_pre_hook_detail(["a\nb", "c\nd"]) == ": a b; c d",
+            "複数 message + 各内改行",
+        ),
+    ])
+
+
+def test_format_pre_hook_detail_non_string_safe():
+    print("== format_pre_hook_detail: 非 str 要素も str() で safe ==")
+    return all([
+        _assert(
+            _format_pre_hook_detail([None]) == ": None",
+            "None → 'None' で wrap (TypeError 回避)",
+        ),
+        _assert(
+            _format_pre_hook_detail([42]) == ": 42",
+            "int → '42' で wrap",
+        ),
+        _assert(
+            _format_pre_hook_detail([{"k": "v"}]) == ": {'k': 'v'}",
+            "dict → str() で wrap",
+        ),
+    ])
+
+
+# ============================================================
 # 実行
 # ============================================================
 
@@ -300,6 +369,11 @@ if __name__ == "__main__":
         ("HookRunner 統合", test_hook_runner_integration),
         ("HookRunner auto_fill 伝播", test_hook_runner_autofill_propagates),
         ("HookRunner deny で chain 停止", test_hook_runner_deny_stops_chain),
+        ("format_detail: 空", test_format_pre_hook_detail_empty),
+        ("format_detail: 単一", test_format_pre_hook_detail_single),
+        ("format_detail: 複数", test_format_pre_hook_detail_multi),
+        ("format_detail: 改行置換", test_format_pre_hook_detail_newline_to_space),
+        ("format_detail: 非 str safe", test_format_pre_hook_detail_non_string_safe),
     ]
     results = []
     for _label, fn in groups:

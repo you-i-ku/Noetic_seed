@@ -105,6 +105,11 @@ def test_rejected_variants_all_get_warning():
         "[REJECTED] approval denied",
         "[REJECTED] denied by pre hook",
         "[REJECTED] permission denied",
+        # 段階14.5 hotfix: conversation.py で pre_hook_messages を append
+        # した detail 付き形式でも warn prefix が崩れないこと
+        "[REJECTED] denied by pre hook: read-only mode disallows compound commands",
+        "[REJECTED] denied by pre hook: [approval] tool_input 欠損: tool_intent, message",
+        "[REJECTED] denied by pre hook: msg1; msg2",
     ]
     all_ok = True
     for v in variants:
