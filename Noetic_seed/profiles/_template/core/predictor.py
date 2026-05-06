@@ -96,6 +96,66 @@ def update_predictor_confidence(state: dict, tool_name: str,
         entry["ec_conf"] = fake_fact["confidence"]
         _append_history(state, prediction_error_ec, "ec")
 
+    # 段階14 Step A: cumulative information gain を同時 update (PLAN §3-2)
+    update_cumulative_information_gain(state, prediction_error, prediction_error_ec)
+
+
+# ============================================================
+# 段階14 Step A: Cumulative Information Gain Observable (∑I_t)
+# ============================================================
+#
+# STAGE14 PLAN §3 の実装。predicted_e2 / predicted_ec の prediction
+# error history から mutual information の累積近似を state field 化、
+# reflect 連続中の「情報利得 flat」を第一級の観測量として表現する。
+#
+# flat_signal: 直近 N=CIG_WINDOW cycle の |error| 平均が閾値
+# (e2 軸 0-100 scale 上の CIG_THRESHOLD_RAW * 100 = 5.0、PLAN §10-7
+# threshold=0.05) 未満なら True。
+# flat_streak: flat_signal=True が連続した cycle 数。basin transition
+# (Step D) の trigger 入力。
+
+CIG_WINDOW = 10
+CIG_THRESHOLD_RAW = 0.05  # PLAN §10-7、e2 軸 0-100 scale で × 100 適用
+
+
+def update_cumulative_information_gain(
+    state: dict,
+    prediction_error: float,
+    prediction_error_ec: Optional[float] = None,
+) -> None:
+    """予測誤差から ∑I_t / window mean / flat_signal / flat_streak を更新。
+
+    state["cumulative_information_gain"] dict を破壊的に更新する。
+    呼出し点は update_predictor_confidence() 末尾 (history append 後)。
+    Step C (β 動的化) / Step D (basin transition) の入力源。
+
+    Args:
+        state: state dict
+        prediction_error: E2 軸の予測誤差 (abs 値、0-100 scale)
+        prediction_error_ec: EC 軸の予測誤差 (abs 値、0-1 scale)。None なら
+            ec_total は不変、ec_window_mean は history があれば再計算
+    """
+    cig = state.setdefault("cumulative_information_gain", {
+        "e2_total": 0.0, "ec_total": 0.0,
+        "e2_window_mean": 0.0, "ec_window_mean": 0.0,
+        "flat_signal": False, "flat_streak": 0,
+    })
+    cig["e2_total"] += abs(float(prediction_error))
+    if prediction_error_ec is not None:
+        cig["ec_total"] += abs(float(prediction_error_ec))
+
+    # window mean は history (FIFO 100 件) の直近 N=CIG_WINDOW から計算
+    h_e2 = state.get("prediction_error_history_e2", [])[-CIG_WINDOW:]
+    cig["e2_window_mean"] = sum(h_e2) / len(h_e2) if h_e2 else 0.0
+    h_ec = state.get("prediction_error_history_ec", [])[-CIG_WINDOW:]
+    cig["ec_window_mean"] = sum(h_ec) / len(h_ec) if h_ec else 0.0
+
+    # flat 判定: e2_window_mean が閾値 (0-100 scale で 5.0) 未満なら flat
+    threshold = CIG_THRESHOLD_RAW * 100
+    flat = cig["e2_window_mean"] < threshold
+    cig["flat_signal"] = flat
+    cig["flat_streak"] = cig["flat_streak"] + 1 if flat else 0
+
 
 # ============================================================
 # カテゴリ定数 (WORLD_MODEL.md §6 段階5)
