@@ -85,6 +85,115 @@ def controller(state: dict, tools_dict: dict, level_tools: dict) -> dict:
     }
 
 
+# ============================================================
+# 段階14 Step B: Attractor Cosine Redundancy Detection
+# ============================================================
+#
+# STAGE14 PLAN §4 の実装。LLM① 候補中で「同 tool / 異 reason」を別経路
+# attack と扱わず、attractor 空間の縮退として検出する。Spisak & Friston 2025
+# の Self-orthogonalizing Attractor Networks 直交性 FEP 帰結を候補生成段階に
+# 適用、cluster 縮退で weight 圧縮 = 罰でなく FEP 自然帰結。
+#
+# PLAN §4 literal の `_embedding` / `_cosine` は概念呼称、実装は controller.py
+# 既存 pattern (core.embedding._embed_sync + cosine_similarity) を流用。
+
+REDUNDANCY_THRESHOLD = 0.85  # PLAN §4-2 / §10-7 確定値 (entity_resolver SAME_THRESHOLD 整合)
+
+
+def _detect_attractor_redundancy(
+    candidates: list,
+    threshold: float = REDUNDANCY_THRESHOLD,
+) -> dict:
+    """候補の reason embedding を cosine 比較し、redundancy cluster を返す。
+
+    PLAN §4-2 literal: 同 tool / 異 reason を別経路と扱わず attractor 空間の
+    縮退として検出。union-find で cluster 数算出、diversity_score = cluster
+    数 / N で controller_select の weight 圧縮入力とする。
+
+    Args:
+        candidates: LLM① の候補 list、各 dict に "tool" / "reason" key 想定
+        threshold: cosine 同一視の閾値 (default 0.85)
+
+    Returns:
+        {
+            "redundancy_pairs": [(i, j, cosine), ...],  # 閾値超ペア
+            "cluster_count": int,                        # 独立 cluster 数 (ideal=N)
+            "redundant_tool_set": set[str],              # 縮退 tool 名
+            "diversity_score": float,                    # cluster_count / N (0.2-1.0)
+        }
+
+    Embedding 未起動 / 失敗時は redundancy なし扱い (cluster_count=N,
+    diversity=1.0) で fallback、controller_select の補正は発火しない。
+    """
+    n = len(candidates)
+    if n == 0:
+        return {
+            "redundancy_pairs": [],
+            "cluster_count": 0,
+            "redundant_tool_set": set(),
+            "diversity_score": 0.0,
+        }
+
+    # Embedding 未起動 → redundancy 検出 skip (構造 fallback、PLAN §1 LLM as
+    # brain 整合)
+    if not is_vector_ready():
+        return {
+            "redundancy_pairs": [],
+            "cluster_count": n,
+            "redundant_tool_set": set(),
+            "diversity_score": 1.0,
+        }
+
+    reasons = [str(c.get("reason", "")) for c in candidates]
+    vecs = _embed_sync(reasons)
+    # Codex review P2-b fix: malformed (length 不一致) vector list でも fallback
+    if not vecs or len(vecs) != n:
+        return {
+            "redundancy_pairs": [],
+            "cluster_count": n,
+            "redundant_tool_set": set(),
+            "diversity_score": 1.0,
+        }
+
+    # 閾値超 cosine pair 抽出
+    pairs = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            cos = cosine_similarity(vecs[i], vecs[j])
+            if cos > threshold:
+                pairs.append((i, j, cos))
+
+    # union-find ライト (PLAN §4-2 literal、5 候補で再帰深度安全)
+    parent = list(range(n))
+
+    def find(x):
+        return x if parent[x] == x else find(parent[x])
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    for i, j, _ in pairs:
+        union(i, j)
+    cluster_count = len(set(find(x) for x in range(n)))
+
+    # 縮退 tool 集合: 同 tool 名の pair が縮退してる場合を記録
+    redundant_tools = set()
+    for i, j, _ in pairs:
+        if candidates[i].get("tool") == candidates[j].get("tool"):
+            tool_name = candidates[i].get("tool")
+            if tool_name:
+                redundant_tools.add(tool_name)
+
+    return {
+        "redundancy_pairs": pairs,
+        "cluster_count": cluster_count,
+        "redundant_tool_set": redundant_tools,
+        "diversity_score": cluster_count / max(1, n),
+    }
+
+
 def _intent_conditioned_scores(candidates: list, state: dict) -> list:
     """候補ごとに、過去の類似intent×同toolのE2加重平均を返す。"""
     # 段階13 Phase 0.1.D: intent (subj) + tool (raw) + e2 (subj) を同時参照のため merge
@@ -276,6 +385,19 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
 
     intent_scores = _intent_conditioned_scores(candidates, state)
 
+    # 段階14 Step B: candidate の reason embedding を cosine 比較し、attractor
+    # 空間の縮退を検出 (PLAN §4-2 literal)。state field 化で第一級観測量、
+    # Step C / D の入力にも流用。
+    # Codex review BLOCKER fix: state 保存時は JSON-safe 形 (set → sorted list、
+    # tuple pair → list of list)。ローカル redundancy は set 維持で in 判定高速。
+    redundancy = _detect_attractor_redundancy(candidates)
+    state["last_redundancy"] = {
+        "redundancy_pairs": [list(p) for p in redundancy["redundancy_pairs"]],
+        "cluster_count": redundancy["cluster_count"],
+        "redundant_tool_set": sorted(redundancy["redundant_tool_set"]),
+        "diversity_score": redundancy["diversity_score"],
+    }
+
     sharpness = (1 - energy) * (1 - entropy)
 
     weights = []
@@ -302,6 +424,11 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         # 段階10 柱 C: predicted_ec も同様 (main.py で prediction_error_ec 計算に使用)
         c["_predicted_ec"] = prediction.get("predicted_ec") if isinstance(prediction, dict) else None
         w *= _predicted_outcome_multiplier(prediction, c, state, WORLD_MODEL_CFG)
+        # 段階14 Step B: redundant tool は weight 圧縮 (PLAN §4-2 literal)。
+        # cluster 縮退の自然帰結として圧縮、罰ではない。圧縮率は
+        # max(0.3, diversity_score) で 30%-100% の範囲。β 連動は Step C で。
+        if c["tool"] in redundancy["redundant_tool_set"]:
+            w *= max(0.3, redundancy["diversity_score"])
         if novelty < 0.5:
             try:
                 from core.config import RESOLUTION_LOG

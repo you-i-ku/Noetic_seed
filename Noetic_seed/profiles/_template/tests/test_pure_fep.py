@@ -177,6 +177,301 @@ def test_cig_end_to_end_via_update_predictor_confidence():
 
 
 # ============================================================
+# Step B — Attractor Cosine Redundancy Detection
+# ============================================================
+# PLAN §4-4 検証要件 + CLAUDE.md §5 識別力 4 fixture (空 / 全一致 / 部分一致 /
+# 完全不一致)。embedding は controller モジュール内の _embed_sync を mock、
+# cosine_similarity は real 流用 (deterministic 直交ベクトル)。
+
+def _patch_embed_sync(controller_mod, mock_fn):
+    """controller モジュール内の _embed_sync / is_vector_ready を patch。"""
+    original_ready = controller_mod.is_vector_ready
+    original_embed = controller_mod._embed_sync
+    controller_mod.is_vector_ready = lambda: True
+    controller_mod._embed_sync = mock_fn
+    return original_ready, original_embed
+
+
+def _restore_embed_sync(controller_mod, originals):
+    controller_mod.is_vector_ready = originals[0]
+    controller_mod._embed_sync = originals[1]
+
+
+def test_attractor_redundancy_all_orthogonal():
+    """全 5 候補が直交 (異 tool / 異 reason) → cluster_count=5, diversity=1.0。
+
+    識別力: cluster 計算が常に 1 を返す誤実装、または cosine 閾値判定逆実装で
+    fail (cluster_count=5 と 1 で区別)。
+    """
+    print("== Step B: 全 5 候補直交 → cluster_count=5 ==")
+    import core.controller as cm
+
+    def mock_embed(texts):
+        n = len(texts)
+        # 各 text に互いに直交する単位ベクトル (cosine=0)
+        return [[(1.0 if j == i else 0.0) for j in range(max(n, 5))]
+                for i in range(n)]
+
+    candidates = [
+        {"tool": "reflect", "reason": "A"},
+        {"tool": "memory_store", "reason": "B"},
+        {"tool": "read_file", "reason": "C"},
+        {"tool": "update_self", "reason": "D"},
+        {"tool": "bash", "reason": "E"},
+    ]
+
+    orig = _patch_embed_sync(cm, mock_embed)
+    try:
+        result = cm._detect_attractor_redundancy(candidates)
+    finally:
+        _restore_embed_sync(cm, orig)
+
+    return all([
+        _assert(result["cluster_count"] == 5,
+                f"cluster_count=5 ({result['cluster_count']})"),
+        _assert(abs(result["diversity_score"] - 1.0) < 1e-9,
+                f"diversity_score=1.0 ({result['diversity_score']})"),
+        _assert(len(result["redundancy_pairs"]) == 0,
+                f"redundancy_pairs 空 ({len(result['redundancy_pairs'])})"),
+        _assert(len(result["redundant_tool_set"]) == 0,
+                "redundant_tool_set 空"),
+    ])
+
+
+def test_attractor_redundancy_all_same():
+    """全 5 候補が同 tool / 同 embedding → cluster_count=1, diversity=0.2,
+    redundant_tool_set={reflect}。
+
+    識別力: redundant_tool_set で同 tool 判定漏れの誤実装、または
+    cluster_count を pair 数で計算する誤実装 (10 vs 1) で fail。
+    """
+    print("== Step B: 全 5 候補同 tool 同 embedding → cluster_count=1 ==")
+    import core.controller as cm
+
+    def mock_embed(texts):
+        return [[1.0, 0.0, 0.0, 0.0, 0.0]] * len(texts)
+
+    candidates = [
+        {"tool": "reflect", "reason": f"reason_{i}"} for i in range(5)
+    ]
+
+    orig = _patch_embed_sync(cm, mock_embed)
+    try:
+        result = cm._detect_attractor_redundancy(candidates)
+    finally:
+        _restore_embed_sync(cm, orig)
+
+    return all([
+        _assert(result["cluster_count"] == 1,
+                f"cluster_count=1 ({result['cluster_count']})"),
+        _assert(abs(result["diversity_score"] - 0.2) < 1e-9,
+                f"diversity_score=0.2 ({result['diversity_score']})"),
+        _assert("reflect" in result["redundant_tool_set"],
+                "redundant_tool_set に reflect 含む"),
+        _assert(len(result["redundancy_pairs"]) == 10,
+                f"redundancy_pairs=C(5,2)=10 ({len(result['redundancy_pairs'])})"),
+    ])
+
+
+def test_attractor_redundancy_partial():
+    """前 2 候補が redundant (同 tool 同 embedding)、残り 3 候補は独立
+    (異 tool 直交) → cluster_count=4, diversity=0.8, redundant={reflect} のみ。
+
+    識別力: union-find が動かず pair 数=cluster とする誤実装、または
+    redundant_tool_set が異 tool 同 embedding を含めてしまう誤実装で fail。
+    """
+    print("== Step B: 部分 redundant (2 同/3 独立) → cluster_count=4 ==")
+    import core.controller as cm
+
+    def mock_embed(texts):
+        # 前 2 件は同 vector、後 3 件は直交
+        return [
+            [1.0, 0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0],
+        ]
+
+    candidates = [
+        {"tool": "reflect", "reason": "shared reason"},
+        {"tool": "reflect", "reason": "shared reason"},
+        {"tool": "memory_store", "reason": "B"},
+        {"tool": "read_file", "reason": "C"},
+        {"tool": "bash", "reason": "D"},
+    ]
+
+    orig = _patch_embed_sync(cm, mock_embed)
+    try:
+        result = cm._detect_attractor_redundancy(candidates)
+    finally:
+        _restore_embed_sync(cm, orig)
+
+    return all([
+        _assert(result["cluster_count"] == 4,
+                f"cluster_count=4 ({result['cluster_count']})"),
+        _assert(abs(result["diversity_score"] - 0.8) < 1e-9,
+                f"diversity_score=0.8 ({result['diversity_score']})"),
+        _assert("reflect" in result["redundant_tool_set"],
+                "reflect 縮退検出"),
+        _assert("memory_store" not in result["redundant_tool_set"],
+                "memory_store 非縮退 (異 tool 別 cluster)"),
+        _assert(len(result["redundancy_pairs"]) == 1,
+                f"redundancy_pairs=1 (前 2 件のみ)"),
+    ])
+
+
+def test_attractor_redundancy_state_persist_json_safe():
+    """state["last_redundancy"] が json.dumps を通る contract 検証。
+
+    Codex review BLOCKER fix: redundant_tool_set を set のまま state に保存
+    する誤実装は json.dumps で TypeError raise → fail。controller_select 内
+    の state 保存ブロックと同じ shape を再現して contract test 化。
+
+    識別力: state["last_redundancy"] に set / tuple を直接保存する誤実装で
+    json.dumps が TypeError raise → fail。
+    """
+    print("== Step B: state[last_redundancy] が JSON-safe (BLOCKER fix) ==")
+    import json
+    import core.controller as cm
+
+    def mock_embed(texts):
+        return [[1.0, 0.0, 0.0, 0.0, 0.0]] * len(texts)
+
+    candidates = [{"tool": "reflect", "reason": f"r_{i}"} for i in range(5)]
+
+    orig = _patch_embed_sync(cm, mock_embed)
+    try:
+        # controller_select の state 保存ブロックと同じ projection
+        redundancy = cm._detect_attractor_redundancy(candidates)
+        state = {}
+        state["last_redundancy"] = {
+            "redundancy_pairs": [list(p) for p in redundancy["redundancy_pairs"]],
+            "cluster_count": redundancy["cluster_count"],
+            "redundant_tool_set": sorted(redundancy["redundant_tool_set"]),
+            "diversity_score": redundancy["diversity_score"],
+        }
+        try:
+            json.dumps(state)
+            json_ok = True
+            json_err = None
+        except TypeError as e:
+            json_ok = False
+            json_err = str(e)
+    finally:
+        _restore_embed_sync(cm, orig)
+
+    lr = state.get("last_redundancy", {})
+    return all([
+        _assert(json_ok, f"json.dumps(state) 成功 (err={json_err})"),
+        _assert(isinstance(lr.get("redundant_tool_set"), list),
+                "redundant_tool_set が list 型 (set じゃない)"),
+        _assert(lr.get("redundant_tool_set") == ["reflect"],
+                f"set 内容保持 ({lr.get('redundant_tool_set')})"),
+        _assert(isinstance(lr.get("redundancy_pairs"), list),
+                "redundancy_pairs list 型"),
+        _assert(all(isinstance(p, list) for p in lr.get("redundancy_pairs", [])),
+                "redundancy_pairs 各要素 list (tuple じゃない)"),
+        _assert(lr.get("cluster_count") == 1,
+                f"cluster_count 保持 ({lr.get('cluster_count')})"),
+        _assert(abs(lr.get("diversity_score", -1) - 0.2) < 1e-9,
+                "diversity_score 保持"),
+    ])
+
+
+def test_attractor_redundancy_malformed_vecs_fallback():
+    """_embed_sync が malformed (length 不一致) vector list 返却時、neutral
+    fallback (cluster_count=N, diversity=1.0) で動作。
+
+    Codex review P2-b fix: vecs is None だけ check の誤実装は len 不一致で
+    indexing error → fail (本テストは neutral fallback で正常動作確認)。
+    """
+    print("== Step B: malformed vecs (length 不一致) の防御 fallback ==")
+    import core.controller as cm
+
+    candidates = [{"tool": "reflect", "reason": f"r_{i}"} for i in range(5)]
+
+    # case A: 空 list 返却 (`not vecs` で発火)
+    def mock_empty(texts):
+        return []
+    orig = _patch_embed_sync(cm, mock_empty)
+    try:
+        empty_result = cm._detect_attractor_redundancy(candidates)
+    finally:
+        _restore_embed_sync(cm, orig)
+
+    # case B: length 不一致 (n=5 候補に 2 件しか返さない)
+    def mock_short(texts):
+        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+    orig = _patch_embed_sync(cm, mock_short)
+    try:
+        short_result = cm._detect_attractor_redundancy(candidates)
+    finally:
+        _restore_embed_sync(cm, orig)
+
+    return all([
+        _assert(empty_result["cluster_count"] == 5,
+                f"empty vecs neutral fallback cluster_count=N=5 ({empty_result['cluster_count']})"),
+        _assert(abs(empty_result["diversity_score"] - 1.0) < 1e-9,
+                "empty vecs diversity=1.0 (圧縮発火しない)"),
+        _assert(short_result["cluster_count"] == 5,
+                f"length 不一致 neutral fallback cluster_count=N=5 ({short_result['cluster_count']})"),
+        _assert(abs(short_result["diversity_score"] - 1.0) < 1e-9,
+                "length 不一致 diversity=1.0"),
+        _assert(len(short_result["redundancy_pairs"]) == 0,
+                "length 不一致 で indexing error せず空 pairs"),
+    ])
+
+
+def test_attractor_redundancy_empty_and_fallback():
+    """空入力 / vector 未起動 / _embed_sync=None の fallback 動作。
+
+    識別力: 空入力で IndexError raise の誤実装、fallback で diversity_score=0.0
+    を返す誤実装 (cluster_count=N + diversity=1.0 が正、補正発火しないため)。
+    """
+    print("== Step B: 空入力 / 未起動 / None fallback ==")
+    import core.controller as cm
+
+    # 空入力
+    empty_result = cm._detect_attractor_redundancy([])
+
+    candidates = [{"tool": "reflect", "reason": str(i)} for i in range(3)]
+    original_ready = cm.is_vector_ready
+    original_embed = cm._embed_sync
+
+    # vector 未起動
+    cm.is_vector_ready = lambda: False
+    try:
+        not_ready_result = cm._detect_attractor_redundancy(candidates)
+    finally:
+        cm.is_vector_ready = original_ready
+
+    # _embed_sync=None 返却
+    cm.is_vector_ready = lambda: True
+    cm._embed_sync = lambda texts: None
+    try:
+        none_result = cm._detect_attractor_redundancy(candidates)
+    finally:
+        cm._embed_sync = original_embed
+        cm.is_vector_ready = original_ready
+
+    return all([
+        _assert(empty_result["cluster_count"] == 0,
+                f"空入力 cluster_count=0 ({empty_result['cluster_count']})"),
+        _assert(empty_result["diversity_score"] == 0.0,
+                "空入力 diversity_score=0.0"),
+        _assert(not_ready_result["cluster_count"] == 3,
+                f"vector 未起動 cluster_count=N=3 ({not_ready_result['cluster_count']})"),
+        _assert(abs(not_ready_result["diversity_score"] - 1.0) < 1e-9,
+                "vector 未起動 diversity=1.0 (補正発火しない)"),
+        _assert(none_result["cluster_count"] == 3,
+                "_embed_sync=None cluster_count=N=3"),
+        _assert(abs(none_result["diversity_score"] - 1.0) < 1e-9,
+                "_embed_sync=None diversity=1.0"),
+    ])
+
+
+# ============================================================
 # main runner
 # ============================================================
 
@@ -186,6 +481,12 @@ def main():
         test_cig_flat_signal_threshold,
         test_cig_flat_streak_increment_and_reset,
         test_cig_end_to_end_via_update_predictor_confidence,
+        test_attractor_redundancy_all_orthogonal,
+        test_attractor_redundancy_all_same,
+        test_attractor_redundancy_partial,
+        test_attractor_redundancy_state_persist_json_safe,
+        test_attractor_redundancy_malformed_vecs_fallback,
+        test_attractor_redundancy_empty_and_fallback,
     ]
     print(f"Running {len(tests)} test groups (Step A)...\n")
     passed = 0
