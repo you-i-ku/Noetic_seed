@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.pending_unified import (
     PENDING_ATTEMPTS_SAFETY_CAP,
+    calc_priority,
     pending_add,
     pending_add_response_intent,
     pending_prune,
@@ -228,23 +229,76 @@ def test_response_intent_no_merge_different_source_action():
 
 
 def test_response_intent_merge_resets_gap_and_priority():
-    print("== merge: gap=1.0 リセット + priority 再算 + timestamp 更新 ==")
+    print("== merge: gap=1.0 リセット + priority 強識別 + timestamp 強識別 ==")
     state = _fresh_state()
     p1 = pending_add_response_intent(
         state=state, channel="device", text="ねえ", cycle_id=10,
     )
-    # 既存 pending の gap を手動で下げて、merge 時にリセットされる識別力を作る
-    p1["gap"] = 0.3
+    # 段階14.8.1 強化 (Codex review §6 指摘): 偽の値を仕込んで、誤実装
+    # (再算しない / 更新しない) で fail する fixture に格上げ。同一秒内の
+    # 偽合格を防ぐため、明らかに古い timestamp + 通常ありえない priority
+    # を pre-merge で上書きしておき、merge 後にこれらが消えてることを assert。
+    p1["gap"] = 0.3                           # gap リセット識別力
+    p1["timestamp"] = "2000-01-01 00:00:00"   # 古い偽 timestamp (誤実装で残る)
+    p1["priority"] = -999.0                   # 異常 priority (誤実装で残る)
     old_timestamp = p1["timestamp"]
+    old_priority = p1["priority"]
+
     p2 = pending_add_response_intent(
         state=state, channel="device", text="聞いてる？", cycle_id=11,
     )
+    expected_priority = calc_priority(p2)
+
     return all([
         _assert(p2["gap"] == 1.0, f"gap=1.0 リセット ({p2['gap']})"),
-        _assert(p2["timestamp"] >= old_timestamp,
-                "timestamp 更新 (>= 旧、now_ts 同秒許容)"),
+        # timestamp: 偽の "2000-01-01" が消え、現在の年代に更新されてること
+        _assert(p2["timestamp"] != old_timestamp,
+                f"timestamp 偽値 '{old_timestamp}' が上書き ({p2['timestamp']})"),
+        _assert(p2["timestamp"].startswith("202"),
+                f"timestamp が現代の年代 (202x) ({p2['timestamp']})"),
         _assert(p2["last_cycle"] == 11, "last_cycle=11"),
-        _assert(p2["priority"] is not None, "priority 再算済"),
+        # priority: 偽の -999.0 が消え、calc_priority 結果と一致 (再算済)
+        _assert(p2["priority"] != old_priority,
+                f"priority 偽値 {old_priority} が上書き ({p2['priority']})"),
+        _assert(p2["priority"] == expected_priority,
+                f"priority == calc_priority(p2) ({p2['priority']})"),
+    ])
+
+
+def test_response_intent_no_merge_with_other_type_entry():
+    print("== no merge: type 不一致 entry は merge 候補外 (type 識別力) ==")
+    state = _fresh_state()
+    # 段階14.8.1 強化 (Codex review §6 指摘): docstring の merge 条件
+    # 「type == 'pending'」に対応する discriminating fixture。state["pending"]
+    # に type が違う dict を直接混入させ、新 input が type 違いと merge せず
+    # 通常通り新規 pending を作ることを確認。誤実装 (type チェック skip) で
+    # は alien entry を上書き merge してしまい fail する。
+    alien = {
+        "type": "alien_kind",                    # ★ pending 以外
+        "source_action": "response_to_external",  # 他 field は完全一致
+        "expected_channel": "device",
+        "observed_content": None,
+        "content_intent": "ALIEN ENTRY",
+        "attempts": 1,
+    }
+    state["pending"].append(alien)
+
+    p_new = pending_add_response_intent(
+        state=state, channel="device", text="ねえ", cycle_id=10,
+    )
+
+    return all([
+        _assert(len(state["pending"]) == 2,
+                f"alien + 新 pending で 2 件 ({len(state['pending'])})"),
+        # alien は完全に不変 (merge 対象外)
+        _assert(alien["type"] == "alien_kind", "alien type 不変"),
+        _assert(alien["content_intent"] == "ALIEN ENTRY",
+                "alien content_intent 不変 (上書きされてない)"),
+        _assert(alien["attempts"] == 1, "alien attempts 不変"),
+        # 新 pending は通常通り新規生成
+        _assert(p_new["type"] == "pending", "新 pending の type=pending"),
+        _assert(p_new["attempts"] == 1, "新 pending attempts=1 (merge せず新規)"),
+        _assert(p_new is not alien, "alien と別 entry"),
     ])
 
 
@@ -393,8 +447,10 @@ if __name__ == "__main__":
          test_response_intent_no_merge_observed_pending),
         ("no merge: 別 source_action とは混ぜない",
          test_response_intent_no_merge_different_source_action),
-        ("merge: gap リセット + priority 再算",
+        ("merge: gap リセット + priority/timestamp 強識別",
          test_response_intent_merge_resets_gap_and_priority),
+        ("no merge: type 不一致 entry とは merge しない",
+         test_response_intent_no_merge_with_other_type_entry),
         ("burden: 未消化で上昇", test_pending_burden_signal_rises_with_unobserved),
         ("burden: 消化済 除外", test_pending_burden_excludes_observed),
         ("burden: deprecated 除外", test_pending_burden_excludes_deprecated),
