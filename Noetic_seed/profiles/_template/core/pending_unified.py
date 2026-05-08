@@ -483,6 +483,24 @@ def pending_add_response_intent(
     応答しない自由は iku の wait(dismiss=p_xxx) 明示行使で実現
     (feedback_freedom_to_die 整合)。
 
+    段階14.8 merge logic (2026-05-08): 同 channel に未消化の
+    response_to_external pending が既にあれば、新規作成せず既存 entry に
+    マージ追記する。Claude Code がエージェントループ進行中の追加発話を
+    1 ターンに統合する挙動と同型 (action_observation_unified 整合)。
+
+    merge 条件 (4 条件 AND、過剰 merge 防止のため全部明示):
+        - type == "pending"
+        - source_action == "response_to_external"  ← 他 source_action と混ぜない
+        - expected_channel == channel              ← 別 channel と混ぜない
+        - observed_content is None                 ← 消化済とは混ぜない
+
+    merge 時の更新:
+        - content_intent: 末尾に "(+ '<新規 snippet>')" を追記
+        - attempts: +1 (累積予測誤差として表現)
+        - last_cycle / timestamp: 最新化
+        - gap: 1.0 にリセット (新規応答待ち再開)
+        - priority: calc_priority で再算
+
     Args:
         state: 認知状態 dict。
         channel: 外部入力の channel ("device" / "claude" 等、応答先)。
@@ -490,9 +508,27 @@ def pending_add_response_intent(
         cycle_id: 現在 cycle。
 
     Returns:
-        生成された PendingEntry。
+        生成された or マージ更新された PendingEntry。
     """
     snippet = str(text)[:50]
+    pending_list = state.get("pending", [])
+
+    # 段階14.8: 同 channel 未消化 response_to_external pending を検出 → merge
+    for p in pending_list:
+        if (p.get("type") == "pending"
+                and p.get("source_action") == "response_to_external"
+                and p.get("expected_channel") == channel
+                and p.get("observed_content") is None):
+            existing_intent = str(p.get("content_intent", ""))
+            p["content_intent"] = f"{existing_intent} (+ '{snippet}')"[:500]
+            p["attempts"] = p.get("attempts", 1) + 1
+            p["last_cycle"] = cycle_id
+            p["timestamp"] = _now_ts()
+            p["gap"] = 1.0
+            p["priority"] = calc_priority(p)
+            return p
+
+    # 同 channel 未消化 response pending なし → 従来通り新規作成
     return pending_add(
         state=state,
         source_action="response_to_external",

@@ -105,6 +105,150 @@ def test_response_intent_content_preview():
 
 
 # ============================================================
+# 段階14.8 — 同 channel 未消化 response_to_external pending の merge logic
+# ============================================================
+# 識別力 (CLAUDE.md §5): 4 条件 AND の merge 判定で、誤実装 1 つにつき
+# 1 つ以上の test が fail するように fixture を設計。
+#   - source_action チェック skip → test_no_merge_different_source_action fail
+#   - expected_channel チェック skip → test_no_merge_different_channel fail
+#   - observed_content チェック skip → test_no_merge_observed_pending fail
+#   - 全 pending 無条件 merge → test_no_merge_different_channel fail
+
+
+def test_response_intent_merge_same_channel_unobserved():
+    print("== merge: 同 channel 未消化 → 既存 entry に merge、新規作成しない ==")
+    state = _fresh_state()
+    p1 = pending_add_response_intent(
+        state=state, channel="device", text="ねえ", cycle_id=10,
+    )
+    p2 = pending_add_response_intent(
+        state=state, channel="device", text="聞いてる？", cycle_id=11,
+    )
+    return all([
+        _assert(len(state["pending"]) == 1,
+                f"pending は 1 件のまま ({len(state['pending'])})"),
+        _assert(p1 is p2, "同一 entry が返される (merge による上書き)"),
+        _assert(p2["attempts"] == 2, f"attempts=2 ({p2['attempts']})"),
+        _assert("ねえ" in p2["content_intent"], "1 回目の text 残存"),
+        _assert("聞いてる？" in p2["content_intent"], "2 回目の text 追記"),
+        _assert(p2["last_cycle"] == 11, f"last_cycle=11 ({p2['last_cycle']})"),
+    ])
+
+
+def test_response_intent_merge_three_consecutive():
+    print("== merge: 3 連続発話 → 1 件 attempts=3、全 text 累積 ==")
+    state = _fresh_state()
+    pending_add_response_intent(
+        state=state, channel="device", text="ねえ", cycle_id=10,
+    )
+    pending_add_response_intent(
+        state=state, channel="device", text="聞いてる？", cycle_id=11,
+    )
+    p3 = pending_add_response_intent(
+        state=state, channel="device", text="いまどう？", cycle_id=12,
+    )
+    return all([
+        _assert(len(state["pending"]) == 1, "1 件のまま"),
+        _assert(p3["attempts"] == 3, f"attempts=3 ({p3['attempts']})"),
+        _assert("ねえ" in p3["content_intent"], "1 回目残存"),
+        _assert("聞いてる？" in p3["content_intent"], "2 回目残存"),
+        _assert("いまどう？" in p3["content_intent"], "3 回目残存"),
+    ])
+
+
+def test_response_intent_no_merge_different_channel():
+    print("== no merge: device pending + claude 入力 → 2 件 (channel 識別力) ==")
+    state = _fresh_state()
+    p_device = pending_add_response_intent(
+        state=state, channel="device", text="ねえ", cycle_id=10,
+    )
+    p_claude = pending_add_response_intent(
+        state=state, channel="claude", text="hi there", cycle_id=11,
+    )
+    return all([
+        _assert(len(state["pending"]) == 2,
+                f"別 channel は別 pending ({len(state['pending'])})"),
+        _assert(p_device is not p_claude, "別 entry"),
+        _assert(p_device["expected_channel"] == "device", "device pending 不変"),
+        _assert(p_claude["expected_channel"] == "claude", "claude pending 新規"),
+        _assert(p_device["attempts"] == 1, "device 側 attempts=1 のまま"),
+    ])
+
+
+def test_response_intent_no_merge_observed_pending():
+    print("== no merge: 消化済 device pending + 同 device 入力 → 2 件 ==")
+    state = _fresh_state()
+    p_old = pending_add_response_intent(
+        state=state, channel="device", text="ねえ", cycle_id=10,
+    )
+    # 手動で消化済マーク
+    p_old["observed_content"] = "返事した"
+    p_old["gap"] = 0.0
+    # 同 channel に新規入力
+    p_new = pending_add_response_intent(
+        state=state, channel="device", text="また話そう", cycle_id=20,
+    )
+    return all([
+        _assert(len(state["pending"]) == 2,
+                f"消化済 + 新規で 2 件 ({len(state['pending'])})"),
+        _assert(p_old is not p_new, "別 entry"),
+        _assert(p_old["observed_content"] == "返事した",
+                "古い pending の消化状態は不変"),
+        _assert(p_new["observed_content"] is None, "新 pending は未消化"),
+        _assert(p_new["attempts"] == 1, "新 pending attempts=1 (merge せず新規)"),
+    ])
+
+
+def test_response_intent_no_merge_different_source_action():
+    print("== no merge: 同 channel 別 source_action は影響しない ==")
+    state = _fresh_state()
+    # source_action="reflection" の pending を device channel で先置き
+    p_other = pending_add(
+        state=state, source_action="reflection",
+        expected_observation="x", lag_kind="cycles",
+        content_intent="別 source_action", cycle_id=10,
+        channel="device",
+        match_pattern={
+            "source_action": "reflect", "expected_channel": "device",
+        },
+    )
+    # 同 channel に response_to_external 入力 → 新規作成 (other は影響なし)
+    p_resp = pending_add_response_intent(
+        state=state, channel="device", text="ねえ", cycle_id=11,
+    )
+    return all([
+        _assert(len(state["pending"]) == 2,
+                f"別 source_action とは混ぜない ({len(state['pending'])})"),
+        _assert(p_other["source_action"] == "reflection", "他 pending 不変"),
+        _assert(p_resp["source_action"] == "response_to_external",
+                "response 新規作成"),
+        _assert(p_other["attempts"] == 1, "他 pending attempts 不変"),
+        _assert(p_resp["attempts"] == 1, "response 新規 (merge 対象なし)"),
+    ])
+
+
+def test_response_intent_merge_resets_gap_and_priority():
+    print("== merge: gap=1.0 リセット + priority 再算 + timestamp 更新 ==")
+    state = _fresh_state()
+    p1 = pending_add_response_intent(
+        state=state, channel="device", text="ねえ", cycle_id=10,
+    )
+    # 既存 pending の gap を手動で下げて、merge 時にリセットされる識別力を作る
+    p1["gap"] = 0.3
+    old_timestamp = p1["timestamp"]
+    p2 = pending_add_response_intent(
+        state=state, channel="device", text="聞いてる？", cycle_id=11,
+    )
+    return all([
+        _assert(p2["gap"] == 1.0, f"gap=1.0 リセット ({p2['gap']})"),
+        _assert(p2["timestamp"] >= old_timestamp,
+                "timestamp 更新 (>= 旧、now_ts 同秒許容)"),
+        _assert(p2["last_cycle"] == 11, "last_cycle=11"),
+        _assert(p2["priority"] is not None, "priority 再算済"),
+    ])
+
+
+# ============================================================
 # pending_burden signal (改善6-D)
 # ============================================================
 
@@ -239,6 +383,18 @@ if __name__ == "__main__":
         ("response_intent: 基本生成", test_response_intent_basic),
         ("response_intent: match_pattern", test_response_intent_match_pattern),
         ("response_intent: content preview", test_response_intent_content_preview),
+        ("merge: 同 channel 未消化 → 1 件 attempts=2",
+         test_response_intent_merge_same_channel_unobserved),
+        ("merge: 3 連続 → 1 件 attempts=3",
+         test_response_intent_merge_three_consecutive),
+        ("no merge: 別 channel は別 pending",
+         test_response_intent_no_merge_different_channel),
+        ("no merge: 消化済 pending とは混ぜない",
+         test_response_intent_no_merge_observed_pending),
+        ("no merge: 別 source_action とは混ぜない",
+         test_response_intent_no_merge_different_source_action),
+        ("merge: gap リセット + priority 再算",
+         test_response_intent_merge_resets_gap_and_priority),
         ("burden: 未消化で上昇", test_pending_burden_signal_rises_with_unobserved),
         ("burden: 消化済 除外", test_pending_burden_excludes_observed),
         ("burden: deprecated 除外", test_pending_burden_excludes_deprecated),
