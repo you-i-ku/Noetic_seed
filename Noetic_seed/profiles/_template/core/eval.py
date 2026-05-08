@@ -420,9 +420,16 @@ def update_unresolved_intents(
             # 拡張したことに伴い、threshold を 0.7 → 0.75 に引上げ
             # (simulate_prescription.py の実ログ検証で 23/23 pair が
             # 0.75 超、誤消化余地は限定的と確認)。
+            # 段階14 後 hotfix (2026-05-08): match_pattern.expected_channel="self"
+            # 固定を削除。外向き channel (output_display channel="device" 等) の
+            # tool 実行時、_matches で channel "device" != "self" が False を返し
+            # 永久残存していた (qwen smoke で cycle 42-49 の 7 cycle attractor
+            # 観察)。pending.expected_channel="self" は内省由来 flag として
+            # 維持、消化判定 (match_pattern) は source_action + 類似度のみで
+            # 行う設計に整合。段階11-A hotfix 3725db3 の「source_action か
+            # expected_channel いずれか必須」契約は source_action 残存で満たす。
             match_pattern={
                 "source_action": source_action,
-                "expected_channel": "self",
                 "observable_similarity_threshold": 0.75,
             },
         )

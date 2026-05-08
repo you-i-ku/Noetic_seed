@@ -398,8 +398,12 @@ def test_post_hook_adds_ups_unresolved_pending():
         # 段階11-C hotfix: match_pattern 対称化 (段階11-A hotfix 契約追随)
         _assert(mp.get("source_action") == "reflect",
                 "match_pattern.source_action=reflect (対称化)"),
-        _assert(mp.get("expected_channel") == "self",
-                "match_pattern.expected_channel=self (対称化)"),
+        # 段階14 後 hotfix (2026-05-08): match_pattern.expected_channel 削除。
+        # pending.expected_channel は "self" 維持 (内省由来 flag、line 394) だが、
+        # 消化判定 (match_pattern) では channel 制約を外す。外向き channel tool
+        # (output_display channel="device") で永久残存していた bug の根治。
+        _assert("expected_channel" not in mp,
+                "match_pattern.expected_channel 削除 (channel 制約撤廃)"),
     ])
 
 
