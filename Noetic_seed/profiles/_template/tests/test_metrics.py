@@ -68,8 +68,17 @@ import core.metrics as cm
 
 
 def _assert(cond, label):
+    """assert helper。pytest 互換のため失敗時は AssertionError を raise する。
+
+    Slice 3 自己点検 (2026-05-09): Codex review P2 #4 同型 bug を本 file の
+    `_assert` でも発見 → test_info_gain.py と同 pattern で修正。`return False`
+    だけだと pytest で PytestReturnNotNoneWarning 出るだけで test pass 化する。
+    AssertionError raise + 既存 runner 側 try/except で fail 認識化。
+    """
     status = "OK " if cond else "FAIL"
     print(f"  [{status}] {label}")
+    if not cond:
+        raise AssertionError(label)
     return cond
 
 
@@ -561,6 +570,32 @@ def test_j1_emit_appends_jsonl_and_updates_index():
 
 
 # ============================================================
+# K. _sort_entries_global_newest_first (Codex review 2026-05-09 P2 #5/#6 fix)
+# ============================================================
+
+def test_k1_sort_entries_global_newest_first():
+    """K1: time field で global newest first に sort する (P2 #5/#6 回帰防止)。
+
+    fixture: 古い subj entry + 新しい mem entry を「subj→mem の concat 順」で
+    渡す (= emit_cycle_metrics の concat 順を再現)。
+    旧実装 (sort なし): 入力順維持 = subj (古) が先頭。
+    新実装 (sort あり): time newest first = mem (新) が先頭。
+
+    識別力: helper が time field を参照しない実装で fail (順序不変)。
+    """
+    print("== K1: sort entries global newest first ==")
+    entries = [
+        {"id": "subj-old", "time": "2026-05-01T00:00:00Z", "embedding": [1, 0]},
+        {"id": "mem-new",  "time": "2026-05-09T12:00:00Z", "embedding": [0, 1]},
+    ]
+    result = cm._sort_entries_global_newest_first(entries)
+    ok = True
+    ok &= _assert(result[0]["id"] == "mem-new", f"head=mem-new (newest): {result[0]['id']}")
+    ok &= _assert(result[1]["id"] == "subj-old", f"next=subj-old (older): {result[1]['id']}")
+    return ok
+
+
+# ============================================================
 # Runner
 # ============================================================
 
@@ -587,6 +622,7 @@ if __name__ == "__main__":
         test_h2_anisotropy_balanced_low,
         test_i1_event_has_required_fields,
         test_j1_emit_appends_jsonl_and_updates_index,
+        test_k1_sort_entries_global_newest_first,
     ]
     results = []
     for t in tests:

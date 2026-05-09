@@ -206,6 +206,9 @@ def load_state() -> dict:
             # 段階10 柱 B: Predictor 自己学習の state 拡張
             if "predictor_confidence" not in data:
                 data["predictor_confidence"] = {}
+            # Slice 3 (orchestration §3 P1 #3): info_gain 前 cycle snapshot
+            if "_info_gain_prev" not in data:
+                data["_info_gain_prev"] = {}
             if "prediction_error_history_e2" not in data:
                 data["prediction_error_history_e2"] = []
             if "prediction_error_history_ec" not in data:

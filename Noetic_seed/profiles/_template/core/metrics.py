@@ -357,6 +357,9 @@ def build_cycle_metrics_event(
                 m for m in load_all_memories()
                 if isinstance(m.get("embedding"), list)
             ]
+            # Codex P2 #6 fix: auto-load 経路でも emit と同じ global sort
+            # (direct caller が build を呼ぶ場合の info_gain 順序契約を担保)
+            _sort_entries_global_newest_first(entries_with_embedding)
         if links is None:
             links = list_links(limit=LINKS_SCAN_LIMIT)
     if code_version is None:
@@ -407,6 +410,15 @@ def build_cycle_metrics_event(
         "embedding_entry_count": len(entries_with_embedding or []),
     }
     fog = compute_fog_metrics(state, entries_with_embedding or [], links or [])
+
+    # Slice 3 (orchestration §3 P1 #3 + §5 Slice 3):
+    # information_gain / model_resolution_gain 6 項目 + 統合スカラー。
+    # state[_info_gain_prev] 経由の cycle 間 diff 計算。controller 不変。
+    from core.info_gain import compute_info_gain_components, CYCLE_KEY
+    prev_snapshot = state.get(CYCLE_KEY, {}) or {}
+    info_gain_dict = compute_info_gain_components(
+        state, prev_snapshot, entries_with_embedding or [], links or [], fog_now=fog
+    )
 
     dispositions = state.get("dispositions", {}) or {}
     self_disp_keys = list(
@@ -475,6 +487,7 @@ def build_cycle_metrics_event(
             **forest,
             "fog": fog,
         },
+        "info_gain": info_gain_dict,
         "agency": {
             "voluntary_memory_store_count": int(
                 state.get("voluntary_memory_store_count", 0) or 0
@@ -513,6 +526,30 @@ def _json_default(obj: Any) -> Any:
         return float(obj)
     except (TypeError, ValueError):
         return str(obj)
+
+
+def _sort_entries_global_newest_first(entries: list) -> list:
+    """``entries`` を time field で global newest first に in-place sort。
+
+    Codex review 2026-05-09 P2 #5/#6 fix: subj+mem の単純 concat は各 source
+    内部 newest first だが merged 全体は newest first にならない。
+    info_gain.compute_info_gain_components の docstring 契約「global newest
+    first 順」を満たすため、入力前処理として必ず本 helper を通す。
+
+    emit_cycle_metrics と build_cycle_metrics_event (auto-load 経路) の両方で
+    呼び出す DRY helper、片方だけ sort して片方が漏れる罠を回避する。
+
+    Args:
+        entries: subj + memory entry list (各 entry に "time" or "ts" field 期待)
+
+    Returns:
+        sort 後の list (in-place 変更後の参照、副作用あり)。
+    """
+    entries.sort(
+        key=lambda e: e.get("time") or e.get("ts") or "",
+        reverse=True,  # newest first
+    )
+    return entries
 
 
 def _atomic_append_jsonl(path: Path, entry: dict) -> None:
@@ -567,13 +604,50 @@ def emit_cycle_metrics(state: dict, settings: dict, pref: dict) -> dict:
     §② ゆう確定 emit timing)。例外は呼出側で catch する (defensive、metrics
     失敗で cycle 全体を止めない、reflect 継続原則と整合)。
 
+    Slice 3 拡張: emit 後に state[CYCLE_KEY] を更新して次 cycle の info_gain
+    diff 計算用 snapshot を残す。state mutation は本関数のみ、build 内では
+    read-only に扱う設計。
+
     Returns:
         emit した event dict (test / 即時 inspection 用)
     """
     from core.config import MEMORY_DIR
+    from core.memory import (
+        load_all_subjective_entries, load_all_memories
+    )
+    from core.memory_links import list_links
+    from core.info_gain import snapshot_for_next_cycle, CYCLE_KEY
 
-    event = build_cycle_metrics_event(state, settings, pref)
+    # 1 度の取得を build と snapshot で共有 (重複 fetch 回避)。
+    # Codex review 2026-05-09 P2 #5 fix: subj + mem の単純 concat は各 source
+    # 内部 newest first だが merged 全体は newest first じゃない (subj 全件が
+    # 頭、mem 全件が後ろ)。memory のみに新 entry 追加された cycle で先頭の
+    # subj 古い entry を「新」と誤検知する罠を回避するため、time field で
+    # global newest first sort する (raw / subj / mem 全て time field 持つ
+    # 前提、metrics.py 自身も datetime.now().strftime() 形式で発行)。
+    entries_with_embedding = [
+        e for e in load_all_subjective_entries()
+        if isinstance(e.get("embedding"), list)
+    ] + [
+        m for m in load_all_memories()
+        if isinstance(m.get("embedding"), list)
+    ]
+    # Codex P2 #5 fix: subj+mem の global newest first sort (build 側と DRY)
+    _sort_entries_global_newest_first(entries_with_embedding)
+    links = list_links(limit=LINKS_SCAN_LIMIT)
+
+    event = build_cycle_metrics_event(
+        state, settings, pref,
+        entries_with_embedding=entries_with_embedding,
+        links=links,
+    )
     target = MEMORY_DIR / METRICS_FILE_NAME
     _atomic_append_jsonl(target, event)
     _update_metrics_index(MEMORY_DIR / INDEX_FILE_NAME, target.name, event)
+
+    # Slice 3: 次 cycle 用 prev snapshot 更新 (state mutation はここだけ)
+    fog_now = (event.get("graph", {}) or {}).get("fog", {})
+    state[CYCLE_KEY] = snapshot_for_next_cycle(
+        state, entries_with_embedding, links, fog_now
+    )
     return event
