@@ -207,6 +207,10 @@ def main():
 
     state = load_state()
     state["session_id"] = str(uuid.uuid4())[:8]
+    # Slice 2: run_id (full uuid) を起動毎生成。session_id (8 char) と階層化
+    # することで「同 run 内の複数 session」(将来の手動再起動シナリオ等)
+    # も表現可能。metrics_events.jsonl に記録、replay arena で run 単位識別。
+    state["run_id"] = str(uuid.uuid4())
     # F-005: subjective_entries.jsonl は materialized view (raw_events.jsonl が
     # source of truth)、compaction / retro e2 mutation で mark_view_dirty が発火、
     # 以降の save_state() で atomic rewrite + index.json 同期。
@@ -1126,6 +1130,15 @@ def main():
             prune_weak_links(current_cycle=cid)
         except Exception as e:
             print(f"  [memory_links] prune skip (error: {e})")
+
+        # Slice 2: cycle metrics emit (cycle 末、save_state 直前)
+        # orchestration §② ゆう確定 emit timing。controller 不変、測定のみ。
+        # reflect 継続原則: 例外で metrics 失敗しても cycle 全体は止めない。
+        try:
+            from core.metrics import emit_cycle_metrics
+            emit_cycle_metrics(state, llm_cfg, load_pref())
+        except Exception as e:
+            print(f"  [metrics] emit skip (error: {e})")
 
         save_state(state)
 
