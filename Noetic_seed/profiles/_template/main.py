@@ -121,7 +121,7 @@ from core.entropy import (
 from core.memory import _record_entry, maybe_compress_log, get_relevant_memories, format_memories_for_prompt, non_empty_subjective_entries
 from core import event_emitter
 from core.perspective import make_perspective
-from core.reflection import should_reflect, reflect
+from core.reflection import should_reflect, reflect, reflect_and_persist
 from core.prompt import build_prompt_propose
 from core.controller import controller, controller_select, _intent_conditioned_scores
 
@@ -258,11 +258,14 @@ def main():
     broadcast_state(state)
 
     # reflectツールをcall_llm付きで初期化
+    # F-005 完了後 hotfix (2026-05-09): 旧実装は `s = load_state()` で別 dict を
+    # 読んで mutate → save_state していたため、main scope の `state` には
+    # `reflection_cycle = 0` が反映されず、cycle 末 should_reflect(state) が
+    # 再 trigger → 自動 reflect 経路が同 cycle で二重発火していた。
+    # `reflect_and_persist` 経由で main scope の `state` を closure で直接 in-place
+    # mutate する (`_refresh_state` 規約と整合、main.py:305-307 参照)。
     def _tool_reflect(args):
-        s = load_state()
-        result = reflect(s, call_llm)
-        s["reflection_cycle"] = 0
-        save_state(s)
+        result = reflect_and_persist(state, call_llm)
         notes = result.get("notes", [])
         return f"内省完了: {len(notes)}件の気づき"
     TOOLS["reflect"]["func"] = _tool_reflect
@@ -1511,9 +1514,12 @@ def main():
             _refl_interval = load_pref().get("reflection_interval", 10)
             if should_reflect(state, _refl_interval):
                 print("  [reflection] 内省開始...")
-                reflect(state, call_llm)
-                state["reflection_cycle"] = 0
-                save_state(state)
+                # F-005 完了後 hotfix (2026-05-09): tool 経路と同 helper に集約
+                # して reflection_cycle リセット + save_state を 1 経路化。
+                # tool 経路で reflect 走った後の同 cycle で should_reflect が
+                # True になることはない (state["reflection_cycle"] = 0 が直接
+                # 反映されるため) → 二重発火構造的に起きない。
+                reflect_and_persist(state, call_llm)
 
             # 段階11-B Phase 5 Step 5.4: cycle 境界で emergence metric 記録 (reflection 後 state snapshot)
             try:

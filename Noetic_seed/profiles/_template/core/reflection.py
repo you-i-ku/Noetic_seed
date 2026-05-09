@@ -337,6 +337,53 @@ ATTRIBUTED_DISPOSITION:
         }
 
 
+def reflect_and_persist(
+    state: dict,
+    call_llm_fn,
+    save_state_fn=None,
+    reflect_fn=None,
+) -> dict:
+    """reflect 実行 + reflection_cycle リセット + 永続化を 1 経路に集約。
+
+    F-005 完了後 hotfix (2026-05-09): 旧 main.py:_tool_reflect は
+    `s = load_state()` で別 dict を読み込んで mutate していたため、main scope
+    の ``state["reflection_cycle"]`` が更新されず、cycle 末
+    ``should_reflect(state)`` が再 trigger して二重発火する bug があった。
+
+    本 helper は **受け取った state を in-place mutate する** (main 規約「state
+    は rebind せず in-place mutate」整合、`main.py:305-307` コメント参照)。
+    tool 経路 / auto 経路の両方が同 helper を通すことで、`reflection_cycle`
+    のリセットが必ず main scope の state に反映され、二重発火が構造的に
+    起きない。
+
+    たとえ:
+      旧設計: 部署 A が独自コピーの帳簿を更新して提出、main の帳簿は
+              更新されないので部署 B (cycle 末判定) が「まだやってない」と
+              再度実行
+      新設計: 部署 A も B も同じ帳簿を更新、相互に状態が見える
+
+    Args:
+        state: main scope の state dict (in-place mutate される)
+        call_llm_fn: LLM 呼出 callable
+        save_state_fn: state 永続化関数。``None`` なら ``core.state.save_state``
+            を遅延 import (循環 import 回避 + test 注入兼用)
+        reflect_fn: reflect 本体関数。``None`` なら本 module の ``reflect``
+            (test 時に mock 注入可能)
+
+    Returns:
+        ``reflect()`` の結果 dict (notes / self_disp_delta / attr_disp_delta 等)
+    """
+    if save_state_fn is None:
+        from core.state import save_state as _default_save
+        save_state_fn = _default_save
+    if reflect_fn is None:
+        reflect_fn = reflect
+    result = reflect_fn(state, call_llm_fn)
+    state["reflection_cycle"] = 0
+    save_state_fn(state)
+    return result
+
+
 def _parse_reflection(text: str, state: dict) -> dict:
     """内省結果をパースして記憶・dispositionに反映。
 
