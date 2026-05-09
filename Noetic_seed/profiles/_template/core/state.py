@@ -227,6 +227,18 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
+    # F-005: dirty な materialized view (subjective_entries 等) を atomic rewrite。
+    # save_state は cycle 末以外にも複数回呼ばれるが、flush は dirty 立ってる view
+    # のみ書くので no-op cost は無視できる範囲 (set membership check + 早期 return)。
+    # state.json 書き出しより先に flush する: jsonl が source of truth (load_state
+    # 側で _rebuild_views_from_jsonl が state.json view を ignore するため)、jsonl
+    # を先に persist しておけば state.json 失敗でも view 整合は保たれる。
+    try:
+        from core.view_persistence import flush_dirty_views
+        flush_dirty_views(state)
+    except Exception as e:
+        # flush 失敗は state.json 保存を阻害しない (defensive、reflect 継続原則)。
+        print(f"  [view_persistence] flush skip (error: {e})")
     _atomic_write(STATE_FILE, json.dumps(state, ensure_ascii=False, indent=2))
 
 

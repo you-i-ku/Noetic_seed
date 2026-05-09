@@ -352,6 +352,10 @@ def _apply_retro_e2(state: dict, log_entry_id: str, bonus_pct: int) -> bool:
             return False
         new_val = min(100, int(m.group(1)) + int(bonus_pct))
         entry["e2"] = f"{new_val}%"
+        # F-005: retro e2 修正は subjective_entries.jsonl (materialized view) の
+        # mutation。dirty 立てて cycle 末で atomic rewrite。
+        from core.view_persistence import mark_view_dirty
+        mark_view_dirty("subjective_entries")
         return True
     return False
 

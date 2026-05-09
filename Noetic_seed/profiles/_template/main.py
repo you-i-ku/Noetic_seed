@@ -207,6 +207,18 @@ def main():
 
     state = load_state()
     state["session_id"] = str(uuid.uuid4())[:8]
+    # F-005: subjective_entries.jsonl は materialized view (raw_events.jsonl が
+    # source of truth)、compaction / retro e2 mutation で mark_view_dirty が発火、
+    # 以降の save_state() で atomic rewrite + index.json 同期。
+    # 将来の同パターン view (goal_shadows / trajectories 等) はここに追加 register。
+    from core.view_persistence import register_view
+    from core.config import MEMORY_DIR as _MEMORY_DIR_F005
+    register_view(
+        "subjective_entries",
+        _MEMORY_DIR_F005 / "subjective_entries.jsonl",
+        "subjective_entries",
+        index_path=_MEMORY_DIR_F005 / "index.json",
+    )
     # 段階10.5 Fix 1: chain 連結キー entry (tool_A+tool_B 形式) を drop し、
     # tool 単位 entry のみ残す。新 smoke 起点で predictor_confidence をリセット。
     from core.predictor import migrate_chain_keys

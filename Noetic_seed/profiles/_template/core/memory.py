@@ -1027,6 +1027,11 @@ def maybe_compress_log(state: dict, tool_names: set = None):
              if s.get("id") in preserve_ids]
             + state["subjective_entries"][compress_count:]
         )
+        # F-005: subjective_entries.jsonl は materialized view、compaction を
+        # mutate しただけでは再起動で undo される。dirty 立てて cycle 末で
+        # atomic rewrite する (本 mutation 自体は state のみ、persist は flush)。
+        from core.view_persistence import mark_view_dirty
+        mark_view_dirty("subjective_entries")
         print(
             f"  [memory] Trigger1: {len(to_summarize)}件→要約 "
             f"({len(to_preserve)}件のexternal保持), "
@@ -1052,4 +1057,7 @@ def maybe_compress_log(state: dict, tool_names: set = None):
         _archive_summary(meta_summary)
         state["summaries"] = [meta_summary]
         state["subjective_entries"] = state["subjective_entries"][n_raw:]
+        # F-005: Trigger2 (メタ要約) も同 mutation で persist 必須
+        from core.view_persistence import mark_view_dirty
+        mark_view_dirty("subjective_entries")
         print(f"  [memory] Trigger2: メタ要約, subj={len(state['subjective_entries'])}件, summaries=1件")
