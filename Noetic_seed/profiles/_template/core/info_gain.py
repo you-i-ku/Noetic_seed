@@ -1,10 +1,13 @@
 """Slice 3 (orchestration §3 P1 #3): information_gain / model_resolution_gain 初期版。
 
 orchestration §3 P1 #3 + §5 Slice 3。Slice 1 (subjective 永続化) + Slice 2
-(metrics_events.jsonl + 靄 A-E) の上に、Active Inference の epistemic value 系列
-+ CIG (Curiosity as Information Gain) 3 成分 + BPC (Bayesian Predictive Coding)
-precision weighting + A-MEM link generation を Noetic 6 項目に同型 mapping した
-情報利得の初期版。
+(metrics_events.jsonl + 靄 A-E) の上に、情報理論 / Bayesian 推論 / Active Inference
+数学フレームワークの数式群を Noetic 6 項目に同型 mapping した情報利得の初期版。
+
+設計原則 (memory `feedback_no_biological_mimicry` literal):
+  Noetic は生命模倣を採らない。本 module の数式参照は **数学構造のみ** であり、
+  脳のモデル / 認知科学的解釈としての参照は含まない。「脳が / 生物が こうだから
+  Noetic も」という根拠は不採用 (Codex 諮問 2026-05-09 でも同制約で第三者確認済)。
 
 設計確定事項 (2026-05-09 ゆう判断):
   ① 重み: PLAN literal どおり全部 1.0 (sub 係数も 1.0、マジックナンバー 0)
@@ -12,31 +15,39 @@ precision weighting + A-MEM link generation を Noetic 6 項目に同型 mapping
      model_resolution_gain で別個に保存、後で重み調整可能 (BP-1 smoke 後)
   ③ controller 不変 (PLAN literal「最初は測定のみ」、Slice 6 まで温存)
   ④ prev_state handoff: state["_info_gain_prev"] で必要 field のみ snapshot
+  ⑤ pe_drop 正規化: PE_NORMALIZATION_FACTOR=100.0 で /100 線形 (BP-1 hotfix
+     2026-05-09、Codex Q1 推奨確定。reflection.py:82 既存 pattern と整合)
 
-理論裏付け (literal、3 source + 1 graph 系):
-  - Active Inference (PMC 2026 Decision/Inference/Information Equivalences):
+数学的裏付け (literal、情報理論 / 確率論 / Bayesian 推論フレームワーク限定):
+  - Active Inference 数学フレームワーク (variational free energy minimization):
       G(a) = -E[ln p*(o')] - I[s'; o'|a]   (extrinsic + epistemic)
       epistemic value = E_q D_KL[q(s'|o',a) || q(s'|a)] = expected information gain
-  - CIG (Curiosity as Information Gain, clawRxiv 2603.00009):
+      (KL divergence 数学として参照、認知モデルとしての参照は不採用)
+  - Mutual Information 情報理論 (scikit-learn implementation reference):
+      MI[X;Y] = E[log(p(X,Y) / (p(X)·p(Y)))]、nats 単位、値域 [0, ∞)
+      (saturation は数学的必然ではなくスコアリング設計の任意選択)
+  - Curiosity-as-Information-Gain 数式 (CIG, clawRxiv 2603.00009 数式部分):
       r^CIG = N(s,a) · L(s,a) · C(s)
       N: ensemble mutual information (epistemic uncertainty)
       L: σ(α - mean H) noisy TV filter (aleatoric gate)
       C: exp(-β · Var[Q]) competence weight
-  - BPC (Bayesian Predictive Coding, arxiv 2503.24016):
-      F[q] = (1/2) Σ_l <(z_l - W_l f(z_{l-1}))^T Σ_l^{-1} (...)>
-      precision Σ_l^{-1} weights prediction errors → posterior variance reduction
-  - A-MEM (arxiv 2502.12110, ICLR 2025): Zettelkasten link generation + memory evolution
+      (掛け算式 = gating 意味論、Noetic は加算式 = additive utility 採用)
+  - Bayesian 推論 (確率分布の posterior precision / KL divergence 数学):
+      prediction error の絶対値減少 → posterior 分布の集中度上昇
+      (確率論の数学構造として参照、脳 predictive coding の認知モデルとしてではない)
+  - A-MEM zettelkasten link generation 数式 (arxiv 2502.12110, ICLR 2025):
+      memory entry 間の semantic similarity に基づく link 生成 + evolution
 
 Noetic 6 項目への mapping:
 
-  | 項目 | 理論 | Noetic 近似 |
+  | 項目 | 数学的近似 | Noetic 実装 |
   |---|---|---|
-  | novelty_gain | epistemic value I[s';o'|a] | 新 entry embedding の既存からの 1 - max cosine similarity |
-  | effective_change_gain | pragmatic value -H[q,p*] | last_e1 cycle 間差分 (clamp +) |
-  | memory_link_gain | A-MEM link generation + evolution | strength 合計 cycle 間 diff (新規 link の initial strength で捕捉) |
-  | world_model_resolution_gain | BPC precision + epistemic entropy | last_prediction_error 減少 + 靄 B (local_density_mean) 増加 |
-  | capability_gain | CIG C = exp(-β · Var[Q]) | tool 別 success_rate variance 縮小 + tool 多様性 delta |
-  | redundancy_penalty | CIG L (noisy TV) | 同 tool 連発 + embedding 中心固着 |
+  | novelty_gain | epistemic value I[s';o'|a] (KL divergence) | 新 entry embedding の既存からの 1 - max cosine similarity |
+  | effective_change_gain | pragmatic value -H[q,p*] (情報理論的 cross entropy) | last_e1 cycle 間差分 (clamp +) |
+  | memory_link_gain | zettelkasten link generation 数式 | strength 合計 cycle 間 diff (新規 link の initial strength で捕捉) |
+  | world_model_resolution_gain | Bayesian posterior precision 上昇 + 情報理論的 entropy 縮小 | last_prediction_error 減少 (/100 正規化) + 靄 B (local_density_mean) 増加 |
+  | capability_gain | CIG C 項 (exp(-β · Var[Q]) 数式) | tool 別 success_rate variance 縮小 + tool 多様性 delta |
+  | redundancy_penalty | CIG L 項 (noisy TV filter 数式) | 同 tool 連発 + embedding 中心固着 |
 
 統合式 (PLAN §3 #3 literal):
   info_gain = novelty + effective_change + memory_link + world_model_resolution
@@ -45,13 +56,15 @@ Noetic 6 項目への mapping:
 
 たとえ:
   Slice 2 で観測台 (metrics) と靄計器 5 個を建てた。Slice 3 は観測台に
-  「賢くなった度」計器 6 個を取り付ける工程。各計器は Active Inference /
-  CIG / BPC / A-MEM の literal 数式を Noetic embedding 空間用に近似した
-  実装。森が広がった度 / 道が立ったか / 道が太くなったか / 靄が晴れた度 /
-  道具が増えた度 / 同じ場所をぐるぐるしてないか、を毎 cycle 1 行で読める。
+  「賢くなった度」計器 6 個を取り付ける工程。各計器は情報理論 / Bayesian 推論 /
+  Active Inference の数学を Noetic embedding 空間用に近似した実装。森が
+  広がった度 / 道が立ったか / 道が太くなったか / 靄が晴れた度 / 道具が
+  増えた度 / 同じ場所をぐるぐるしてないか、を毎 cycle 1 行で読める。
 
 正典 pointer:
   WORLD_MODEL_DESIGN/NOETIC_INTEGRATED_ORCHESTRATION_PLAN.md §3 P1 #3 + §5 Slice 3
+  WORLD_MODEL_DESIGN/NOETIC_INTEGRATED_ORCHESTRATION_PLAN.md §5 Slice 6 (density_gain
+  正規化整合の Slice 6 再検討負債、BP-1 由来)
 """
 from __future__ import annotations
 
@@ -68,6 +81,8 @@ RECENT_EMB_WINDOW = 5            # redundancy: 中心固着検知窓
 CENTROID_VARIANCE_FLOOR = 0.3    # redundancy: emb mean dist 下限 (これ以下で固着)
 PREDICTOR_MIN_ATTEMPTS = 3       # capability: variance 計算最低試行数
 CYCLE_KEY = "_info_gain_prev"    # state snapshot key (state.py default に登録)
+PE_NORMALIZATION_FACTOR = 100.0  # last_prediction_error 値域 0-100 を [0,1] に揃える
+                                 # (BP-1 hotfix 2026-05-09、reflection.py:82 既存 pattern 整合)
 
 
 # ============================================================
@@ -286,21 +301,32 @@ def _memory_link_gain(links: list, prev_snapshot: dict) -> float:
 def _world_model_resolution_gain(
     state: dict, prev_snapshot: dict, fog_now: Optional[dict]
 ) -> float:
-    """BPC precision weighting + epistemic entropy 縮小の Noetic 近似。
+    """Bayesian posterior precision 上昇 + 情報理論的 entropy 縮小 の Noetic 近似。
 
-    pe_drop = max(0, prev_pe - now_pe)  ← prediction_error 減少 = posterior precision 増加 (BPC literal)
-    density_gain = max(0, now_density - prev_density)  ← 靄 B (local_density_mean) 増加 = 解像度上昇
+    pe_drop = max(0, prev_pe - now_pe) / PE_NORMALIZATION_FACTOR
+        ← prediction_error の絶対値減少 = 確率分布の集中度上昇 (Bayesian 推論
+          posterior precision の数学構造として参照)。0-100 値域の `last_prediction_error`
+          を /100 で [0, 1] スケールに揃える (reflection.py:82 既存 pattern 整合)。
+    density_gain = max(0, now_density - prev_density)
+        ← 靄 B (local_density_mean) 増加 = embedding 空間の解像度上昇 (幾何学的)
 
-    両者は独立した resolution 指標 (BPC は確率的、靄 B は幾何学的)、加算する。
+    両者は独立した resolution 指標 (確率的 vs 幾何学的)、加算する。
     どちらかが None (history 不足、初 cycle) なら 0 として扱う (defensive)。
 
-    識別力: density_gain を落とす実装で fail する (pe だけ見る誤実装)。
+    値域整合 (BP-1 hotfix 2026-05-09):
+      pe_drop と density_gain は単位が違う (誤差減少スケール vs 幾何/統計構造)。
+      Slice 3 では /100 揃えのみで Slice 6 まで温存 (Codex Q3 推奨確定、ゆう確定 2026-05-09)。
+      orchestration plan §5 Slice 6 で再検討負債として明記済。
+
+    識別力 (CLAUDE.md §5):
+      density_gain を落とす実装で fail する (pe だけ見る誤実装)。
+      大 pe drop (例 prev=80, now=10) で値域 [0, ~1] に saturate する (旧無正規化実装で fail)。
     """
     pe_now = state.get("last_prediction_error")
     pe_prev = prev_snapshot.get("last_prediction_error")
     pe_drop = 0.0
     if isinstance(pe_now, (int, float)) and isinstance(pe_prev, (int, float)):
-        pe_drop = max(0.0, float(pe_prev) - float(pe_now))
+        pe_drop = max(0.0, (float(pe_prev) - float(pe_now)) / PE_NORMALIZATION_FACTOR)
 
     density_now = (fog_now or {}).get("local_density_mean")
     density_prev = prev_snapshot.get("fog_local_density_mean")

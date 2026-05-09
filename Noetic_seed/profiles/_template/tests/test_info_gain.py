@@ -3,8 +3,10 @@
 CLAUDE.md §5 識別力 + §6 docstring 同期 遵守。各 helper / 統合 / snapshot に
 discriminating fixture を仕込んで、誤実装が fail する設計。
 
-理論裏付け literal は core/info_gain.py docstring 参照 (Active Inference / CIG /
-BPC / A-MEM の 4 source)。
+数学的裏付け literal は core/info_gain.py docstring 参照 (情報理論 / Bayesian 推論 /
+Active Inference 数学フレームワーク / CIG 数式 / A-MEM zettelkasten link 数式)。
+脳のモデルとしての参照は不採用 (`feedback_no_biological_mimicry` literal、
+BP-1 hotfix 2026-05-09)。
 
 検証範囲:
 
@@ -38,12 +40,16 @@ D. _memory_link_gain:
    D3. strength 合計下降 (decay) → 0.0
        (識別力: clamp + 忘れ実装で負値 → fail)
 
-E. _world_model_resolution_gain:
-   E1. pe 下降 + density 上昇 → 両方加点 (合計)
-   E2. pe 不変 + density 上昇 → density のみ加点
+E. _world_model_resolution_gain (BP-1 hotfix 2026-05-09 で /100 線形正規化追加):
+   E1. pe 下降 + density 上昇 → 両方加点 (合計、fixture 0-100 実値域)
+   E2. pe 不変 + density 上昇 → density のみ加点 (fixture 0-100 実値域)
        (識別力: density を読まない実装で 0 → fail)
    E3. pe None (初 cycle) → density のみで OK、pe 部分は 0 fallback
-   E4. fog_now=None → 0 fallback (defensive)
+   E4. fog_now=None → 0 fallback (defensive、fixture 0-100 実値域)
+   E5. 大 pe drop (prev=80, now=10) → /100 後 0.7 で saturate (cycle 19 spike bug 同型再現)
+       (識別力: PE_NORMALIZATION_FACTOR 落とした旧無正規化実装で 70.0 → fail)
+   E6. 値域上限 (prev=100, now=0) → 1.0、上限突破しない
+       (識別力: 正規化なし実装で 100.0 → fail)
 
 F. _capability_gain:
    F1. variance 縮小 + tool 多様性 +1 → 両方加点
@@ -113,7 +119,8 @@ def _emb(*vals):
 def test_a1_all_keys_present():
     """A1: 全 6 項目 + info_gain + model_resolution_gain が dict に含まれる。"""
     print("== A1: all keys present ==")
-    state = {"last_e1": 0.5, "last_prediction_error": 0.3,
+    # fixture 0-100 値域 (BP-1 hotfix 2026-05-09 識別力強化)
+    state = {"last_e1": 0.5, "last_prediction_error": 30.0,
              "predictor_confidence": {}, "action_ledger": []}
     prev = {}
     result = cig.compute_info_gain_components(state, prev, [], [])
@@ -131,7 +138,7 @@ def test_a2_info_gain_literal_formula():
     print("== A2: info_gain literal formula ==")
     state = {
         "last_e1": 0.7,
-        "last_prediction_error": 0.2,
+        "last_prediction_error": 20.0,  # 実 state 0-100 値域 (BP-1 hotfix 2026-05-09)
         "predictor_confidence": {
             "tool_a": {"success": 5, "fail": 0},
             "tool_b": {"success": 3, "fail": 2},
@@ -140,7 +147,7 @@ def test_a2_info_gain_literal_formula():
     }
     prev = {
         "last_e1": 0.5,  # +0.2 effective_change
-        "last_prediction_error": 0.4,  # pe_drop = 0.2
+        "last_prediction_error": 40.0,  # pe_drop = (40-20)/100 = 0.2
         "subjective_count": 0,
         "memory_links_strength_total": 0.0,
         "predictor_success_rate_var": 0.5,
@@ -165,9 +172,9 @@ def test_a2_info_gain_literal_formula():
 def test_a3_model_resolution_equals_wm_res():
     """A3: model_resolution_gain == world_model_resolution_gain (独立 metric の同値性)。"""
     print("== A3: model_resolution_gain alias ==")
-    state = {"last_e1": 0.5, "last_prediction_error": 0.1,
+    state = {"last_e1": 0.5, "last_prediction_error": 10.0,
              "predictor_confidence": {}, "action_ledger": []}
-    prev = {"last_prediction_error": 0.5,  # pe_drop = 0.4
+    prev = {"last_prediction_error": 50.0,  # pe_drop = (50-10)/100 = 0.4
             "fog_local_density_mean": 0.3}
     fog = {"local_density_mean": 0.5}  # density_gain = 0.2
     result = cig.compute_info_gain_components(state, prev, [], [], fog_now=fog)
@@ -318,28 +325,37 @@ def test_d3_strength_total_decrease_clamped():
 
 
 # ============================================================
-# E. _world_model_resolution_gain (BPC + epistemic entropy)
+# E. _world_model_resolution_gain (Bayesian posterior precision + 情報理論的 entropy)
+#
+# fixture 値域は **実 state 0-100 スケール** (BP-1 hotfix 2026-05-09):
+#   旧 fixture は 0-1 値域で書かれてて、実 state 0-100 と乖離 → cycle 19 spike
+#   bug を test 上で検出できなかった (Codex 5 周 review 見逃し真因)。
+#   識別力強化のため全 fixture を 0-100 実値域に揃える (CLAUDE.md §5 literal)。
 # ============================================================
 
 def test_e1_both_pe_drop_and_density_gain():
-    """E1: pe 下降 + density 上昇 → 両方加点 (合計)。"""
+    """E1: pe 下降 + density 上昇 → 両方加点 (合計)。
+
+    fixture 0-100 値域: pe 20 vs 50 → pe_drop_raw=30 → /100 = 0.3
+    """
     print("== E1: pe drop + density gain ==")
-    state = {"last_prediction_error": 0.2}
-    prev = {"last_prediction_error": 0.5, "fog_local_density_mean": 0.3}
+    state = {"last_prediction_error": 20.0}
+    prev = {"last_prediction_error": 50.0, "fog_local_density_mean": 0.3}
     fog = {"local_density_mean": 0.5}
     result = cig._world_model_resolution_gain(state, prev, fog)
-    expected = 0.3 + 0.2  # pe_drop + density_gain
+    expected = 0.3 + 0.2  # pe_drop (30/100) + density_gain (0.5-0.3)
     return _assert(abs(result - expected) < 1e-5, f"sum {expected}: {result}")
 
 
 def test_e2_density_only_pe_unchanged():
     """E2: pe 不変 + density 上昇 → density のみ加点。
 
+    fixture 0-100 値域: pe 40 vs 40 → pe_drop_raw=0 → /100 = 0
     識別力: density を読まない実装で 0 → fail。
     """
     print("== E2: density-only gain ==")
-    state = {"last_prediction_error": 0.4}
-    prev = {"last_prediction_error": 0.4, "fog_local_density_mean": 0.3}
+    state = {"last_prediction_error": 40.0}
+    prev = {"last_prediction_error": 40.0, "fog_local_density_mean": 0.3}
     fog = {"local_density_mean": 0.6}
     result = cig._world_model_resolution_gain(state, prev, fog)
     return _assert(abs(result - 0.3) < 1e-5, f"density only: {result}")
@@ -356,12 +372,50 @@ def test_e3_pe_none_initial_cycle():
 
 
 def test_e4_fog_none_defensive():
-    """E4: fog_now None → density 部分 0 fallback。"""
+    """E4: fog_now None → density 部分 0 fallback。
+
+    fixture 0-100 値域: pe 10 vs 30 → pe_drop_raw=20 → /100 = 0.2
+    """
     print("== E4: fog None defensive ==")
-    state = {"last_prediction_error": 0.1}
-    prev = {"last_prediction_error": 0.3}
+    state = {"last_prediction_error": 10.0}
+    prev = {"last_prediction_error": 30.0}
     result = cig._world_model_resolution_gain(state, prev, None)
     return _assert(abs(result - 0.2) < 1e-5, f"pe drop only: {result}")
+
+
+def test_e5_large_pe_drop_saturates_to_unit_range():
+    """E5: 大 pe drop で値域 [0, ~1] に saturate (BP-1 hotfix 2026-05-09 の核 test)。
+
+    cycle 19 spike bug の同型再現: prev=80, now=10 → pe_drop_raw=70。
+    旧無正規化実装は 70.0 を返す = info_gain 全体を支配する spike 発生。
+    新実装は /100 後 0.7 = [0, 1] 範囲内で saturate、6 成分加算式の単位整合維持。
+
+    識別力: PE_NORMALIZATION_FACTOR を落とす実装 (生差分のまま) で 70.0 → fail。
+    BP-1 cycle 19 で観察された world_model_resolution_gain=34.0003 の同型 case。
+    """
+    print("== E5: large pe drop saturates ==")
+    state = {"last_prediction_error": 10.0}
+    prev = {"last_prediction_error": 80.0}
+    result = cig._world_model_resolution_gain(state, prev, None)
+    return _assert(
+        0.0 <= result <= 1.0 and abs(result - 0.7) < 1e-5,
+        f"saturate to [0,1]: {result} (expected 0.7)",
+    )
+
+
+def test_e6_max_pe_drop_at_value_range_boundary():
+    """E6: 値域上限 (pe 100 → 0) で結果が 1.0、上限突破しない。
+
+    識別力: 正規化なし実装で 100.0 → fail。
+    """
+    print("== E6: max pe drop boundary ==")
+    state = {"last_prediction_error": 0.0}
+    prev = {"last_prediction_error": 100.0}
+    result = cig._world_model_resolution_gain(state, prev, None)
+    return _assert(
+        abs(result - 1.0) < 1e-5,
+        f"upper bound 1.0: {result}",
+    )
 
 
 # ============================================================
@@ -500,7 +554,7 @@ def test_h1_snapshot_all_fields():
     print("== H1: snapshot all fields ==")
     state = {
         "last_e1": 0.6,
-        "last_prediction_error": 0.25,
+        "last_prediction_error": 25.0,  # 実 state 0-100 値域
         "predictor_confidence": {
             "a": {"success": 5, "fail": 0},
             "b": {"success": 3, "fail": 2},
@@ -566,7 +620,7 @@ def test_i1_round_trip():
     # Cycle N: 1 entry のみ
     state_n = {
         "last_e1": 0.5,
-        "last_prediction_error": 0.4,
+        "last_prediction_error": 40.0,  # 実 state 0-100 値域
         "predictor_confidence": {},
         "action_ledger": [],
     }
@@ -576,7 +630,7 @@ def test_i1_round_trip():
     # Cycle N+1: 新 entry 追加 (直交)、newest first なので先頭に prepend
     state_np1 = {
         "last_e1": 0.5,
-        "last_prediction_error": 0.4,
+        "last_prediction_error": 40.0,  # pe 不変 (cycle N と同値、pe_drop=0)
         "predictor_confidence": {},
         "action_ledger": [],
     }
@@ -609,7 +663,7 @@ def test_j1_metrics_event_includes_info_gain():
         "last_e2": 0.5,
         "last_e3": 0.5,
         "last_e4": 0.5,
-        "last_prediction_error": 0.2,
+        "last_prediction_error": 20.0,  # 実 state 0-100 値域
         "energy": 50.0,
         "entropy": 0.65,
         "pressure": 0.0,
@@ -666,7 +720,7 @@ def test_j2_emit_updates_prev_snapshot():
             "run_id": "test-run",
             "session_id": "test-sess",
             "last_e1": 0.5,
-            "last_prediction_error": 0.3,
+            "last_prediction_error": 30.0,  # 実 state 0-100 値域
             "predictor_confidence": {},
             "action_ledger": [],
             "_info_gain_prev": {},  # 初期 empty
@@ -725,6 +779,8 @@ def run_all():
         test_e2_density_only_pe_unchanged,
         test_e3_pe_none_initial_cycle,
         test_e4_fog_none_defensive,
+        test_e5_large_pe_drop_saturates_to_unit_range,
+        test_e6_max_pe_drop_at_value_range_boundary,
         test_f1_variance_drop_and_diversity,
         test_f2_diversity_only,
         test_f3_empty_predictor,
