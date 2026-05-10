@@ -172,6 +172,12 @@ def _resolve_elyth_feedback(notifs: list, state: dict) -> bool:
                         m = _re.search(r'(\d+)', str(le.get("e2", "")))
                         if m:
                             le["e2"] = f"{min(100, int(m.group(1)) + 40)}%"
+                            # Slice 1 hotfix 2 (2026-05-10): subjective_entries は
+                            # materialized view、save_state は dirty view だけ
+                            # JSONL に flush するため明示的に dirty mark しないと
+                            # 再起動後 E2 修正が消える (別 review P1-A 指摘)。
+                            from core.view_persistence import mark_view_dirty
+                            mark_view_dirty("subjective_entries")
                         break
                 resolved_any = True
                 break
