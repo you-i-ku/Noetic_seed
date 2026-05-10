@@ -1131,6 +1131,33 @@ def main():
         except Exception as e:
             print(f"  [memory_links] prune skip (error: {e})")
 
+        # Slice 5 (orchestration §5 Slice 5): Goal Shadow Observer
+        # 暗黙 goal を固定せず影として観測。controller 不変、観測のみ。
+        # 処理順 (Codex 追加指摘 #1): delta 計算 → update → snapshot 更新 → emit
+        # snapshot を先に更新すると delta が常に 0 になる silent bug を防ぐ。
+        # reflect 継続原則: 例外で goal_shadow 失敗しても cycle 全体は止めない。
+        try:
+            from core.goal_shadow import update_goal_shadows
+            from core.embedding import (
+                _embed_sync, cosine_similarity, is_vector_ready,
+            )
+            current_files_count = len(state.get("files_written", []) or [])
+            prev_files_count = int(state.get("_files_written_count_prev", current_files_count))
+            files_delta = max(0, current_files_count - prev_files_count)
+            current_subj_count = len(state.get("subjective_entries", []) or [])
+            subj_count_prev = int(state.get("_subjective_entries_count_prev", current_subj_count))
+            update_goal_shadows(
+                state, cid,
+                files_written_delta=files_delta,
+                subj_count_prev=subj_count_prev,
+                embed_fn=_embed_sync if is_vector_ready() else None,
+                cosine_fn=cosine_similarity,
+            )
+            state["_files_written_count_prev"] = current_files_count
+            state["_subjective_entries_count_prev"] = current_subj_count
+        except Exception as e:
+            print(f"  [goal_shadow] update skip (error: {e})")
+
         # Slice 2: cycle metrics emit (cycle 末、save_state 直前)
         # orchestration §② ゆう確定 emit timing。controller 不変、測定のみ。
         # reflect 継続原則: 例外で metrics 失敗しても cycle 全体は止めない。

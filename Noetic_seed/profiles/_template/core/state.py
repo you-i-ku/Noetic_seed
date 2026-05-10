@@ -218,14 +218,34 @@ def load_state() -> dict:
             # 段階13 Phase 0.1.B: jsonl が source of truth、in-memory view は
             # 起動時に必ず rebuild (state.json 内の値は信頼せず上書き、PLAN §18-2)
             _rebuild_views_from_jsonl(data)
+            # Slice 5 (orchestration §5 Slice 5): Goal Shadow Observer
+            # 観測のみ、controller 不変 (Slice 6 で resonance multiplier 弱接続予定)
+            # Codex 3 周目 P2 fix (2026-05-10): snapshot init は _rebuild_views_from_jsonl
+            # の後で行う必要がある。rebuild が subjective_entries を上書きするため、
+            # rebuild 前に snapshot 取ると state.json なし / stale 復旧パスで 0 (or stale)
+            # 値となり、次 cycle で全履歴が "新規 evidence" として goal_shadow 量産される
+            # silent bug を防ぐ。既存 state.json で前 cycle 末の値を継承してる場合は
+            # setdefault でスキップ (in_data 判定により尊重)。
+            if "goal_shadows" not in data:
+                data["goal_shadows"] = []
+            if "_files_written_count_prev" not in data:
+                data["_files_written_count_prev"] = len(data.get("files_written", []) or [])
+            if "_subjective_entries_count_prev" not in data:
+                data["_subjective_entries_count_prev"] = len(data.get("subjective_entries", []) or [])
             return data
         except json.JSONDecodeError:
             pass
     from core.world_model import init_world_model
-    fresh = {"raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
+    fresh = {"raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}, "goal_shadows": [], "_files_written_count_prev": 0, "_subjective_entries_count_prev": 0}
     # 段階13 Phase 0.1.B: state.json が無くても jsonl があれば rebuild
     # (state.json 削除 + memory/ 残存ケースの safety net)
     _rebuild_views_from_jsonl(fresh)
+    # Slice 5 Codex 3 周目 P2 fix: rebuild 後に snapshot を実 jsonl 件数で更新。
+    # state.json 不在 + jsonl に履歴残存ケースで _subjective_entries_count_prev=0
+    # のままだと、次 cycle で全履歴を "新規 evidence" として goal_shadow 量産する
+    # silent bug を防ぐ (load_state 経路と同精神、対称性維持)。
+    fresh["_files_written_count_prev"] = len(fresh.get("files_written", []) or [])
+    fresh["_subjective_entries_count_prev"] = len(fresh.get("subjective_entries", []) or [])
     return fresh
 
 
