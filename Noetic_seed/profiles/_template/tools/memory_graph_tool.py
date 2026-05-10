@@ -39,7 +39,7 @@ from typing import Optional
 
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.memory import UNTAGGED_NETWORK, list_records
-from core.memory_links import list_links, LINK_SCAN_LIMIT
+from core.memory_links import list_links, LINK_SCAN_LIMIT, get_link_current_strength
 from core.state import load_state
 from core.tag_registry import list_registered_tags
 
@@ -145,22 +145,37 @@ def _compute_self_to_memory_edges(virtual_entries: list, all_memory: list,
     return edges
 
 
-def _compute_memory_edges() -> list:
+def _compute_memory_edges(current_cycle: Optional[int] = None) -> list:
     """memory ↔ memory edges を memory_links.jsonl から取得 (永続 link).
 
     Step 0.2 MVP: 全 link を flatten して返す。depth/top_n 制御は Phase 1+ で
     follow_links 経路と統合検討。
+
+    v0.5 Phase 5 Slice 4 F-003: edge dict に link-strength telemetry の 4 field
+    を additive expose (raw strength + lazy-decayed strength + usage_count +
+    last_used_cycle)。EMA 同型の strength update (11-D Phase 3、情報理論 / Active
+    Inference 数学フレームワーク表現) を view 層から観察可能にする。既存
+    ``confidence`` は保持、view-layer 拡張のみで graph material 不変。
+    decayed_strength は current_cycle 経由で計算、None 時は raw strength と同値
+    (Phase 2 以前 link は confidence にフォールバックする backward compat 経路、
+    memory_links._link_strength を get_link_current_strength 経由で集約)。
     """
     edges = []
     for l in list_links(limit=LINK_SCAN_LIMIT):
         lt = l.get("link_type", "none")
         if lt == "none":
             continue
+        raw_strength = float(l.get("strength", l.get("confidence", 0.0)))
+        decayed = float(get_link_current_strength(l, current_cycle))
         edges.append({
             "from": l.get("from_id", ""),
             "to": l.get("to_id", ""),
             "relation": lt,
             "confidence": float(l.get("confidence", 0.0)),
+            "strength": raw_strength,
+            "decayed_strength": decayed,
+            "usage_count": int(l.get("usage_count", 0)),
+            "last_used_cycle": l.get("last_used_cycle"),
         })
     return edges
 
@@ -252,7 +267,9 @@ def _memory_graph(args: dict) -> str:
 
     state = load_state()
     all_memory = _list_all_memory_entries()
-    memory_edges = _compute_memory_edges()
+    # v0.5 Phase 5 Slice 4 F-003: state.cycle_id を渡して decayed_strength を計算可能にする
+    current_cycle = state.get("cycle_id") if isinstance(state, dict) else None
+    memory_edges = _compute_memory_edges(current_cycle=current_cycle)
     trace = _compute_trace(all_memory, memory_edges)
 
     output: dict = {"view": view, "depth": depth}

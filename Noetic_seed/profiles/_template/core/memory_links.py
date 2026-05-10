@@ -94,6 +94,30 @@ def _apply_lazy_decay(link: dict, current_cycle: int) -> float:
     return strength * ((1.0 - PHYSARUM_BETA) ** elapsed)
 
 
+def get_link_current_strength(link: dict,
+                              current_cycle: Optional[int] = None) -> float:
+    """link の現在 strength を取得 (current_cycle 指定時は lazy decay 適用後)。
+
+    v0.5 Phase 5 Slice 4 F-003: memory_graph view 層で decayed_strength を
+    露出するための公開 API。私的関数 (_link_strength / _apply_lazy_decay) の
+    呼び分けを集約、view-layer から module 越境せず利用可能にする。
+
+    Args:
+        link: link entry dict
+        current_cycle: 現 cycle 番号。None なら raw strength を返す。
+
+    Returns:
+        current_cycle 指定時は lazy decay 適用後の strength (read-only、link 不変)、
+        None 時は raw strength。
+    """
+    if current_cycle is not None:
+        try:
+            return _apply_lazy_decay(link, current_cycle)
+        except Exception:
+            pass
+    return _link_strength(link)
+
+
 def _link_file() -> Path:
     MEMORY_DIR.mkdir(exist_ok=True)
     return MEMORY_DIR / LINK_FILE_NAME
@@ -214,13 +238,18 @@ def update_link_strength_used(link_id: str,
     3. last_used / last_used_cycle / usage_count を update
     4. memory_links.jsonl に書き戻し
 
-    11-D Phase 4 (Predictive coding modulator):
+    11-D Phase 4 (Predictive coding modulator) + Slice 4 F-001 production wiring:
     - prediction_error (0.0-1.0) が指定されたら strength up を modulate:
       * strength_delta = α * max(0.0, 1.0 - prediction_error)
       * 予測誤差小 (成功) → modulator 1.0 → α そのまま
       * 予測誤差大 (失敗) → modulator 0.0 → strength up ゼロ
     - 段階10 経路 (entropy.record_ec_prediction_error) との接続点。
       values は 0.0-1.0 severity スケールでそのまま使える (clamp あり)
+    - production timing = **前 cycle modulation** (Slice 4 設計確定):
+      retrieval は cycle 序盤、prediction_error history 書込は cycle 末 (main.py)
+      のため、retrieval 時の history[-1] は前 cycle の error。RL/Active Inference
+      の TD error / FEP 学習則 (= 過去誤差で現在 policy 更新) の標準パターンと
+      整合的。同 cycle modulation 化は cycle 構造改修必要のため採用せず。
 
     Args:
         link_id: 対象 link の id
@@ -472,6 +501,103 @@ def generate_links_for(new_entry: dict, *,
         link_entry = _build_link_entry(new_entry, cand, verdict)
         _append_link(link_entry)
         created.append(link_entry)
+    return created
+
+
+# ============================================================
+# v0.5 Phase 5 Slice 4 F-002: co_activation 構造的生成 hook
+# ============================================================
+# 11-D Phase 4 で should_explore_new_links (trigger boolean のみ) を実装、
+# 本 Slice で「実発火 = retrieved memory pair から co_activation link を
+# 構造的生成」を配線。LLM 通さず、「同時 retrieval された」事実を構造的に記録。
+# semantic / supporting 自動発火は次 pass (PLAN_CODE_TRACEABILITY §3.1
+# F-002 conservative first pass literal)。
+
+CO_ACTIVATION_INITIAL_CONFIDENCE = 0.7      # LINK_CONFIDENCE_THRESHOLD と整合 (Codex P1 fix
+                                              # 2026-05-10): 構造的事実 (同時 retrieval) は LLM
+                                              # judge 推測より信頼性高、0.7 = follow_links 走査
+                                              # 閾値以上で retrieval 経路から実際に参照される。
+                                              # Physarum decay 余地 (1.0 cap まで 0.3) 確保。
+CO_ACTIVATION_MAX_PAIRS_PER_CALL = 10        # 1 回呼出で生成する link 上限 (cost 制御)
+CO_ACTIVATION_TOP_N_MEMORIES = 5             # pair 候補 memory 上位件数 (5C2 = 10 pair)
+
+
+def generate_co_activation_links(memories: list,
+                                 current_cycle: Optional[int] = None,
+                                 *,
+                                 max_pairs: int = CO_ACTIVATION_MAX_PAIRS_PER_CALL,
+                                 top_n: int = CO_ACTIVATION_TOP_N_MEMORIES) -> list:
+    """retrieval で同時取得された memory 群から co_activation link を構造的生成。
+
+    11-D Phase 4 → Slice 4 F-002: should_explore_new_links が True の時 (high
+    prediction error) に呼ばれる hook。LLM 通さず、構造的事実 (= 同時 retrieval
+    されたペア) として co_activation link を memory_links.jsonl に append。
+
+    co_activation は対称的関係 (= 同時 retrieval された事実は方向不変)、ただし
+    既存 follow_links は outgoing しか辿らないため、生成時に **双方向 2 本**
+    (A→B + B→A) を同時 append してデータ層で対称性を表現する (Codex Slice 4
+    review P1-3 ゆう案採用、2026-05-10)。dedup は frozenset で対称的に集約、
+    1 pair = 2 link として扱う (max_pairs は pair 単位 cap)。strength up は
+    別経路 update_link_strength_used で各 link 個別に走る (対称関係の対称強化)。
+
+    Args:
+        memories: retrieval 結果の memory entry list (network_mems 上位想定)
+        current_cycle: 現 cycle (link last_used_cycle / reason に記録)
+        max_pairs: 本呼出で生成する pair 上限 (cost 制御、1 pair = 2 link)
+        top_n: 生成対象とする memory 上位件数 (top_n × (top_n-1) / 2 pair)
+
+    Returns:
+        生成した link entry list (1 pair につき 2 link)
+    """
+    if not memories or len(memories) < 2:
+        return []
+    candidate_mems = memories[:top_n]
+    existing_pairs = set()
+    for l in list_links(limit=LINK_SCAN_LIMIT):
+        if l.get("link_type") == "co_activation":
+            f = l.get("from_id", "")
+            t = l.get("to_id", "")
+            if f and t:
+                existing_pairs.add(frozenset((f, t)))
+    from core.perspective import default_self_perspective
+    created = []
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    perspective = default_self_perspective()
+    pairs_created = 0
+    for i in range(len(candidate_mems)):
+        if pairs_created >= max_pairs:
+            break
+        for j in range(i + 1, len(candidate_mems)):
+            if pairs_created >= max_pairs:
+                break
+            id_a = candidate_mems[i].get("id", "")
+            id_b = candidate_mems[j].get("id", "")
+            if not id_a or not id_b or id_a == id_b:
+                continue
+            pair_key = frozenset((id_a, id_b))
+            if pair_key in existing_pairs:
+                continue
+            # 双方向 2 本 (A→B + B→A) 同時 append (P1-3 ゆう案、データ層対称性)
+            for from_id, to_id in ((id_a, id_b), (id_b, id_a)):
+                link_entry = {
+                    "id": f"link_{uuid.uuid4().hex[:12]}",
+                    "from_id": from_id,
+                    "to_id": to_id,
+                    "link_type": "co_activation",
+                    "confidence": CO_ACTIVATION_INITIAL_CONFIDENCE,
+                    "strength": CO_ACTIVATION_INITIAL_CONFIDENCE,
+                    "perspective": perspective,
+                    "created_at": now,
+                    "last_used": now,
+                    "last_used_cycle": int(current_cycle) if current_cycle is not None else None,
+                    "usage_count": 0,
+                    "reason": (f"co-retrieved at cycle {current_cycle}"
+                               if current_cycle is not None else "co-retrieved"),
+                }
+                _append_link(link_entry)
+                created.append(link_entry)
+            existing_pairs.add(pair_key)
+            pairs_created += 1
     return created
 
 

@@ -534,9 +534,25 @@ def get_relevant_memories(
 
     # 段階11-C G-lite Phase 1: link 経由の近傍 memory を merge (opt-in)
     # 段階11-D Phase 3 Step 3.3: 経由 link の strength を update (Physarum rule)
+    # v0.5 Phase 5 Slice 4 F-001: EC prediction error を modulator として渡す
+    # (Phase 4 で signature 拡張済、本 Slice で production wiring)。
+    # state["prediction_error_history_ec"] の **前 cycle 末尾値 (latest
+    # completed-cycle value)** を使用、空なら None で modulator なし fallback
+    # (Phase 4 既存 graceful 経路、E2 fallback は feedback_predicted_metric_e2_vs_ec
+    # literal で EC 優先のため案 A)。
+    #
+    # timing = **前 cycle modulation** (Codex Slice 4 review P1-1 確認 2026-05-10):
+    # cycle 構造上 retrieval は cycle 序盤、prediction_error history 書込は cycle
+    # 末 (main.py:1080)。つまり今 cycle の retrieval は前 cycle の error を
+    # modulator として使う。これは RL/Active Inference 文献の標準パターン
+    # (TD error / FEP 学習則 = 過去誤差 → 現在 policy 更新) と整合、cycle 1
+    # bootstrap も history=[] → None graceful で自然。同 cycle modulation 化は
+    # cycle 構造改修 + bootstrap special case 必要のため採用しない。
     if use_links and network_mems:
         from core.memory_links import follow_links, update_link_strength_used
         current_cycle = state.get("cycle_id") if isinstance(state, dict) else None
+        ec_history = state.get("prediction_error_history_ec", []) if isinstance(state, dict) else []
+        current_pe = float(ec_history[-1]) if ec_history else None
         for origin_mem in network_mems[:link_top_n]:
             origin_id = origin_mem.get("id")
             if not origin_id:
@@ -562,11 +578,42 @@ def get_relevant_memories(
                 link_id = via_link.get("id")
                 if link_id:
                     try:
-                        update_link_strength_used(link_id, current_cycle=current_cycle)
+                        update_link_strength_used(link_id,
+                                                  current_cycle=current_cycle,
+                                                  prediction_error=current_pe)
                     except Exception as e:
                         print(f"  [memory_links] strength update skip (error: {e})")
                 merged.append(entry)
                 seen_ids.add(eid)
+
+        # v0.5 Phase 5 Slice 4 F-002: high EC error 時、retrieved memory 群
+        # から co_activation link を構造的生成 (LLM 通さず、Phase 4 trigger
+        # 関数経由)。current_pe が None (history 空) の時は trigger 評価 skip。
+        # 候補は network_mems 上位 top_n のみ (external mem は混入させない、
+        # PLAN_CODE_TRACEABILITY §3.1 F-002 literal「conservative first pass」
+        # + Phase 4 status §5-2 判断 I「実発火は smoke 観察後判断」整合)。
+        #
+        # P1-2 fix (Codex Slice 4 review 2026-05-10): current_pe は
+        # state['prediction_error_history_ec'][-1] = history tail なので、
+        # should_explore_new_links に state 直渡しすると tail 自身が percentile
+        # threshold 計算に self-include されて high-error trigger が抑制される。
+        # tail 抜きの shallow view を渡して current_pe を独立評価する。
+        if current_pe is not None and len(network_mems) >= 2:
+            try:
+                from core.memory_links import (
+                    should_explore_new_links,
+                    generate_co_activation_links,
+                )
+                ec_history_for_explore = ec_history[:-1] if ec_history else []
+                state_for_explore = dict(state) if isinstance(state, dict) else {}
+                state_for_explore["prediction_error_history_ec"] = ec_history_for_explore
+                if should_explore_new_links(state_for_explore, current_pe):
+                    generate_co_activation_links(
+                        network_mems,
+                        current_cycle=current_cycle,
+                    )
+            except Exception as e:
+                print(f"  [memory_links] co_activation hook skip (error: {e})")
 
     # 段階13 Phase 1: subjective entry 直近 N 件を kind='subjective' marker で append。
     # PLAN §21-6 (d) literal「結果 list に subj entry も append」+ 案 b (concept-perception
