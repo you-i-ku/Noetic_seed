@@ -213,6 +213,16 @@ def load_state() -> dict:
                 data["prediction_error_history_e2"] = []
             if "prediction_error_history_ec" not in data:
                 data["prediction_error_history_ec"] = []
+            # Slice 6.5 Step 6 (PLAN §5.4): preference distribution C の動的更新 state
+            # _efe_self_confidence: update_self 時の per-key confidence 蓄積 (NAME_KEY 除外)
+            # _efe_C: compute_C_from_self の返り値 dict、初回 update_self で構築、それまで None
+            # _efe_C_update_cycle: 最後に C 更新した cycle_id (未更新は -1 sentinel)
+            if "_efe_self_confidence" not in data:
+                data["_efe_self_confidence"] = {}
+            if "_efe_C" not in data:
+                data["_efe_C"] = None
+            if "_efe_C_update_cycle" not in data:
+                data["_efe_C_update_cycle"] = -1
             # 段階11-A Step 5: disposition (flat) → dispositions (perspective-keyed) 移行
             _migrate_disposition_v11a(data)
             # 段階13 Phase 0.1.B: jsonl が source of truth、in-memory view は
@@ -222,7 +232,7 @@ def load_state() -> dict:
         except json.JSONDecodeError:
             pass
     from core.world_model import init_world_model
-    fresh = {"raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "dispositions": {"self": {}}}
+    fresh = {"raw_events": [], "subjective_entries": [], "self": {"name": _name}, "energy": 50, "summaries": [], "cycle_id": 0, "tool_level": 0, "voluntary_memory_store_count": 0, "files_read": [], "files_written": [], "last_notification_fetch": "", "pressure": 0.0, "last_e1": 0.5, "last_e2": 0.5, "last_e3": 0.5, "last_e4": 0.5, "entropy": 0.65, "drives_state": {}, "world_model": init_world_model(), "predictor_confidence": {}, "prediction_error_history_e2": [], "prediction_error_history_ec": [], "_efe_self_confidence": {}, "_efe_C": None, "_efe_C_update_cycle": -1, "dispositions": {"self": {}}}
     # 段階13 Phase 0.1.B: state.json が無くても jsonl があれば rebuild
     # (state.json 削除 + memory/ 残存ケースの safety net)
     _rebuild_views_from_jsonl(fresh)

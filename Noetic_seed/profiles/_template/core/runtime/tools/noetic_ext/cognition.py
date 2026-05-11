@@ -49,7 +49,10 @@ def _build_specs(tools_dict: dict) -> list:
             name="update_self",
             description=(
                 "自己モデル (state.self) の属性を更新する。key-value pair で記録、"
-                "name は一度確定すると変更不可。"
+                "name は一度確定すると変更不可。Slice 6.5 Step 6 (PLAN §5.4) で "
+                "confidence 引数追加: 該当 key の自分の納得度 [0.0, 1.0] で、preference "
+                "distribution C (案 ④ identity-anchored、vMF mixture) の concentration κ "
+                "に直接反映される (高 conf → 鋭い peak / 低 conf → 広い peak)。"
             ),
             input_schema={
                 "type": "object",
@@ -61,6 +64,17 @@ def _build_specs(tools_dict: dict) -> list:
                     "value": {
                         "type": "string",
                         "description": "格納する値",
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": (
+                            "この属性への確信度 [0.0, 1.0] (省略時 0.7)。"
+                            "高い値 = 自分で深く納得してる側面、preference 分布で鋭い peak。"
+                            "低い値 = 自認はしてるが実感薄い側面、preference 分布で広い peak。"
+                            "key='name' の場合この引数は無視される (name は不変、confidence 不問)。"
+                        ),
+                        "minimum": 0.0,
+                        "maximum": 1.0,
                     },
                     **_approval_props(),
                 },

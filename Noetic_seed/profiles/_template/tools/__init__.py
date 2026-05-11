@@ -13,7 +13,7 @@ from tools.world_fact_view_tool import _world_fact_view
 from tools.reboot import _reboot
 
 TOOLS = {
-    "update_self":  {"desc": "自己モデルを更新する。引数: key=キー名 value=値", "func": lambda args: _update_self(args.get("key", ""), args.get("value", ""))},
+    "update_self":  {"desc": "自己モデルを更新する。引数: key=キー名 value=値 [confidence=確信度 0.0-1.0 (省略時 0.7、key='name' では無視)]", "func": lambda args: _update_self(args.get("key", ""), args.get("value", ""), args.get("confidence"))},
     "wait":         {"desc": "待機。dismiss=pending_idで未対応事項を明示的に却下できる", "func": _wait_or_dismiss},
     "x_timeline":   {"desc": "Xのタイムライン取得。引数: [count=件数] [tab=following/recommend デフォルトfollowing]", "func": _x_timeline},
     "x_search":     {"desc": "Xでキーワード検索。引数: query=キーワード [count=件数]", "func": _x_search},

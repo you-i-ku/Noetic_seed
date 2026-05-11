@@ -196,7 +196,17 @@ def _listen_audio(args: dict) -> str:
     return f"{formatted}\nソース: {rel}"
 
 
-def _update_self(key: str, value: str) -> str:
+def _update_self(key: str, value: str, confidence=None) -> str:
+    """自己モデル更新。
+
+    Slice 6.5 Step 6 (PLAN §5.4): 案 b signature 拡張で confidence 引数追加。
+    update_self 実行時に state["_efe_self_confidence"] + state["_efe_C"] +
+    state["_efe_C_update_cycle"] を hook で同期更新 (preference distribution C を
+    案 ④ identity-anchored で動的更新)。
+
+    NAME_KEY exception: key="name" は不変層、confidence 引数は silently ignore
+    (NAME_KEY は _efe_self_confidence に含めない、_efe_C source からも自動除外)。
+    """
     if not key:
         return "エラー: keyが空です"
     state = load_state()
@@ -214,6 +224,26 @@ def _update_self(key: str, value: str) -> str:
     state["self"][key] = value
     ds = state.setdefault("drives_state", {})
     ds["last_self_update"] = time.time()
+
+    # Slice 6.5 Step 6 (PLAN §5.4 + §11.2.3 v1.1): preference distribution C 動的更新 hook
+    # NAME_KEY は exception (confidence 不問、_efe_self_confidence 不追加、_efe_C source 自動除外)
+    from core.preference_distribution import (
+        compute_C_from_self,
+        DEFAULT_CONFIDENCE,
+        NAME_KEY,
+    )
+    if key != NAME_KEY:
+        state.setdefault("_efe_self_confidence", {})
+        conf_val = DEFAULT_CONFIDENCE if confidence is None else float(confidence)
+        state["_efe_self_confidence"][key] = conf_val
+    # NAME_KEY の場合: confidence 引数は無視 (silently ignore、ToolSpec docstring 記載済)
+
+    state["_efe_C"] = compute_C_from_self(
+        state.get("self", {}),
+        self_confidence=state.get("_efe_self_confidence", {}),
+    )
+    state["_efe_C_update_cycle"] = state.get("cycle_id", 0)
+
     save_state(state)
     return f"self[{key}] = {value}"
 
