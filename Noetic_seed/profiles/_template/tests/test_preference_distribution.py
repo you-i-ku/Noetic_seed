@@ -399,3 +399,79 @@ def test_vmf_graceful_when_all_means_none():
         assert log_p(x) == pytest.approx(expected)
     finally:
         pd_mod.is_vector_ready = original_ready
+
+
+# ========= Step 7 (§5.3 bootstrap 遷移) test 2 件 =========
+
+
+def test_C_transition_empty_to_unimodal_to_multimodal(mock_embedding):
+    """case H (Step 7 §5.3 literal): 空 → 単峰 → 多峰 連続遷移 (bootstrap handling)。
+
+    PLAN §5.3 literal:
+        - state.self 空 → 均一分布 C (C_entropy = uniform sentinel、n_components=0)
+        - state.self に key 追加 → Step 1 compute_C_from_self で C 構築
+        - 均一 → 単峰 → 多峰 の遷移サポート
+
+    識別力: 各 stage で n_components / C_entropy / source_keys が単調に変化。
+    想定誤実装 fail: 空 case ハンドルなし → empty case で C_entropy=0 になり
+    「単峰 < 空」inequality が成り立たず assert fail。
+    """
+    # Stage 0: clean profile (空 state.self) → 均一 sentinel
+    C0 = compute_C_from_self({}, self_confidence={})
+    assert C0["n_components"] == 0
+    assert C0["source_keys"] == []
+
+    # Stage 1: 1 key 追加 → 単峰
+    C1 = compute_C_from_self(
+        {"identity": "I observe"}, self_confidence={"identity": 0.7}
+    )
+    assert C1["n_components"] == 1
+    assert C1["source_keys"] == ["identity"]
+    assert C1["C_entropy"] < C0["C_entropy"]  # 均一 sentinel より集中 (preference 強)
+
+    # Stage 2: 2 key 追加 → 多峰
+    C2 = compute_C_from_self(
+        {"identity": "I observe", "preferences": "diverse exploration"},
+        self_confidence={"identity": 0.7, "preferences": 0.7},
+    )
+    assert C2["n_components"] == 2
+    assert set(C2["source_keys"]) == {"identity", "preferences"}
+    # 多峰は単峰より entropy 高い (mixing weight 項 -Σ w log w 追加)
+    assert C2["C_entropy"] > C1["C_entropy"]
+    # 識別力: 単調順序 C0 > C2 > C1 (uniform > multimodal > unimodal)
+    assert C0["C_entropy"] > C2["C_entropy"] > C1["C_entropy"]
+
+
+def test_estimate_density_transition_empty_to_vmf_mixture(mock_embedding):
+    """case I (Step 7 estimate_density 拡張): 空 → 単峰 vMF → 多峰 vMF 遷移検証。
+
+    識別力: 各 stage で log_p の挙動が「uniform 定数 → mean 方向 peak → 複数 peak」と
+    遷移、bootstrap handling が estimate_density 側にも一貫している (uniform sentinel が
+    estimate_density の側でも縮退正しい)。
+    """
+    # Stage 0: 空 → uniform sentinel (どの x でも同じ log_p)
+    C0 = compute_C_from_self({}, self_confidence={})
+    log_p0 = estimate_density(C0["components"], method="vmf")
+    x = _unit_vec(0)
+    y = _unit_vec(100)
+    assert log_p0(x) == log_p0(y)
+    uniform_val = log_p0(x)
+
+    # Stage 1: 単峰 vMF → mean 方向で uniform より高い (concentration あり)
+    C1 = compute_C_from_self(
+        {"identity": "X"}, self_confidence={"identity": 0.7}
+    )
+    log_p1 = estimate_density(C1["components"], method="vmf")
+    mean1 = C1["components"][0]["mean"]
+    assert log_p1(mean1) > uniform_val
+
+    # Stage 2: 多峰 vMF → 各 component mean 方向で uniform より高い
+    C2 = compute_C_from_self(
+        {"identity": "X", "role": "Y"},
+        self_confidence={"identity": 0.7, "role": 0.7},
+    )
+    log_p2 = estimate_density(C2["components"], method="vmf")
+    mean2_a = C2["components"][0]["mean"]
+    mean2_b = C2["components"][1]["mean"]
+    assert log_p2(mean2_a) > uniform_val
+    assert log_p2(mean2_b) > uniform_val
