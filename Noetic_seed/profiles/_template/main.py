@@ -1201,7 +1201,14 @@ def main():
             tick_entropy(state, measured_entropy=_measured, behavioral_entropy=_behavioral)
             signals = calc_pressure_signals(state, spiral=_spiral)
             signal_total = sum(signals.values())
-            pressure = pressure * pp.get("decay", 0.97) + signal_total
+            # hotfix 2026-05-12 (Slice 6.5 と独立): clock_base 配線。config.py:71 で
+            # DEFAULT_PRESSURE_PARAMS に "clock_base": 0.15 が定義されてたが、本 pressure 更新式に
+            # 配線されていなかった (git log -S "clock_base" で 822c0cd commit が定義追加のみ、
+            # main.py への配線 commit 0 件確認、= 最初から未配線の placeholder)。
+            # 「時間経過だけでも少しずつ圧が溜まる」internal drive baseline として配線、
+            # E2=E3=100% 連発などで signal 弱化 (s/u/n 軸ゼロ化) しても pressure が threshold に
+            # 到達する path を保証する (feedback_internal_drive literal「外部刺激なしでも動く」整合)。
+            pressure = pressure * pp.get("decay", 0.97) + signal_total + pp.get("clock_base", 0.0)
             threshold = calc_dynamic_threshold(state, base_threshold)
 
             # 外部入力チェック（chatキューからstate.logに注入 + pressure加算 + archive）
