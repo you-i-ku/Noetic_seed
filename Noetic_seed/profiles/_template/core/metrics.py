@@ -513,30 +513,7 @@ def build_cycle_metrics_event(
                 state.get("phase6_metrics", {}) or {}
             ).get("cluster_inter_ratio"),
         },
-        # Slice 5 (orchestration §5 Slice 5): Goal Shadow Observer summary
-        # 観測のみ、controller 不変。BP-3 判定基準 (count 成長 / status 遷移 /
-        # evidence binding) を 1 dict で覗ける形。
-        "goal_shadows": _summarize_goal_shadows(state.get("goal_shadows", []) or []),
     }
-
-
-def _summarize_goal_shadows(shadows: list) -> dict:
-    """build_cycle_metrics_event 用の goal_shadows summary 取得 (遅延 import)。
-
-    metrics.py が core.goal_shadow に直接依存するのを避けるため (循環 import 予防、
-    cycle 構造で goal_shadow → metrics の流れを破らない)、本 helper 経由で
-    summarize_for_metrics を呼ぶ。
-    """
-    try:
-        from core.goal_shadow import summarize_for_metrics
-        return summarize_for_metrics(shadows)
-    except Exception:
-        return {
-            "count": len(shadows or []),
-            "status_distribution": {},
-            "total_evidence_refs": 0,
-            "top_active": [],
-        }
 
 
 # ============================================================
