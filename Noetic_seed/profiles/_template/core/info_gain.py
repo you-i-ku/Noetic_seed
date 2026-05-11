@@ -129,7 +129,9 @@ def compute_info_gain_components(
         各成分の値域は smoke 観察で実測してから Slice 6 で重み付け検討。
     """
     novelty = _novelty_gain(entries_with_embedding, prev_snapshot)
-    effective_change = _effective_change_gain(state, prev_snapshot)
+    # Slice 6.5 Step 3b (2026-05-11): _effective_change_gain は preference C 経由で
+    # entries_with_embedding を要求する signature に変更 (PLAN §4.2.1)。
+    effective_change = _effective_change_gain(state, prev_snapshot, entries_with_embedding)
     memory_link = _memory_link_gain(links, prev_snapshot)
     resolution = _world_model_resolution_gain(state, prev_snapshot, fog_now)
     capability = _capability_gain(state, prev_snapshot)
@@ -202,6 +204,30 @@ def snapshot_for_next_cycle(
     val_e1 = state.get("last_e1", 0.5)
     last_e1_snapshot = float(val_e1) if isinstance(val_e1, (int, float)) else 0.5
 
+    # Slice 6.5 Step 3b (2026-05-11、PLAN §4.2.1 + §4.2.3): next cycle の
+    # _effective_change_gain / _tool_diversity_gain で必要な前値を保存。
+    # P2-1 fix (Codex review 2026-05-11): 新 entry 絞り込みに prev_snapshot
+    # (= state["_info_gain_prev"]) が必要。snapshot_for_next_cycle は引数で
+    # 受けてないため state から直接取得 (case b 採用、metrics.py signature 非破壊)。
+    import math
+    _prev_for_log_p = state.get(CYCLE_KEY, {}) or {}
+    effective_change_log_p_now = _compute_log_p_now(
+        state, _prev_for_log_p, entries_with_embedding
+    )
+
+    ledger = state.get("action_ledger", []) or []
+    tool_counts_now: dict = {}
+    for entry in ledger[-RECENT_TOOL_WINDOW:]:
+        if isinstance(entry, dict) and entry.get("tool"):
+            t = str(entry["tool"])
+            tool_counts_now[t] = tool_counts_now.get(t, 0) + 1
+    total_now = sum(tool_counts_now.values())
+    tool_entropy_now = (
+        -sum((c / total_now) * math.log((c / total_now) + EPS_LOG)
+             for c in tool_counts_now.values())
+        if total_now > 0 else 0.0
+    )
+
     return {
         "last_e1": last_e1_snapshot,
         "last_prediction_error": (
@@ -214,6 +240,13 @@ def snapshot_for_next_cycle(
         "fog_local_density_mean": (
             float(fog_density) if isinstance(fog_density, (int, float)) else None
         ),
+        # Slice 6.5 Step 3b 追加: next cycle diff 計算用前値
+        "effective_change_log_p": (
+            float(effective_change_log_p_now)
+            if isinstance(effective_change_log_p_now, (int, float))
+            else None
+        ),
+        "tool_entropy": round(tool_entropy_now, 6),
     }
 
 
@@ -271,23 +304,63 @@ def _novelty_gain(entries_with_embedding: list, prev_snapshot: dict) -> float:
     return float(novelties.mean())
 
 
-def _effective_change_gain(state: dict, prev_snapshot: dict) -> float:
-    """pragmatic value -H[q, p*] の Noetic 近似。
+def _compute_log_p_now(
+    state: dict, prev_snapshot: dict, entries_with_embedding: list
+) -> Optional[float]:
+    """現 cycle の **新 entry** 群の平均 log_p(o | C_now) (Lv3 helper、PLAN §4.2.1)。
 
-    last_e1 (effective_change の Noetic 既存実装) の cycle 間差分の正部分。
-    E1 = 「行動が世界に何かを変えた度」、preferred state (高 E1) への接近 = pragmatic gain。
+    Codex review breakpoint ① P2-1 fix (2026-05-11): 旧実装は entries_with_embedding 全体を
+    平均化していて、新 entry なし cycle でも過去の全 log_p が混入する bug があった。
+    `_novelty_gain` (line 251-252) と同じ pattern で prev_snapshot.entries_count を使い
+    newest first 先頭 n_new 件だけを new 観測として絞る。
 
-    **0.0 保持契約** (Codex review 2026-05-09 P2 fix): legitimate ``last_e1=0.0``
-    は default 0.5 で上書きしない。``or 0.5`` パターンは 0.0 を falsy 扱いして
-    潰すので、isinstance 判定で missing/None のみ default に倒す。
-
-    識別力: clamp 忘れ実装 (差分そのまま負も返す) で fail する設計。
+    現 cycle の preference C (state["_efe_C"]) で estimate_density を構築、newest n_new
+    entry の log density を平均する。calculable な値があれば float、不能 (C 未構築 /
+    新 entry なし / embedding なし) → None (_effective_change_gain と
+    snapshot_for_next_cycle で共用)。
     """
-    val_now = state.get("last_e1", 0.5)
-    e1_now = float(val_now) if isinstance(val_now, (int, float)) else 0.5
-    val_prev = prev_snapshot.get("last_e1", e1_now)
-    e1_prev = float(val_prev) if isinstance(val_prev, (int, float)) else e1_now
-    return max(0.0, e1_now - e1_prev)
+    C_data = state.get("_efe_C")
+    if not C_data or not C_data.get("components"):
+        return None
+    embs = [
+        e["embedding"] for e in (entries_with_embedding or [])
+        if isinstance(e, dict) and isinstance(e.get("embedding"), list)
+    ]
+    prev_count = int(prev_snapshot.get("entries_count", 0) or 0)
+    n_new = len(embs) - prev_count
+    if n_new <= 0:
+        return None  # 新 entry なし (両実装一致 graceful)
+    new_embs = embs[:n_new]  # newest first 先頭 n_new 件
+    from core.preference_distribution import estimate_density
+    log_p_fn = estimate_density(C_data["components"], method="vmf")
+    return sum(log_p_fn(e) for e in new_embs) / len(new_embs)
+
+
+def _effective_change_gain(
+    state: dict, prev_snapshot: dict, entries_with_embedding: list
+) -> float:
+    """preference との cross-entropy 改善量 (Lv3、PLAN §4.2.1、nat 単位)。
+
+    Slice 6.5 Step 3b (2026-05-11) 数式変更:
+        旧: max(0, e1_now - e1_prev)  ← E1 [0,1] 値域の正部分
+        新: log p*(o_t | C_t) - log p*(o_{t-1} | C_{t-1})  ← preference C 経由 cross-entropy diff
+
+    現 cycle の newest entry 群を vMF mixture C で評価した log_p 平均と、
+    前 cycle snapshot 値の差分を返す。preference に合う観測で正、離れる観測で負
+    (旧 clamp で潰れない、Lv3 では離反方向も負値で捕捉)。
+
+    C 未構築 (state._efe_C = None or empty) → 0 (両実装一致 graceful)
+    新 entry なし or 初 cycle (prev 値なし) → 0 (両実装一致 graceful)
+
+    識別力: 旧 e1 [0,1] 値域内の小さい diff vs 新 log scale で nat 単位 (規模差大)。
+    """
+    log_p_now = _compute_log_p_now(state, prev_snapshot, entries_with_embedding)
+    if log_p_now is None:
+        return 0.0
+    log_p_prev = prev_snapshot.get("effective_change_log_p")
+    if not isinstance(log_p_prev, (int, float)):
+        return 0.0
+    return float(log_p_now) - float(log_p_prev)
 
 
 def _memory_link_gain(links: list, prev_snapshot: dict) -> float:
@@ -374,24 +447,24 @@ def _world_model_resolution_gain(
     return _pe_drop_gain(state, prev_snapshot) + _density_gain(prev_snapshot, fog_now)
 
 
-def _capability_gain(state: dict, prev_snapshot: dict) -> float:
-    """CIG C = exp(-β · Var[Q]) の Noetic 近似。
+def _competence_gain(state: dict, prev_snapshot: dict) -> float:
+    """CIG C 項 (tool 上達) の log 増分 (Lv3、PLAN §4.2.2、nat 単位)。
 
-    競争力 = 自信獲得 + 道具増。
-    competence_gain = max(0, var_prev - var_now)  ← tool 別 success rate variance 縮小 = 自信獲得
-    tool_diversity_delta = max(0, count_now - count_prev)  ← 利用 tool 種類増加
+    Slice 6.5 Step 3b (2026-05-11、_capability_gain から split):
+        旧: max(0, var_prev - var_now)  ← variance 差そのまま、正値クランプ
+        新: β · (Var[Q]_prev - Var[Q]_now)  ← CIG C(s)=exp(-β·Var[Q]) の log 増分
 
-    両者を加算 (PLAN literal「マジックナンバー 0」、サブ係数も 1.0)。
+    β = 1.0 初期 (PLAN literal「マジックナンバー 0」継承、smoke 観察後 tune 候補)。
+    variance 拡大で負値保持 (predictor 学習で variance 増加もありえる、Lv3 で捕捉)。
 
-    識別力: tool_diversity_delta を落とす実装 (variance のみ) で fail する。
+    識別力: 旧 max(0, ·) clamp vs 新 β·diff (負値保持) で variance 拡大時 fail (誤実装)。
     """
+    BETA = 1.0
     pc = state.get("predictor_confidence", {}) or {}
     success_rates = []
-    tool_count = 0
     for tdata in pc.values():
         if not isinstance(tdata, dict):
             continue
-        tool_count += 1
         succ = int(tdata.get("success", 0) or 0)
         fail = int(tdata.get("fail", 0) or 0)
         attempts = succ + fail
@@ -402,12 +475,52 @@ def _capability_gain(state: dict, prev_snapshot: dict) -> float:
         if len(success_rates) >= 2 else 0.0
     )
     var_prev = float(prev_snapshot.get("predictor_success_rate_var", var_now) or 0.0)
-    competence_gain = max(0.0, var_prev - var_now)
+    return BETA * (var_prev - var_now)
 
-    tool_count_prev = int(prev_snapshot.get("predictor_tool_count", tool_count) or 0)
-    tool_diversity_delta = max(0, tool_count - tool_count_prev)
 
-    return competence_gain + float(tool_diversity_delta)
+def _tool_diversity_gain(state: dict, prev_snapshot: dict) -> float:
+    """tool 使用分布の Shannon entropy delta (Lv3、PLAN §4.2.3、nat 単位)。
+
+    Slice 6.5 Step 3b (2026-05-11、_capability_gain から split):
+        旧: max(0, tool_count_now - tool_count_prev)  ← count diff、正値クランプ
+        新: H_now[tool] - H_prev[tool]  ← Shannon entropy delta (nat)
+            H[tool] = -Σ_i p(tool_i) log p(tool_i)
+            p_i は recent action_ledger 内 tool 使用比 (RECENT_TOOL_WINDOW 件)
+
+    新 tool 試行 → entropy 増 → 正 (旧と類似)
+    同 tool 連発 → entropy 減 → 負 (旧 max(0,·) clamp で 0、識別)
+    分布不変 → 0 (両実装一致)
+
+    識別力: 旧 count diff clamp vs 新 Shannon entropy diff、連発時の負値で誤実装 fail。
+    """
+    import math
+    ledger = state.get("action_ledger", []) or []
+    tool_counts: dict = {}
+    for entry in ledger[-RECENT_TOOL_WINDOW:]:
+        if isinstance(entry, dict) and entry.get("tool"):
+            t = str(entry["tool"])
+            tool_counts[t] = tool_counts.get(t, 0) + 1
+
+    total = sum(tool_counts.values())
+    if total == 0:
+        H_now = 0.0
+    else:
+        H_now = -sum(
+            (c / total) * math.log((c / total) + EPS_LOG)
+            for c in tool_counts.values()
+        )
+
+    H_prev = float(prev_snapshot.get("tool_entropy", H_now) or 0.0)
+    return H_now - H_prev
+
+
+def _capability_gain(state: dict, prev_snapshot: dict) -> float:
+    """[Slice 6.5 Step 3b wrapper、Step 4 で削除予定] _competence + _tool_diversity の sum。
+
+    旧 Slice 3 公開 helper としての名前を温存、Step 4 で公開 API
+    compute_info_gain_components → compute_efe_components 切替時に削除予定。
+    """
+    return _competence_gain(state, prev_snapshot) + _tool_diversity_gain(state, prev_snapshot)
 
 
 def _redundancy_penalty(state: dict, entries_with_embedding: list) -> float:

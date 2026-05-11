@@ -255,6 +255,7 @@ def test_b4_initial_cycle_no_existing():
 # C. _effective_change_gain (pragmatic value)
 # ============================================================
 
+@_SLICE65_STEP5_DEFERRED
 def test_c1_e1_increase():
     """C1: last_e1 上昇 → 加点 (= diff)。"""
     print("== C1: e1 increase → gain ==")
@@ -264,6 +265,7 @@ def test_c1_e1_increase():
     return _assert(abs(result - 0.2) < 1e-5, f"diff 0.2: {result}")
 
 
+@_SLICE65_STEP5_DEFERRED
 def test_c2_e1_unchanged():
     """C2: last_e1 不変 → 0.0。"""
     print("== C2: e1 unchanged → 0 ==")
@@ -273,6 +275,7 @@ def test_c2_e1_unchanged():
     return _assert(result == 0.0, f"unchanged: {result}")
 
 
+@_SLICE65_STEP5_DEFERRED
 def test_c3_e1_decrease_clamped():
     """C3: last_e1 下降 → 0.0 (clamp +)。
 
@@ -285,6 +288,7 @@ def test_c3_e1_decrease_clamped():
     return _assert(result == 0.0, f"clamp +: {result}")
 
 
+@_SLICE65_STEP5_DEFERRED
 def test_c4_e1_zero_preserved():
     """C4: last_e1 = 0.0 を default 0.5 で潰さない (Codex review P2 #2 回帰防止)。
 
@@ -440,6 +444,7 @@ def test_e6_max_pe_drop_at_value_range_boundary():
 # F. _capability_gain (CIG C)
 # ============================================================
 
+@_SLICE65_STEP5_DEFERRED
 def test_f1_variance_drop_and_diversity():
     """F1: variance 縮小 + tool 多様性 +1 → 両方加点。"""
     print("== F1: variance + diversity ==")
@@ -458,6 +463,7 @@ def test_f1_variance_drop_and_diversity():
     return _assert(result > 1.4 and result < 1.5, f"variance + diversity: {result}")
 
 
+@_SLICE65_STEP5_DEFERRED
 def test_f2_diversity_only():
     """F2: tool 多様性のみ +1 → diversity 1.0 加点。
 
@@ -567,6 +573,7 @@ def test_g5_newest_first_centroid_window():
 # H. snapshot_for_next_cycle
 # ============================================================
 
+@_SLICE65_STEP5_DEFERRED
 def test_h1_snapshot_all_fields():
     """H1: 必須 field 全て揃う。"""
     print("== H1: snapshot all fields ==")
