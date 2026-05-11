@@ -12,7 +12,7 @@ PLAN reference: WORLD_MODEL_DESIGN/INFO_GAIN_EFE_REDESIGN_PLAN.md §4.4 + §4.5 
 
 識別力 (誤実装 fail): 符号間違い (G = + pragmatic + epistemic - reg) で順序逆転。
 """
-from core.info_gain import compute_efe_components, compute_info_gain_components
+from core.info_gain import compute_efe_components
 
 
 def _minimal_state() -> dict:
@@ -157,22 +157,15 @@ def test_efe_initial_cycle_all_components_zero():
     assert result["centroid_stuck"] == 0.0
 
 
-def test_efe_old_api_coexistence_step5_deferred():
-    """case A8: 旧 compute_info_gain_components と新 compute_efe_components 並走可。
+def test_efe_old_api_removed_step5():
+    """case A8 (Step 5 で完了、PLAN §5.6 案 α 確定): 旧 compute_info_gain_components 削除確認。
 
-    Step 4 commit 時点で旧 API 温存 (Step 5 で削除予定、PLAN §5.6 literal)。
-    両 API が同じ state で呼出可、別個の output を返す。
+    Step 4 では旧 API 温存、Step 5 で完全削除 (PLAN §5.12.2 case α literal、alias なし)。
+    削除済 module から import が ImportError になることを確認。
     """
-    state = _minimal_state()
-    new_result = compute_efe_components(state, {}, [], [], None)
-    old_result = compute_info_gain_components(state, {}, [], [], None)
-
-    # 新は efe schema、旧は info_gain schema
-    assert "G" in new_result
-    assert "info_gain" in old_result
-    # 共有しない key で区別
-    assert "G" not in old_result
-    assert "info_gain" not in new_result
+    import pytest
+    with pytest.raises(ImportError):
+        from core.info_gain import compute_info_gain_components  # noqa: F401
 
 
 def test_efe_values_rounded_6_digits():

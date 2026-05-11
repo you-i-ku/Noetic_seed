@@ -411,12 +411,13 @@ def build_cycle_metrics_event(
     }
     fog = compute_fog_metrics(state, entries_with_embedding or [], links or [])
 
-    # Slice 3 (orchestration §3 P1 #3 + §5 Slice 3):
-    # information_gain / model_resolution_gain 6 項目 + 統合スカラー。
-    # state[_info_gain_prev] 経由の cycle 間 diff 計算。controller 不変。
-    from core.info_gain import compute_info_gain_components, CYCLE_KEY
+    # Slice 6.5 Step 5 (PLAN §5.7、2026-05-11): info_gain → efe 完全置換。
+    # EFE 9 成分 (epistemic 4 + pragmatic 3 + regularization 2) + 3 カテゴリ +
+    # 統合 G (Active Inference literal、最小化対象) + 5 C 情報 (案 ④ identity-anchored)。
+    # state[CYCLE_KEY] 経由の cycle 間 diff 計算は不変、controller 不変。
+    from core.info_gain import compute_efe_components, CYCLE_KEY
     prev_snapshot = state.get(CYCLE_KEY, {}) or {}
-    info_gain_dict = compute_info_gain_components(
+    efe_dict = compute_efe_components(
         state, prev_snapshot, entries_with_embedding or [], links or [], fog_now=fog
     )
 
@@ -487,7 +488,7 @@ def build_cycle_metrics_event(
             **forest,
             "fog": fog,
         },
-        "info_gain": info_gain_dict,
+        "efe": efe_dict,
         "agency": {
             "voluntary_memory_store_count": int(
                 state.get("voluntary_memory_store_count", 0) or 0
@@ -533,8 +534,9 @@ def _sort_entries_global_newest_first(entries: list) -> list:
 
     Codex review 2026-05-09 P2 #5/#6 fix: subj+mem の単純 concat は各 source
     内部 newest first だが merged 全体は newest first にならない。
-    info_gain.compute_info_gain_components の docstring 契約「global newest
-    first 順」を満たすため、入力前処理として必ず本 helper を通す。
+    info_gain.compute_efe_components (Slice 6.5 Step 5 で旧 compute_info_gain_components
+    から置換) の docstring 契約「global newest first 順」を満たすため、入力前処理として
+    必ず本 helper を通す。
 
     emit_cycle_metrics と build_cycle_metrics_event (auto-load 経路) の両方で
     呼び出す DRY helper、片方だけ sort して片方が漏れる罠を回避する。

@@ -95,71 +95,6 @@ DIVERSITY_BASELINE = 2.5
 # 公開 API
 # ============================================================
 
-def compute_info_gain_components(
-    state: dict,
-    prev_snapshot: dict,
-    entries_with_embedding: list,
-    links: list,
-    fog_now: Optional[dict] = None,
-) -> dict:
-    """6 項目 + 統合 info_gain + model_resolution_gain を計算。
-
-    Args:
-        state: 現 cycle 末 state (read-only に扱う、書き込みなし)
-        prev_snapshot: 前 cycle 末 snapshot (state[CYCLE_KEY] 由来)、初 cycle は {}
-        entries_with_embedding: subjective + memory 両方の embedding 持ち entry list、
-            **global newest first 順** (metrics.py:emit_cycle_metrics で time
-            field sort 済、Codex P2 #5 fix)。各 source 内部 newest first を
-            単純 concat した list は merged 全体の newest first にならないので
-            必ず time field でグローバル sort する責務は呼出元側にある。
-        links: memory_links list (list_links 経由、metrics.py で取得済流用)
-        fog_now: 靄 5 種 dict (compute_fog_metrics 結果)、density 比較に使う
-
-    Returns:
-        ``{
-            "info_gain": float,                   # 統合スカラー (PLAN literal 加算式)
-            "model_resolution_gain": float,       # 独立 metric (= world_model_resolution_gain)
-            "novelty_gain": float,                # ∈ [0, ~1]
-            "effective_change_gain": float,       # ∈ [0, ~1]
-            "memory_link_gain": float,            # ∈ [0, ~strength_cap × N_links]
-            "world_model_resolution_gain": float, # ∈ [0, ~2]
-            "capability_gain": float,             # ∈ [0, ~variance + N_tools]
-            "redundancy_penalty": float,          # ∈ [0, ~RECENT_TOOL_WINDOW]
-        }``
-
-    Note:
-        controller には流さない (Slice 3 PLAN literal「最初は測定のみ」)。
-        各成分の値域は smoke 観察で実測してから Slice 6 で重み付け検討。
-    """
-    novelty = _novelty_gain(entries_with_embedding, prev_snapshot)
-    # Slice 6.5 Step 3b (2026-05-11): _effective_change_gain は preference C 経由で
-    # entries_with_embedding を要求する signature に変更 (PLAN §4.2.1)。
-    effective_change = _effective_change_gain(state, prev_snapshot, entries_with_embedding)
-    memory_link = _memory_link_gain(links, prev_snapshot)
-    resolution = _world_model_resolution_gain(state, prev_snapshot, fog_now)
-    capability = _capability_gain(state, prev_snapshot)
-    redundancy = _redundancy_penalty(state, entries_with_embedding)
-
-    info_gain = (
-        novelty
-        + effective_change
-        + memory_link
-        + resolution
-        + capability
-        - redundancy
-    )
-    return {
-        "info_gain": round(info_gain, 6),
-        "model_resolution_gain": round(resolution, 6),
-        "novelty_gain": round(novelty, 6),
-        "effective_change_gain": round(effective_change, 6),
-        "memory_link_gain": round(memory_link, 6),
-        "world_model_resolution_gain": round(resolution, 6),
-        "capability_gain": round(capability, 6),
-        "redundancy_penalty": round(redundancy, 6),
-    }
-
-
 def compute_efe_components(
     state: dict,
     prev_snapshot: dict,
@@ -510,18 +445,6 @@ def _density_gain(prev_snapshot: dict, fog_now: Optional[dict]) -> float:
     return math.log((float(density_now) + EPS_LOG) / (float(density_prev) + EPS_LOG))
 
 
-def _world_model_resolution_gain(
-    state: dict, prev_snapshot: dict, fog_now: Optional[dict]
-) -> float:
-    """[Slice 6.5 Step 3a wrapper、Step 4 で削除予定] _pe_drop_gain + _density_gain の sum。
-
-    旧 Slice 3 公開 helper としての名前を温存 (Step 4 で公開 API
-    compute_info_gain_components → compute_efe_components 切替時に削除)。
-    両 sub-gain は Lv3 数式 (log ratio nat 単位) に置換済、return 値は両者の素朴和。
-    """
-    return _pe_drop_gain(state, prev_snapshot) + _density_gain(prev_snapshot, fog_now)
-
-
 def _competence_gain(state: dict, prev_snapshot: dict) -> float:
     """CIG C 項 (tool 上達) の log 増分 (Lv3、PLAN §4.2.2、nat 単位)。
 
@@ -587,15 +510,6 @@ def _tool_diversity_gain(state: dict, prev_snapshot: dict) -> float:
 
     H_prev = float(prev_snapshot.get("tool_entropy", H_now) or 0.0)
     return H_now - H_prev
-
-
-def _capability_gain(state: dict, prev_snapshot: dict) -> float:
-    """[Slice 6.5 Step 3b wrapper、Step 4 で削除予定] _competence + _tool_diversity の sum。
-
-    旧 Slice 3 公開 helper としての名前を温存、Step 4 で公開 API
-    compute_info_gain_components → compute_efe_components 切替時に削除予定。
-    """
-    return _competence_gain(state, prev_snapshot) + _tool_diversity_gain(state, prev_snapshot)
 
 
 def _consecutive_penalty(state: dict) -> float:
@@ -667,64 +581,3 @@ def _centroid_stuck(entries_with_embedding: list) -> float:
     return math.log(CENTROID_VARIANCE_FLOOR / max(mean_dist, EPS_LOG))
 
 
-def _redundancy_penalty(state: dict, entries_with_embedding: list) -> float:
-    """CIG L (noisy TV filter) の Noetic 近似。
-
-    aleatoric noise (= 学べない繰り返し) を penalty 化。state を mutate しない。
-    consecutive_same_tool: action_ledger 末尾 RECENT_TOOL_WINDOW 件で連発 tool 数 - 1
-    centroid_stuck: 直近 RECENT_EMB_WINDOW entry の embedding 中心からの平均距離が
-                    CENTROID_VARIANCE_FLOOR 未満なら正規化済 stuck score を加算
-
-    識別力: centroid_stuck の閾値を 0 に固定する誤実装で fail (常に 0)。
-    """
-    # 同 tool 連発 (action_ledger 末尾を後ろから連続 run 数える、numpy 不要)
-    ledger = state.get("action_ledger", []) or []
-    recent_tools = []
-    for entry in ledger[-RECENT_TOOL_WINDOW:]:
-        if isinstance(entry, dict) and entry.get("tool"):
-            recent_tools.append(str(entry["tool"]))
-    consecutive_run = 0
-    if recent_tools:
-        last_tool = recent_tools[-1]
-        consecutive_run = 1
-        for t in reversed(recent_tools[:-1]):
-            if t == last_tool:
-                consecutive_run += 1
-            else:
-                break
-    consecutive_penalty = max(0, consecutive_run - 1)  # 単発は penalty なし、連発から +1 ずつ
-
-    # 中心固着 (直近 RECENT_EMB_WINDOW 件の embedding 中心からの平均距離)。
-    # 5 件未満なら観察データ不足として計算 skip (起動直後 cycle で偶然境界値
-    # stuck 判定が混入する罠を回避、設計趣旨「直近 5 件の中心固着」literal 整合)。
-    #
-    # **入力順序契約**: ``entries_with_embedding`` は newest first
-    # (``load_all_subjective_entries`` + ``load_all_memories`` が共に新しい順)。
-    # `[:RECENT_EMB_WINDOW]` で先頭 N 件 (newest 直近) を取る。`[-N:]` だと
-    # 末尾 = 最古を取って recent 固着検知が破綻するので注意 (Codex review
-    # 2026-05-09 P2 #3 fix)。
-    embs = [
-        e["embedding"] for e in (entries_with_embedding or [])[:RECENT_EMB_WINDOW]
-        if isinstance(e, dict) and isinstance(e.get("embedding"), list)
-    ]
-    centroid_stuck = 0.0
-    if len(embs) >= RECENT_EMB_WINDOW:
-        try:
-            import numpy as np
-        except ImportError:
-            return float(consecutive_penalty)  # numpy なしで stuck 計算 skip
-        arr = np.array(embs, dtype=np.float32)
-        centroid = arr.mean(axis=0)
-        norm = float(np.linalg.norm(centroid))
-        if norm > 1e-9:
-            centroid = centroid / norm
-            sims = arr @ centroid
-            distances = 1.0 - sims  # 0 = 全部中心一致 = 固着
-            mean_dist = float(distances.mean())
-            if mean_dist < CENTROID_VARIANCE_FLOOR:
-                # CENTROID_VARIANCE_FLOOR 未満 → [0, 1] に正規化した stuck 度
-                centroid_stuck = (
-                    (CENTROID_VARIANCE_FLOOR - mean_dist) / CENTROID_VARIANCE_FLOOR
-                )
-
-    return float(consecutive_penalty) + centroid_stuck
