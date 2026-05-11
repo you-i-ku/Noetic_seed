@@ -13,6 +13,12 @@ websockets
 sqlalchemy
 aiosqlite
 
+# Slice 6.5 Step 2 (Phase E v1.1 2026-05-11): vMF mixture density 評価器の
+# 正規化定数 (modified Bessel function I_v(κ)) を 1024 次元で log scale 数値安定
+# 計算するため scipy.special.ive を使用 (PLAN §5.12.1 v1.1 literal)。
+# 思想中立な汎用数学関数の工具箱、numpy と並ぶ基盤レベル依存。
+scipy
+
 # embedding / vector
 onnxruntime
 tokenizers
