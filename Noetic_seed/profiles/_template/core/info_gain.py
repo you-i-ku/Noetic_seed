@@ -82,6 +82,9 @@ CENTROID_VARIANCE_FLOOR = 0.3    # redundancy: emb mean dist 下限 (これ以�
 PREDICTOR_MIN_ATTEMPTS = 3       # capability: variance 計算最低試行数
 CYCLE_KEY = "_info_gain_prev"    # state snapshot key (state.py default に登録)
 PE_NORMALIZATION_FACTOR = 100.0  # last_prediction_error 値域 0-100 を [0,1] に揃える
+# Slice 6.5 Step 3a (PLAN §4.1): Lv3 数式 (log ratio) 用の 0 除算回避 ε。
+# preference_distribution.EPS と数値同じだが、独立 module 整合性のため別定数。
+EPS_LOG = 1e-3
                                  # (BP-1 hotfix 2026-05-09、reflection.py:82 既存 pattern 整合)
 
 
@@ -219,19 +222,23 @@ def snapshot_for_next_cycle(
 # ============================================================
 
 def _novelty_gain(entries_with_embedding: list, prev_snapshot: dict) -> float:
-    """epistemic value I[s';o'|a] の Noetic 近似。
+    """epistemic surprise の Noetic 近似 (Lv3、PLAN §4.1.1、nat 単位)。
 
-    新 entry (前 cycle になかった) の embedding が既存 entry 群からどれだけ離れてるか。
-    1 - max cosine similarity to existing top-K (CIG N の embedding-space 近似)。
+    Slice 6.5 Step 3a (2026-05-11) 数式変更:
+        旧: 1 - max_cosine_similarity ∈ [0, 1]
+        新: -log(max_cosine_similarity + ε) ∈ [0, -log(ε)] nat
+
+    cosine → 1 (一致) → log(1+ε) ≈ ε ≈ 0 nat (新観測なし)
+    cosine → 0 (直交) → -log(ε) ≈ 6.9 nat (= 大 surprise)
 
     **入力順序契約**: ``entries_with_embedding`` は newest first
-    (``load_all_subjective_entries`` + ``load_all_memories`` が共に新しい順、
-    docstring literal)。新 entry は list 先頭に挿入される。
+    (``load_all_subjective_entries`` + ``load_all_memories`` が共に新しい順)。
 
     新 entry 0 件 → 0.0 (利得なし)
-    初 cycle (existing 0 件) → 0.0 (比較不可、定義 by 0 ではなく安全 default)
+    初 cycle (existing 0 件) → 0.0 (比較不可、安全 default)
 
-    識別力: 新 entry が既存と完全同一 embedding なら 0、全直交なら 1。
+    識別力: cosine=0.5 で 旧 0.5 / 新 ≈ 0.693 nat、cosine=0 で 旧 1.0 / 新 ≈ 6.9 nat。
+    cosine 値域は bge-m3 L2 正規化済で [0, 1] 範囲、負値の安全のため max(0, ·) clamp。
     """
     try:
         import numpy as np
@@ -258,7 +265,9 @@ def _novelty_gain(entries_with_embedding: list, prev_snapshot: dict) -> float:
     # bge-m3 は L2 正規化済前提 (Phase 1 整合、metrics.py:fog_embedding_spread 同流儀)
     sims = new_arr @ ex_arr.T  # (N_new, N_existing)
     max_sims = sims.max(axis=1)  # 各 new に対する最大類似度
-    novelties = 1.0 - max_sims
+    # Lv3: -log(max_sim + ε) で nat 単位 surprise、cosine 値を [0, 1] clamp して log 引数安全
+    max_sims_clamped = np.clip(max_sims, 0.0, 1.0)
+    novelties = -np.log(max_sims_clamped + EPS_LOG)
     return float(novelties.mean())
 
 
@@ -282,62 +291,87 @@ def _effective_change_gain(state: dict, prev_snapshot: dict) -> float:
 
 
 def _memory_link_gain(links: list, prev_snapshot: dict) -> float:
-    """A-MEM link generation + memory evolution の Noetic 近似。
+    """A-MEM link generation + memory evolution の Noetic 近似 (Lv3、PLAN §4.1.4、nat 単位)。
 
-    全 link strength の合計 cycle 間 diff (正部分)。新規 link は initial strength で
-    sum を押し上げ、既存 link の strength 上昇 (Physarum α update) も sum を押し上げ、
-    両方を 1 スカラーで捕捉する設計。decay で sum 下がる cycle は 0 (clamp +)。
+    Slice 6.5 Step 3a (2026-05-11) 数式変更:
+        旧: max(0, strength_now - strength_prev)  ← raw diff、正値クランプ
+        新: log((1 + strength_now) / (1 + strength_prev))  ← log ratio、負値保持
 
-    識別力: strength 合計を読まない実装 (count のみ等) で fail する。
+    新規 link 追加 / Physarum α 強化 で strength_now > strength_prev → 正
+    decay で strength 減 → 負 (構造的情報減少、Lv3 では捕捉)
+    不変 → 0 (両実装一致)
+
+    +1 (Laplace 平滑化的) は 0 除算回避 + 小規模時の数値安定化 (1 + strength ≥ 1 で正)。
+
+    識別力: 旧 max(0, diff)=4.0 vs 新 log(6/2)≈1.099 (例 strength_now=5, prev=1)、
+    decay で 旧 0 (clamp) vs 新 負値 (識別、Lv3 では情報減少が見える)。
     """
+    import math
     strength_now = sum(
         float(l.get("strength", 0.0) or 0.0)
         for l in (links or []) if isinstance(l, dict)
     )
     strength_prev = float(prev_snapshot.get("memory_links_strength_total", strength_now) or 0.0)
-    return max(0.0, strength_now - strength_prev)
+    return math.log((1.0 + strength_now) / (1.0 + strength_prev))
+
+
+def _pe_drop_gain(state: dict, prev_snapshot: dict) -> float:
+    """Bayesian posterior precision 上昇 (Lv3、PLAN §4.1.2、nat 単位)。
+
+    Slice 6.5 Step 3a (2026-05-11、_world_model_resolution_gain から split):
+        旧: max(0, (prev_pe - now_pe) / 100)  ← /100 線形 + 正値クランプ
+        新: log((prev_pe + ε) / (now_pe + ε))  ← log ratio、負値保持
+
+    prev_pe > now_pe → 正 (predictor 精度上昇)
+    prev_pe < now_pe → 負 (predictor 精度低下、情報的に意味あり predictor 学習で重要)
+    prev or now が None → 0 (graceful、初 cycle / history 不足)
+
+    識別力: prev=80, now=10 で 旧 0.7 vs 新 log(80.001/10.001) ≈ 2.08 nat、
+    prev=10, now=80 で 旧 0 (clamp) vs 新 ≈ -2.08 nat (識別、Lv3 では負値保持)。
+    """
+    import math
+    pe_now = state.get("last_prediction_error")
+    pe_prev = prev_snapshot.get("last_prediction_error")
+    if not (isinstance(pe_now, (int, float)) and isinstance(pe_prev, (int, float))):
+        return 0.0
+    return math.log((float(pe_prev) + EPS_LOG) / (float(pe_now) + EPS_LOG))
+
+
+def _density_gain(prev_snapshot: dict, fog_now: Optional[dict]) -> float:
+    """memory graph 局所密度の MI delta 近似 (Lv3、PLAN §4.1.3、nat 単位)。
+
+    Slice 6.5 Step 3a (2026-05-11、_world_model_resolution_gain から split):
+        旧: max(0, now - prev)  ← raw diff、正値クランプ
+        新: log((now + ε) / (prev + ε))  ← log ratio、負値保持
+
+    now > prev → 正 (embedding 空間解像度向上)
+    now < prev → 負 (解像度低下、memory_graph edge 削除等で構造的)
+    どちらかが None → 0 (graceful)
+
+    識別力: now=0.3, prev=0.1 で 旧 0.2 vs 新 log(0.301/0.101)≈1.092 nat、
+    now=0.1, prev=0.3 で 旧 0 (clamp) vs 新 ≈ -1.092 nat (識別、Lv3 で負値捕捉)。
+    """
+    import math
+    density_now = (fog_now or {}).get("local_density_mean")
+    density_prev = prev_snapshot.get("fog_local_density_mean")
+    if not (
+        isinstance(density_now, (int, float))
+        and isinstance(density_prev, (int, float))
+    ):
+        return 0.0
+    return math.log((float(density_now) + EPS_LOG) / (float(density_prev) + EPS_LOG))
 
 
 def _world_model_resolution_gain(
     state: dict, prev_snapshot: dict, fog_now: Optional[dict]
 ) -> float:
-    """Bayesian posterior precision 上昇 + 情報理論的 entropy 縮小 の Noetic 近似。
+    """[Slice 6.5 Step 3a wrapper、Step 4 で削除予定] _pe_drop_gain + _density_gain の sum。
 
-    pe_drop = max(0, prev_pe - now_pe) / PE_NORMALIZATION_FACTOR
-        ← prediction_error の絶対値減少 = 確率分布の集中度上昇 (Bayesian 推論
-          posterior precision の数学構造として参照)。0-100 値域の `last_prediction_error`
-          を /100 で [0, 1] スケールに揃える (reflection.py:82 既存 pattern 整合)。
-    density_gain = max(0, now_density - prev_density)
-        ← 靄 B (local_density_mean) 増加 = embedding 空間の解像度上昇 (幾何学的)
-
-    両者は独立した resolution 指標 (確率的 vs 幾何学的)、加算する。
-    どちらかが None (history 不足、初 cycle) なら 0 として扱う (defensive)。
-
-    値域整合 (BP-1 hotfix 2026-05-09):
-      pe_drop と density_gain は単位が違う (誤差減少スケール vs 幾何/統計構造)。
-      Slice 3 では /100 揃えのみで Slice 6 まで温存 (Codex Q3 推奨確定、ゆう確定 2026-05-09)。
-      orchestration plan §5 Slice 6 で再検討負債として明記済。
-
-    識別力 (CLAUDE.md §5):
-      density_gain を落とす実装で fail する (pe だけ見る誤実装)。
-      大 pe drop (例 prev=80, now=10) で値域 [0, ~1] に saturate する (旧無正規化実装で fail)。
+    旧 Slice 3 公開 helper としての名前を温存 (Step 4 で公開 API
+    compute_info_gain_components → compute_efe_components 切替時に削除)。
+    両 sub-gain は Lv3 数式 (log ratio nat 単位) に置換済、return 値は両者の素朴和。
     """
-    pe_now = state.get("last_prediction_error")
-    pe_prev = prev_snapshot.get("last_prediction_error")
-    pe_drop = 0.0
-    if isinstance(pe_now, (int, float)) and isinstance(pe_prev, (int, float)):
-        pe_drop = max(0.0, (float(pe_prev) - float(pe_now)) / PE_NORMALIZATION_FACTOR)
-
-    density_now = (fog_now or {}).get("local_density_mean")
-    density_prev = prev_snapshot.get("fog_local_density_mean")
-    density_gain = 0.0
-    if (
-        isinstance(density_now, (int, float))
-        and isinstance(density_prev, (int, float))
-    ):
-        density_gain = max(0.0, float(density_now) - float(density_prev))
-
-    return pe_drop + density_gain
+    return _pe_drop_gain(state, prev_snapshot) + _density_gain(prev_snapshot, fog_now)
 
 
 def _capability_gain(state: dict, prev_snapshot: dict) -> float:
