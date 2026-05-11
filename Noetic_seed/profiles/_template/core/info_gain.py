@@ -85,6 +85,9 @@ PE_NORMALIZATION_FACTOR = 100.0  # last_prediction_error 値域 0-100 を [0,1] 
 # Slice 6.5 Step 3a (PLAN §4.1): Lv3 数式 (log ratio) 用の 0 除算回避 ε。
 # preference_distribution.EPS と数値同じだが、独立 module 整合性のため別定数。
 EPS_LOG = 1e-3
+# Slice 6.5 Step 4 (PLAN §4.3.1): _consecutive_penalty の log scale 参照点。
+# RECENT_TOOL_WINDOW / 2 = 2.5、log(2.5) ≈ 0.916 nat が「多様」と「単発」の境界目安。
+DIVERSITY_BASELINE = 2.5
                                  # (BP-1 hotfix 2026-05-09、reflection.py:82 既存 pattern 整合)
 
 
@@ -154,6 +157,78 @@ def compute_info_gain_components(
         "world_model_resolution_gain": round(resolution, 6),
         "capability_gain": round(capability, 6),
         "redundancy_penalty": round(redundancy, 6),
+    }
+
+
+def compute_efe_components(
+    state: dict,
+    prev_snapshot: dict,
+    entries_with_embedding: list,
+    links: list,
+    fog_now: Optional[dict] = None,
+) -> dict:
+    """EFE 9 成分 + 3 カテゴリ + 統合 G を計算 (Slice 6.5 Step 4 公開 API、PLAN §4.4 + §4.5)。
+
+    旧 compute_info_gain_components 置換 (案 α 確定、Codex Q-d-fix-3 ゆう確定、alias なし)。
+    Step 4 commit 時点では旧公開 API も temporary 温存 (Step 5 で完全削除 + metrics.py 連動)。
+
+    9 成分 (PLAN §4.1 + §4.2 + §4.3、Lv3 nat 単位):
+      epistemic (4): novelty / pe_drop / density / memory_link
+      pragmatic (3): effective_change / competence / tool_diversity
+      regularization (2): consecutive_penalty / centroid_stuck
+
+    3 カテゴリ:
+      epistemic_gain = Σ epistemic 4 成分
+      pragmatic_gain = Σ pragmatic 3 成分
+      regularization = Σ regularization 2 成分
+
+    統合 G (Active Inference literal、最小化対象):
+      G_noetic = -pragmatic_gain - epistemic_gain + regularization
+
+    output schema (§4.5 literal): efe dict + C 情報 (state["_efe_C"] 由来、Step 6 hook 配線済)。
+
+    Args / Returns: §4.5 literal、controller には流さない (Slice 7 まで「計測のみ」継承)。
+    """
+    novelty = _novelty_gain(entries_with_embedding, prev_snapshot)
+    pe_drop = _pe_drop_gain(state, prev_snapshot)
+    density = _density_gain(prev_snapshot, fog_now)
+    memory_link = _memory_link_gain(links, prev_snapshot)
+
+    effective_change = _effective_change_gain(state, prev_snapshot, entries_with_embedding)
+    competence = _competence_gain(state, prev_snapshot)
+    tool_diversity = _tool_diversity_gain(state, prev_snapshot)
+
+    consecutive_pen = _consecutive_penalty(state)
+    centroid_stk = _centroid_stuck(entries_with_embedding)
+
+    epistemic_gain = novelty + pe_drop + density + memory_link
+    pragmatic_gain = effective_change + competence + tool_diversity
+    regularization = consecutive_pen + centroid_stk
+
+    G = -pragmatic_gain - epistemic_gain + regularization
+
+    # C 情報 (state["_efe_C"] 由来、Step 6 update_self hook 配線済)
+    C_data = state.get("_efe_C") or {}
+
+    return {
+        "G": round(G, 6),
+        "pragmatic_gain": round(pragmatic_gain, 6),
+        "epistemic_gain": round(epistemic_gain, 6),
+        "regularization": round(regularization, 6),
+        "novelty": round(novelty, 6),
+        "pe_drop": round(pe_drop, 6),
+        "density": round(density, 6),
+        "memory_link": round(memory_link, 6),
+        "effective_change": round(effective_change, 6),
+        "competence": round(competence, 6),
+        "tool_diversity": round(tool_diversity, 6),
+        "consecutive_penalty": round(consecutive_pen, 6),
+        "centroid_stuck": round(centroid_stk, 6),
+        "C_source_self_keys": list(C_data.get("source_keys", [])),
+        "C_per_key_confidence": dict(C_data.get("per_key_confidence", {})),
+        "C_per_key_variance": dict(C_data.get("per_key_variance", {})),
+        "C_entropy": round(float(C_data.get("C_entropy", 0.0)), 6),
+        "C_update_cycle": int(state.get("_efe_C_update_cycle", -1)),
     }
 
 
@@ -521,6 +596,75 @@ def _capability_gain(state: dict, prev_snapshot: dict) -> float:
     compute_info_gain_components → compute_efe_components 切替時に削除予定。
     """
     return _competence_gain(state, prev_snapshot) + _tool_diversity_gain(state, prev_snapshot)
+
+
+def _consecutive_penalty(state: dict) -> float:
+    """同 tool 連発の log ratio (Lv3、PLAN §4.3.1、nat 単位)。
+
+    Slice 6.5 Step 4 (2026-05-11、_redundancy_penalty から split):
+        旧: max(0, consecutive_run - 1)  ← raw 連発件数 - 1
+        新: log(1 + consecutive_run) - log(DIVERSITY_BASELINE)  ← log scale 相対
+
+    DIVERSITY_BASELINE = 2.5 (= RECENT_TOOL_WINDOW / 2) で「多様」「単発」境界目安。
+    - 単発 (run=1): log(2) - log(2.5) ≈ -0.223 nat (負、多様、識別)
+    - 5 連発 (run=5): log(6) - log(2.5) ≈ 0.876 nat (正、固着、識別)
+    - 空 ledger → 0 (両実装一致 graceful)
+    """
+    import math
+    ledger = state.get("action_ledger", []) or []
+    recent_tools = []
+    for entry in ledger[-RECENT_TOOL_WINDOW:]:
+        if isinstance(entry, dict) and entry.get("tool"):
+            recent_tools.append(str(entry["tool"]))
+    if not recent_tools:
+        return 0.0
+    last_tool = recent_tools[-1]
+    consecutive_run = 1
+    for t in reversed(recent_tools[:-1]):
+        if t == last_tool:
+            consecutive_run += 1
+        else:
+            break
+    return math.log(1 + consecutive_run) - math.log(DIVERSITY_BASELINE)
+
+
+def _centroid_stuck(entries_with_embedding: list) -> float:
+    """embedding 中心固着の log ratio (Lv3、PLAN §4.3.2、nat 単位)。
+
+    Slice 6.5 Step 4 (2026-05-11、_redundancy_penalty から split):
+        旧: (FLOOR - mean_dist) / FLOOR  ← [0,1] 正規化、mean_dist < FLOOR で正
+        新: log(FLOOR / max(mean_dist, ε))  ← log ratio、負値保持
+
+    - mean_dist→0 (完全固着) → log(FLOOR/ε) ≈ log(300) ≈ 5.7 nat (大)
+    - mean_dist=FLOOR (境界) → 0 nat
+    - mean_dist > FLOOR (多様) → 負 (旧 max(0,·) clamp 撤去、Lv3 で識別)
+    - 観察 5 件未満 → 0 (両実装一致 graceful)
+
+    **入力順序契約**: entries_with_embedding は newest first、`[:RECENT_EMB_WINDOW]`
+    で先頭 N 件 (newest 直近) を取る (_redundancy_penalty と同 pattern、Codex review
+    2026-05-09 P2 #3 fix 整合)。
+    """
+    import math
+    try:
+        import numpy as np
+    except ImportError:
+        return 0.0
+    embs = [
+        e["embedding"] for e in (entries_with_embedding or [])[:RECENT_EMB_WINDOW]
+        if isinstance(e, dict) and isinstance(e.get("embedding"), list)
+    ]
+    if len(embs) < RECENT_EMB_WINDOW:
+        return 0.0  # 観察 5 件未満 graceful
+    arr = np.array(embs, dtype=np.float32)
+    centroid = arr.mean(axis=0)
+    norm = float(np.linalg.norm(centroid))
+    if norm <= 1e-9:
+        return 0.0
+    centroid = centroid / norm
+    sims = arr @ centroid
+    distances = 1.0 - sims
+    mean_dist = float(distances.mean())
+    return math.log(CENTROID_VARIANCE_FLOOR / max(mean_dist, EPS_LOG))
 
 
 def _redundancy_penalty(state: dict, entries_with_embedding: list) -> float:
