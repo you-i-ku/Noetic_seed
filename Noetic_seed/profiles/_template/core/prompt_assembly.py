@@ -243,12 +243,24 @@ def assemble_system_prompt(
         ValueError: raise_on_overbudget=True で SYSTEM_PROMPT_SOFT_LIMIT
             超過時。
     """
+    # V07 Phase 1 commit 4: section 順序 PLAN §3-4 案に整理 + subjective_state +
+    # world_state 相同並置 (P-Y Homologous Structure)。build_world_model_section は
+    # entities/channels/dispositions/opinions の世界モデル view、subjective_state.current_self
+    # とは layer 違い (§5-2 literal、state.self は subjective_state 専有、それ以外は world_model)。
+    from core.subjective_view import build_subjective_state
+    from core.world_state_view import build_world_state
+    from core.prompt import _build_recent_history_block
+
     sections = [
         build_approval_protocol(),
         build_fire_cause_section(fire_cause, fire_candidates=fire_candidates),
-        # 段階10.5 Fix 4 δ': state 経由で opinions / dispositions を渡し構造化自己認識を完成
+        # V07: subjective + world 相同並置 (auto inject、認知 ground 先確立)
+        build_subjective_state(state),
+        build_world_state(state),
+        # 既存 [世界モデル] (entities/channels/dispositions/opinions、§5-2 layer 違い)
         build_world_model_section(world_model, state=state),
-        "[log]\n" + build_log_block(state, log_budget_tok),
+        # V07: <recent_history> (subjective field only、tool/args/result は world_state へ)
+        _build_recent_history_block(state, limit=5),
         "[利用可能なツール]\n" + build_tool_block(allowed_tools, tools_dict, registry=registry),
         # 段階11-D Step 4-2 hotfix v4: forced 時のみ末尾に強制実行指示。空文字列は
         # 下の "\n\n".join(s for s in sections if s) で自動除外される。
