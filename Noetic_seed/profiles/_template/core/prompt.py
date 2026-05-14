@@ -228,18 +228,53 @@ def _calc_log_budget() -> int:
     return max(1000, total - reserved)
 
 
+def _build_recent_history_block(state: dict, limit: int = 5) -> str:
+    """<recent_history> XML block: subjective field (intent + e1-e4) のみ。
+
+    V07 Phase 1 commit 3 (PLAN §3-2-4 + 5 論点 ① ゆう確定):
+    tool/args/result は world_state.recent_events に任せる、重複ゼロ。
+
+    Bootstrap engine: subjective_entries 空でも "(no subjective entries)" を
+    explicit literal で表示 (Codex audit P3-03 fix)。
+    """
+    subj = state.get("subjective_entries", []) or []
+    if not subj:
+        return "<recent_history>\n  (no subjective entries)\n</recent_history>"
+
+    lines = []
+    for entry in subj[-limit:]:
+        intent = (entry.get("intent") or "")[:80]
+        ev_parts = []
+        for k in ("e1", "e2", "e3", "e4"):
+            v = entry.get(k)
+            if v is not None:
+                ev_parts.append(f"{k}={v}")
+        ev_text = ", ".join(ev_parts) if ev_parts else "(no eval)"
+        lines.append(f'  - intent: "{intent}" | {ev_text}')
+
+    body = "\n".join(lines)
+    return f"<recent_history>\n{body}\n</recent_history>"
+
+
 def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: str = "",
                           fire_candidates: list = None, registry=None) -> str:
+    # V07 Phase 1 commit 3: subjective_state + world_state 相同並置 (PLAN §3-1)
+    # 旧 [自己モデル] / [関連記憶] / [現在の状況] は subjective_state / world_state /
+    # recent_history XML block に置換、tool/args/result は世界視点 (world_state) に
+    # 集約、subjective field (intent + e1-e4) は recent_history に集約 (重複ゼロ)。
+    from core.subjective_view import build_subjective_state
+    from core.world_state_view import build_world_state
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    self_text = json.dumps(state["self"], ensure_ascii=False) if state["self"] else "(なし)"
-    energy = round(state.get("energy", 50), 1)
-    # 段階13 Phase 0.1.D: e_trend は subjective field (e1-4) のみ消費 = subj 直読み
-    e_trend = _calc_e_trend(state["subjective_entries"][-10:])
-    # 鮮度勾配で log 部を pack (tool/args/result + intent 両層必要 = merge view)
-    from core.state import merge_log_view
-    log_text = _pack_log_block(merge_log_view(state), _calc_log_budget(), with_evals=False)
+    # subjective_view が state.self / memory_graph / related_memory を統合
+    subjective_state_block = build_subjective_state(state)
+    # world_state が file_snapshot / recent_events を統合
+    world_state_block = build_world_state(state)
+    recent_history_block = _build_recent_history_block(state, limit=5)
+
     allowed = ctrl.get("allowed_tools", set(tools_dict.keys()))
     tool_lines = _build_tool_lines(allowed, tools_dict, registry=registry)
+    # summaries は撤去せず残置 (cycle ごとの圧縮、未空時のみ表示)
     summaries = state.get("summaries", [])
     summary_lines = [
         f"  [{s.get('label','')} {s.get('covers_from','').split(' ')[0]}〜{s.get('covers_to','').split(' ')[0]}] {s.get('text','')[:300]}"
@@ -333,18 +368,8 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
     else:
         pending_text = "  なし"
 
-    # 関連記憶（Entity/Opinionネットワーク）
-    # 段階11-C G-lite Phase 1: settings.retrieval から use_links/link_depth/link_top_n を配線
-    from core.memory import get_relevant_memories, format_memories_for_prompt
-    from core.config import llm_cfg
-    _retrieval_cfg = llm_cfg.get("retrieval", {}) or {}
-    memories = get_relevant_memories(
-        state, limit=8,
-        use_links=bool(_retrieval_cfg.get("use_links", False)),
-        link_depth=int(_retrieval_cfg.get("link_depth", 1)),
-        link_top_n=int(_retrieval_cfg.get("link_top_n", 3)),
-    )
-    memory_text = format_memories_for_prompt(memories) if memories else ""
+    # 関連記憶: V07 Phase 1 commit 3 で subjective_state.related_memory に統合済
+    # (subjective_view._related_memory が get_relevant_memories を呼ぶ、重複ゼロ)。
 
     # camera_stream アクティブ時の状態表示（並行活動を可視化）
     stream_status_line = ""
@@ -363,27 +388,31 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
     # (retro_log_entry_id 付き + observed_content=None) が上記 [未対応事項] に
     # 表示されることで代替される。重複表示を避けて削除。
 
+    # V07 Phase 1 commit 3: XML tag 化、相同並置 (subjective_state + world_state)
+    summary_section = f"\n<summaries>\n{summary_text}\n</summaries>\n" if summary_text else ""
     return f"""[{now}]{fire_cause_line}
 
-[自己モデル]
-{self_text}
+{subjective_state_block}
 
-[未対応事項]
+{world_state_block}
+
+<pending>
 {pending_text}{stream_status_line}
-{f'{chr(10)}[関連記憶]{chr(10)}{memory_text}{chr(10)}' if memory_text else ''}
-[現在の状況]
-{f'summaries:{chr(10)}{summary_text}{chr(10)}' if summary_text else ''}log:
-{log_text}
+</pending>
+{summary_section}
+{recent_history_block}
 
-[利用可能なツール]
+<available_tools>
 {tool_lines}
+</available_tools>
 
-[候補生成プロトコル]
+<task>
 自己モデルと現在の状況を参照し、次にとりうる行動候補を【5個】列挙してください。
 
-※ log の result 欄に「[表示上 N/M字。ツール実行時は完全取得済]」と付いているのは、
-  コンテキスト予算の都合で表示を縮めているだけです。そのツール実行時は完全な結果を
-  受け取って処理済みなので、同じファイルを再読込する必要はありません。
+※ world_state.recent_events の result 欄に「[表示上 N/M字。ツール実行時は完全取得済]」と
+  付いているのは、コンテキスト予算の都合で表示を縮めているだけです。そのツール実行時は
+  完全な結果を受け取って処理済みなので、同じファイルを再読込する必要はありません。
+※ 5 cycle より古い tool 事実は world_fact_view tool で取得可能 (affordance、相同並置)。
 
 - 各候補は「全く異なる意図・目的」であること（同じ意図の候補は禁止）
 - 連続して実行したい場合は「ツール名+ツール名+...」形式で記述可（例: read_file+update_self, WebSearch+WebFetch+write_file）
@@ -396,5 +425,6 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 
 以下の形式で **5 候補** を出力してください (1 行 1 候補、行頭に番号 1〜5):
 [意図・目的] → ツール名（または ツール名+ツール名+...） / predicted_e2: XX / predicted_ec: 0.XX
+</task>
 
 [TOOL:...]は不要です。候補のみ出力してください。"""
