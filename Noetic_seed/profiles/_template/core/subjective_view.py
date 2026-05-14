@@ -172,8 +172,12 @@ def _related_memory(state: dict, limit: int = 5, excerpt_len: int = 80) -> list:
     result = []
     for m in memories[:limit]:
         m_id = m.get("id", "")
-        # commit 5/6 で `excerpt_80chars` field 直 read に置換 (P2-04 additive)
-        excerpt = _excerpt_80(m.get("content", ""), excerpt_len)
+        # V07 Phase 2 commit 6: memory.py に追加された excerpt_80chars field を直 read。
+        # 後方互換 fallback: field 未設定 (古い caller / test mock) なら _excerpt_80
+        # で生成 (Codex audit P2-04 additive-only 整合)。
+        excerpt = m.get("excerpt_80chars")
+        if excerpt is None:
+            excerpt = _excerpt_80(m.get("content", ""), excerpt_len)
         cycles_ago = _calc_cycles_ago(m, current_cycle)
         result.append({
             "id": m_id,

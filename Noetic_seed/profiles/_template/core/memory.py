@@ -632,6 +632,20 @@ def get_relevant_memories(
         merged.append({**s, "kind": "subjective"})
         seen_ids.add(sid)
 
+    # V07 Phase 2 commit 5 (Codex audit 2026-05-14 P2-04 additive-only fix):
+    # excerpt_80chars field を全 entry に付与。既存 field は一切変更しない
+    # (subjective_view._related_memory が hybrid 80 字抜粋を直 read 可能、
+    # format_memories_for_prompt 等の既存 caller は本 field を consume しない
+    # ので後方互換、PLAN §4 Phase 2 commit 5 literal)。
+    # 境界: <=80 字は marker なし、>80 字は先頭 80 字 + "…" marker。
+    for m in merged:
+        content = m.get("content", "")
+        content_str = str(content) if content else ""
+        if len(content_str) > 80:
+            m["excerpt_80chars"] = content_str[:80] + "…"
+        else:
+            m["excerpt_80chars"] = content_str
+
     return merged
 
 
