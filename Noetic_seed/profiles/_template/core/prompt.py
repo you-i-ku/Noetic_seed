@@ -228,6 +228,83 @@ def _calc_log_budget() -> int:
     return max(1000, total - reserved)
 
 
+def _build_pending_block(state: dict) -> str:
+    """V07 Phase 1 hotfix (Codex audit AUD-P1-01 fix): <pending> XML block helper。
+
+    prompt.py:308-369 の inline pending text 構築 logic を helper 抽出、LLM① と
+    LLM② で reuse する (commit 4 で prompt_assembly が pending builder を欠落させた
+    bug を構造的に防止)。
+
+    Args:
+        state: Noetic state dict (`pending` / `stream_active` / `stream_params` 含む)
+
+    Returns:
+        "<pending>\n  ...\n</pending>" XML block 文字列、空 pending でも block 維持
+    """
+    pending = state.get("pending", []) or []
+    pending_lines = []
+    if pending:
+        unresolved = [p for p in pending
+                      if p.get("observed_content") is None
+                      and p.get("gap", 0.0) > 0.0]
+        resolved = [p for p in pending
+                    if p.get("observed_content") is not None
+                    or p.get("gap", 0.0) == 0.0]
+
+        for p in sorted(unresolved, key=lambda x: -x.get("priority", 0))[:10]:
+            p_type = p.get("type", "?")
+            content = (p.get("content_intent") or p.get("content", ""))[:80]
+            p_id = p.get("id", "?")
+            if p_type == "pending":
+                source = p.get("source_action", "?")
+                lag = p.get("observation_lag_kind", "?")
+                gap_pct = round(p.get("gap", 0.0) * 100)
+                attempts = p.get("attempts", 1)
+                ch = p.get("observed_channel") or p.get("expected_channel") or ""
+                ch_tag = f" ch={ch}" if ch else ""
+                origin = p.get("origin_cycle", "?")
+                pending_lines.append(
+                    f"  [pending dismiss={p_id} src={source} lag={lag} g={gap_pct}% x{attempts}{ch_tag}] {content} (cycle {origin}〜)"
+                )
+            else:
+                p_ch = p.get("channel", "")
+                ch_tag = f" ch={p_ch}" if p_ch else ""
+                pending_lines.append(f"  [{p_type} dismiss={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
+
+        if resolved:
+            resolved_sorted = sorted(
+                resolved,
+                key=lambda p: p.get("observed_time") or "",
+                reverse=True,
+            )[:3]
+            pending_lines.append("")
+            pending_lines.append("  【最近完了した応答 (参考、既に済)】")
+            for p in resolved_sorted:
+                ch = p.get("observed_channel") or p.get("expected_channel") or ""
+                ch_tag = f" ch={ch}" if ch else ""
+                src = p.get("source_action", "?")
+                obs_time = p.get("observed_time", "") or ""
+                content = (p.get("content_intent") or p.get("content", ""))[:60]
+                pending_lines.append(
+                    f"  [完了 src={src}{ch_tag}] {content} → 観測済 ({obs_time})"
+                )
+
+    stream_status = ""
+    if state.get("stream_active"):
+        sp = state.get("stream_params", {}) or {}
+        _frames = sp.get("frames", "?")
+        _frames_str = "無制限（stop呼出まで継続）" if _frames == 0 else str(_frames)
+        stream_status = (
+            f"\n[camera_stream アクティブ中: facing={sp.get('facing','?')} "
+            f"frames={_frames_str} interval={sp.get('interval_sec','?')}s] "
+            f"観察はバックグラウンドで継続中。他ツールを並行実行可能。"
+            f"能動停止は camera_stream_stop。"
+        )
+
+    body = "\n".join(pending_lines) if pending_lines else "  なし"
+    return f"<pending>\n{body}{stream_status}\n</pending>"
+
+
 def _build_recent_history_block(state: dict, limit: int = 5) -> str:
     """<recent_history> XML block: subjective field (intent + e1-e4) のみ。
 
@@ -305,102 +382,22 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
         # backward compat: list 未指定時は既存 scalar 経路 (tool_level ガード継承)
         fire_cause_line = f"\n[発火原因: {fire_cause}]"
 
-    # pending（未対応事項） — UPS v2 (type='pending') / 旧形式両対応
-    # id 形式: p_{session}_{cycle:04d}_{source[:8]}_{ms} (log entry の
-    # {session}_{cycle:04d} に対応)。dismiss 時はこの p_ prefix id を渡す。
-    pending = state.get("pending", [])
-    if pending:
-        # 段階9 fix 1: 未消化と消化済を分離。消化済 (observed_content 埋まり or
-        # gap=0.0) を "未対応事項" に出すと LLM が「まだ応答してない」と誤認する。
-        unresolved = [p for p in pending
-                      if p.get("observed_content") is None
-                      and p.get("gap", 0.0) > 0.0]
-        resolved = [p for p in pending
-                    if p.get("observed_content") is not None
-                    or p.get("gap", 0.0) == 0.0]
+    # V07 Phase 1 hotfix: pending + stream_status を helper に集約 (commit 4 の
+    # prompt_assembly pending 欠落 bug を構造的に防止)
+    pending_block = _build_pending_block(state)
 
-        pending_lines = []
-        for p in sorted(unresolved, key=lambda x: -x.get("priority", 0))[:10]:
-            p_type = p.get("type", "?")
-            # 段階10.5 Fix 2: content_intent 表示 (LLM 生成 why、表示用)
-            content = (p.get("content_intent") or p.get("content", ""))[:80]
-            p_id = p.get("id", "?")
-            if p_type == "pending":
-                # UPS v2: source_action + lag_kind + gap + attempts + channel
-                source = p.get("source_action", "?")
-                lag = p.get("observation_lag_kind", "?")
-                gap_pct = round(p.get("gap", 0.0) * 100)
-                attempts = p.get("attempts", 1)
-                ch = p.get("observed_channel") or p.get("expected_channel") or ""
-                ch_tag = f" ch={ch}" if ch else ""
-                origin = p.get("origin_cycle", "?")
-                pending_lines.append(
-                    f"  [pending dismiss={p_id} src={source} lag={lag} g={gap_pct}% x{attempts}{ch_tag}] {content} (cycle {origin}〜)"
-                )
-            else:
-                # 旧形式 fallback (migration 期間 safety; Phase 5 iku 再生成後は消える)
-                p_ch = p.get("channel", "")
-                ch_tag = f" ch={p_ch}" if p_ch else ""
-                pending_lines.append(f"  [{p_type} dismiss={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
-
-        # 段階9 fix 1: 副次セクション。直近 3 件の消化済を参考表示し、
-        # LLM に「これは完了したこと」を構造的に認識させる。
-        if resolved:
-            resolved_sorted = sorted(
-                resolved,
-                key=lambda p: p.get("observed_time") or "",
-                reverse=True,
-            )[:3]
-            pending_lines.append("")
-            pending_lines.append("  【最近完了した応答 (参考、既に済)】")
-            for p in resolved_sorted:
-                ch = p.get("observed_channel") or p.get("expected_channel") or ""
-                ch_tag = f" ch={ch}" if ch else ""
-                src = p.get("source_action", "?")
-                obs_time = p.get("observed_time", "") or ""
-                # 段階10.5 Fix 2: content_intent 表示 (LLM 生成 why)
-                content = (p.get("content_intent") or p.get("content", ""))[:60]
-                pending_lines.append(
-                    f"  [完了 src={src}{ch_tag}] {content} → 観測済 ({obs_time})"
-                )
-
-        pending_text = "\n".join(pending_lines) if pending_lines else "  なし"
-    else:
-        pending_text = "  なし"
-
-    # 関連記憶: V07 Phase 1 commit 3 で subjective_state.related_memory に統合済
-    # (subjective_view._related_memory が get_relevant_memories を呼ぶ、重複ゼロ)。
-
-    # camera_stream アクティブ時の状態表示（並行活動を可視化）
-    stream_status_line = ""
-    if state.get("stream_active"):
-        sp = state.get("stream_params", {}) or {}
-        _frames = sp.get("frames", "?")
-        _frames_str = "無制限（stop呼出まで継続）" if _frames == 0 else str(_frames)
-        stream_status_line = (
-            f"\n[camera_stream アクティブ中: facing={sp.get('facing','?')} "
-            f"frames={_frames_str} interval={sp.get('interval_sec','?')}s] "
-            f"観察はバックグラウンドで継続中。他ツールを並行実行可能。"
-            f"能動停止は camera_stream_stop。"
-        )
-
-    # Step E-3b: 反応待ち表示は旧 pending_feedback 由来だったが、UPS v2 pending
-    # (retro_log_entry_id 付き + observed_content=None) が上記 [未対応事項] に
-    # 表示されることで代替される。重複表示を避けて削除。
-
-    # V07 Phase 1 commit 3: XML tag 化、相同並置 (subjective_state + world_state)
-    summary_section = f"\n<summaries>\n{summary_text}\n</summaries>\n" if summary_text else ""
-    return f"""[{now}]{fire_cause_line}
+    # V07 Phase 1 hotfix (Codex audit AUD-P2-02 fix): summaries は recent_history の
+    # 後ろに移動 (PLAN §3-4 順序整合、subjective → world → pending → history → summaries → tools → task)
+    summary_section = f"\n<summaries>\n{summary_text}\n</summaries>" if summary_text else ""
+    prompt_body = f"""[{now}]{fire_cause_line}
 
 {subjective_state_block}
 
 {world_state_block}
 
-<pending>
-{pending_text}{stream_status_line}
-</pending>
-{summary_section}
-{recent_history_block}
+{pending_block}
+
+{recent_history_block}{summary_section}
 
 <available_tools>
 {tool_lines}
@@ -428,3 +425,21 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 </task>
 
 [TOOL:...]は不要です。候補のみ出力してください。"""
+
+    # V07 Phase 1 hotfix (Codex audit AUD-P3-01 fix): LLM① 側 SOFT_LIMIT 警告
+    # (LLM② assemble_system_prompt のみ警告だったが、V07 で subjective + world 両 ring
+    # 追加分は LLM① 側にも乗るため overflow リスク同等)
+    try:
+        from core.prompt_assembly import SYSTEM_PROMPT_SOFT_LIMIT
+        from core.config import estimate_tokens
+        total = estimate_tokens(prompt_body)
+        if total > SYSTEM_PROMPT_SOFT_LIMIT:
+            import sys
+            print(
+                f"[build_prompt_propose] prompt トークン超過: {total} > {SYSTEM_PROMPT_SOFT_LIMIT}",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass  # graceful skip (estimate_tokens 不在等)
+
+    return prompt_body

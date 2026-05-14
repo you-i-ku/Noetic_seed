@@ -230,7 +230,7 @@ def build_subjective_state(state: dict) -> str:
     glob = gs["global"]
     graph_lines = [
         "  graph_summary:",
-        f"    ego:    self_edges={ego['self_edges']}, memory_1hop={ego['memory_1hop_count']}",
+        f"    ego:    self_edges={ego['self_edges']}, memory_1hop_count={ego['memory_1hop_count']}",
         f"    global: cluster_mi={glob['cluster_mi']}, frontier={glob['frontier_node_count']}, maturity={glob['graph_maturity']}",
     ]
 

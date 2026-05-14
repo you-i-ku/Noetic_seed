@@ -1,13 +1,17 @@
-"""test_prompt_v07_paradigm.py — V07 Phase 1 commit 3 識別力 test
+"""test_prompt_v07_paradigm.py — V07 Phase 1 commit 3 + hotfix 識別力 test
 
-build_prompt_propose の XML tag 化 + subjective_state / world_state 相同並置検証。
-PLAN §6-2 commit 3 literal:
+build_prompt_propose (LLM①) + assemble_system_prompt (LLM②) の XML tag 化 +
+subjective_state / world_state 相同並置検証。
+
+PLAN §6-2 commit 3 literal + Codex audit 2026-05-14 hotfix:
 - fixture 3 種 (cycle 50 normal / cycle 1 bootstrap / orphan)
-- 誤実装 fail パターン: XML tag pair 不成立 / subjective 内 world 混入 / 順序違反 / bootstrap 全省略
+- 誤実装 fail パターン: XML tag pair 不成立 / subjective 内 world 混入 / 順序違反 /
+  bootstrap 全省略 / pending 欠落 (AUD-P1-01) / tool block 旧 heading (AUD-P1-01)
 """
 import pytest
 
 from core import prompt as prompt_module
+from core import prompt_assembly
 
 
 # ============================================================
@@ -185,3 +189,60 @@ def test_world_fact_view_affordance_guidance(state_normal, ctrl_minimal, tools_m
     # 誤実装 (guidance 抜け) で fail
     assert "world_fact_view" in task_body, "affordance guidance missing in task block"
     assert "5 cycle より古い" in task_body, "silent loss notice missing"
+
+
+# ============================================================
+# LLM② (assemble_system_prompt) V07 検証 (hotfix 追加、AUD-P1-01 fix)
+# ============================================================
+
+def test_assemble_system_prompt_pending_included(state_normal, monkeypatch):
+    """AUD-P1-01 fix: assemble_system_prompt sections に <pending> builder 接続必須。
+
+    誤実装 (commit 4 ミス、pending builder 欠落) で fail する識別力 test。
+    """
+    import core.memory as mm
+    monkeypatch.setattr(mm, "get_relevant_memories", lambda *a, **k: [])
+
+    body = prompt_assembly.assemble_system_prompt(state_normal, tools_dict={})
+    assert "<pending>" in body, "AUD-P1-01: <pending> open tag missing in assemble_system_prompt"
+    assert "</pending>" in body, "AUD-P1-01: </pending> close tag missing"
+
+
+def test_assemble_system_prompt_tool_block_xml(state_normal, monkeypatch):
+    """AUD-P1-01 fix: tool block が <available_tools> XML tag に統一 (旧 [利用可能なツール] 撤去)。"""
+    import core.memory as mm
+    monkeypatch.setattr(mm, "get_relevant_memories", lambda *a, **k: [])
+
+    body = prompt_assembly.assemble_system_prompt(state_normal, tools_dict={})
+    # XML tag 統一
+    assert "<available_tools>" in body, "AUD-P1-01: <available_tools> tag missing"
+    assert "</available_tools>" in body, "AUD-P1-01: </available_tools> close missing"
+    # 旧 heading 撤去
+    assert "[利用可能なツール]" not in body, (
+        "AUD-P1-01: legacy heading [利用可能なツール] still present"
+    )
+
+
+def test_assemble_system_prompt_v07_section_order(state_normal, monkeypatch):
+    """LLM② 側 section 順序検証 (PLAN §3-4 案)。
+
+    誤実装 (順序違反 / section 欠落) で fail。
+    """
+    import core.memory as mm
+    monkeypatch.setattr(mm, "get_relevant_memories", lambda *a, **k: [])
+
+    body = prompt_assembly.assemble_system_prompt(state_normal, tools_dict={})
+    # V07 主要 section 全部存在
+    expected_tags = ("subjective_state", "world_state", "pending",
+                     "recent_history", "available_tools")
+    positions = {}
+    for tag in expected_tags:
+        idx = body.find(f"<{tag}>")
+        assert idx >= 0, f"section <{tag}> missing in assemble_system_prompt"
+        positions[tag] = idx
+    # 順序: subjective → world → pending → history → tools
+    expected_order = list(expected_tags)
+    sorted_by_pos = sorted(positions, key=lambda k: positions[k])
+    assert sorted_by_pos == expected_order, (
+        f"V07 section order violation in LLM② path: expected {expected_order}, got {sorted_by_pos}"
+    )

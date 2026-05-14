@@ -249,7 +249,7 @@ def assemble_system_prompt(
     # とは layer 違い (§5-2 literal、state.self は subjective_state 専有、それ以外は world_model)。
     from core.subjective_view import build_subjective_state
     from core.world_state_view import build_world_state
-    from core.prompt import _build_recent_history_block
+    from core.prompt import _build_recent_history_block, _build_pending_block
 
     sections = [
         build_approval_protocol(),
@@ -259,9 +259,13 @@ def assemble_system_prompt(
         build_world_state(state),
         # 既存 [世界モデル] (entities/channels/dispositions/opinions、§5-2 layer 違い)
         build_world_model_section(world_model, state=state),
+        # V07 Phase 1 hotfix (Codex audit AUD-P1-01 fix): <pending> builder
+        # を sections に接続 (commit 4 で欠落していた smoke blocker)
+        _build_pending_block(state),
         # V07: <recent_history> (subjective field only、tool/args/result は world_state へ)
         _build_recent_history_block(state, limit=5),
-        "[利用可能なツール]\n" + build_tool_block(allowed_tools, tools_dict, registry=registry),
+        # V07 Phase 1 hotfix (Codex audit AUD-P1-01 fix): tool block も XML tag に統一
+        f"<available_tools>\n{build_tool_block(allowed_tools, tools_dict, registry=registry)}\n</available_tools>",
         # 段階11-D Step 4-2 hotfix v4: forced 時のみ末尾に強制実行指示。空文字列は
         # 下の "\n\n".join(s for s in sections if s) で自動除外される。
         build_force_directive(force_tool),
