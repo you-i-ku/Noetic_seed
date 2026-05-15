@@ -14,9 +14,38 @@ from core.memory_links import list_links
 from core.info_gain import compute_efe_components, CYCLE_KEY
 from core.metrics import compute_fog_metrics, _sort_entries_global_newest_first, LINKS_SCAN_LIMIT
 from core.jepa_runtime import predict_next_conditioned_batch
+# V07.5 commit 4 (A2 literal): preference_distribution は scipy 直接依存
+# (preference_distribution.py:35 `from scipy import special`)、module top-level
+# import すると scipy 必須環境化 = _rebuild_efe_C_snapshot 内に literal lazy import
+# (Codex 2 周目 P3 「関数内 import → module top-level」原則と例外、scipy 依存
+# 回避優先、production per-profile venv で literal install 済前提継承)
 
 # 段階5: Predictor インスタンス (WM 設定に従って初期化、モジュールシングルトン)
 _PREDICTOR = get_predictor(WORLD_MODEL_CFG.get("predictor_mode", "light"))
+
+
+def _rebuild_efe_C_snapshot(state: dict) -> None:
+    """V07.5 commit 4 (A2 literal): cycle start で preference C を re-construct し
+    state["_efe_C"] に literal snapshot。cycle 中は read-only freeze、self-referential
+    loop (旧 tools/builtin.py update_self 同 action 内 C 再構築 = cycle 55 attractor
+    真因の 1 つ) を構造的に literal 解消 (PLAN v1.4 §3-4 + §6-2 literal)。
+
+    first-cycle bootstrap: state["_efe_C"] None or empty な cycle 1 でも
+    compute_C_from_self が空 dict 許容 (空 self → empty C components literal)、
+    commit 3 controller_select の `_efe_C is None` graceful skip 依存ガードを literal 解消。
+
+    Active Inference posterior observer pattern literal: cycle start で C を
+    "homeostatic prior preferences" として固定 snapshot (Friston FEP literal
+    「C は agent が存在し続けるための条件」)、cycle 中の self-referential update を禁止。
+    """
+    # lazy import: scipy 直接依存を controller.py module load 時に literal 必須化させない
+    # (preference_distribution.py:35 `from scipy import special` 経路、per-profile venv 前提)
+    from core.preference_distribution import compute_C_from_self
+    state["_efe_C"] = compute_C_from_self(
+        state.get("self", {}),
+        self_confidence=state.get("_efe_self_confidence", {}),
+    )
+    state["_efe_C_update_cycle"] = state.get("cycle_id", 0)
 
 
 def controller(state: dict, tools_dict: dict, level_tools: dict) -> dict:
@@ -27,7 +56,15 @@ def controller(state: dict, tools_dict: dict, level_tools: dict) -> dict:
     run_ai_tool_fn 引数撤去)、sandbox/tools/ 動的 load 機構 + Level 4-6
     昇格 logic を削除。Level 0-3 のみ残し、Level 3 = TOOLS 全 + bash + claw 系
     を最終解放とする。
+
+    V07.5 commit 4 (A2 literal): cycle start で _efe_C を re-construct
+    (per-cycle snapshot literal、cycle 中は read-only freeze)。self-referential loop
+    (旧 update_self 同 action 内 C 再構築) を構造的に literal 解消、cycle 55 attractor
+    真因の 1 つ literal 防止。
     """
+    # V07.5 commit 4: cycle start hook for preference C snapshot (A2 literal)
+    _rebuild_efe_C_snapshot(state)
+
     energy = state.get("energy", 50)
     # 段階13 Phase 0.1.D: tool 別 e2 平均で raw (tool/result) と subjective (e2)
     # の両層 field を同時参照するため merge view を使う
