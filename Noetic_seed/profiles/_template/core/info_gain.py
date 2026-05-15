@@ -101,6 +101,7 @@ def compute_efe_components(
     entries_with_embedding: list,
     links: list,
     fog_now: Optional[dict] = None,
+    hypothetical_next: Optional[dict] = None,
 ) -> dict:
     """EFE 9 成分 + 3 カテゴリ + 統合 G を計算 (Slice 6.5 Step 4 公開 API、PLAN §4.4 + §4.5)。
 
@@ -122,19 +123,38 @@ def compute_efe_components(
 
     output schema (§4.5 literal): efe dict + C 情報 (state["_efe_C"] 由来、Step 6 hook 配線済)。
 
+    V07.5 commit 2 (PLAN v1.2 §4-1 commit 2 literal): 3 引数化 refactor + pre-action 化。
+    `hypothetical_next=None` で旧挙動 (post hoc、cycle 末 measurement)、non-None で
+    pre-action 化 (candidate-conditioned 計算、controller の argmin G(π) selection 経路用)。
+
+    後方互換 wrapper 維持 (`metrics.py:420` + `test_efe_integration.py:33` 等への影響回避):
+    `hypothetical_next` 引数を省略すれば旧 5-arg API 完全互換。
+
+    hypothetical_next dict (non-None 時の構造):
+      - "predicted_embedding": list  # JEPA predict_next_conditioned_batch 出力、1024D L2 normalized
+      - "candidate": dict  # {tool, intent/reason, ...}、各 helper で必要に応じて参照
+
+    pre-action 化対応 6 helper: novelty / effective_change / competence /
+    tool_diversity / consecutive_penalty / centroid_stuck
+    scaffolding 3 helper (signature 拡張のみ、internal は post hoc 維持): pe_drop /
+    density / memory_link (これら 3 つは predicted PE / density / link_strength の
+    予測 model が必要、将来 commit で literal 拡張、本 commit 2 では signature 拡張のみ)。
+
     Args / Returns: §4.5 literal、controller には流さない (Slice 7 まで「計測のみ」継承)。
     """
-    novelty = _novelty_gain(entries_with_embedding, prev_snapshot)
-    pe_drop = _pe_drop_gain(state, prev_snapshot)
-    density = _density_gain(prev_snapshot, fog_now)
-    memory_link = _memory_link_gain(links, prev_snapshot)
+    novelty = _novelty_gain(entries_with_embedding, prev_snapshot, hypothetical_next)
+    pe_drop = _pe_drop_gain(state, prev_snapshot, hypothetical_next)
+    density = _density_gain(prev_snapshot, fog_now, hypothetical_next)
+    memory_link = _memory_link_gain(links, prev_snapshot, hypothetical_next)
 
-    effective_change = _effective_change_gain(state, prev_snapshot, entries_with_embedding)
-    competence = _competence_gain(state, prev_snapshot)
-    tool_diversity = _tool_diversity_gain(state, prev_snapshot)
+    effective_change = _effective_change_gain(
+        state, prev_snapshot, entries_with_embedding, hypothetical_next
+    )
+    competence = _competence_gain(state, prev_snapshot, hypothetical_next)
+    tool_diversity = _tool_diversity_gain(state, prev_snapshot, hypothetical_next)
 
-    consecutive_pen = _consecutive_penalty(state)
-    centroid_stk = _centroid_stuck(entries_with_embedding)
+    consecutive_pen = _consecutive_penalty(state, hypothetical_next)
+    centroid_stk = _centroid_stuck(entries_with_embedding, hypothetical_next)
 
     epistemic_gain = novelty + pe_drop + density + memory_link
     pragmatic_gain = effective_change + competence + tool_diversity
@@ -264,7 +284,11 @@ def snapshot_for_next_cycle(
 # 内部 helper: 6 項目 (各々 1 関数 = literal 1 対応)
 # ============================================================
 
-def _novelty_gain(entries_with_embedding: list, prev_snapshot: dict) -> float:
+def _novelty_gain(
+    entries_with_embedding: list,
+    prev_snapshot: dict,
+    hypothetical_next: Optional[dict] = None,
+) -> float:
     """epistemic surprise の Noetic 近似 (Lv3、PLAN §4.1.1、nat 単位)。
 
     Slice 6.5 Step 3a (2026-05-11) 数式変更:
@@ -282,6 +306,10 @@ def _novelty_gain(entries_with_embedding: list, prev_snapshot: dict) -> float:
 
     識別力: cosine=0.5 で 旧 0.5 / 新 ≈ 0.693 nat、cosine=0 で 旧 1.0 / 新 ≈ 6.9 nat。
     cosine 値域は bge-m3 L2 正規化済で [0, 1] 範囲、負値の安全のため max(0, ·) clamp。
+
+    V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
+    predicted_embedding を「新 entry」として既存と比較した novelty を返す。
+    None なら旧挙動 (post hoc、cycle 末 measurement)。
     """
     try:
         import numpy as np
@@ -292,6 +320,24 @@ def _novelty_gain(entries_with_embedding: list, prev_snapshot: dict) -> float:
         e["embedding"] for e in (entries_with_embedding or [])
         if isinstance(e, dict) and isinstance(e.get("embedding"), list)
     ]
+
+    # V07.5 pre-action 経路: predicted_embedding を新 entry として既存と比較
+    if hypothetical_next is not None:
+        predicted = hypothetical_next.get("predicted_embedding")
+        if not isinstance(predicted, list):
+            return 0.0  # graceful skip
+        existing_embs = embs[:NOVELTY_K_NEIGHBORS]  # newest existing
+        if not existing_embs:
+            return 0.0  # 比較不可 (bootstrap)
+        pred_arr = np.array([predicted], dtype=np.float32)
+        ex_arr = np.array(existing_embs, dtype=np.float32)
+        sims = pred_arr @ ex_arr.T  # (1, N_existing)
+        max_sim = float(sims.max())
+        max_sim_clamped = max(0.0, min(1.0, max_sim))
+        import math
+        return -math.log(max_sim_clamped + EPS_LOG)
+
+    # post hoc 既存 logic (旧 5-arg 後方互換)
     prev_count = int(prev_snapshot.get("entries_count", 0) or 0)
     n_new = len(embs) - prev_count
     if n_new <= 0:
@@ -315,7 +361,10 @@ def _novelty_gain(entries_with_embedding: list, prev_snapshot: dict) -> float:
 
 
 def _compute_log_p_now(
-    state: dict, prev_snapshot: dict, entries_with_embedding: list
+    state: dict,
+    prev_snapshot: dict,
+    entries_with_embedding: list,
+    hypothetical_next: Optional[dict] = None,
 ) -> Optional[float]:
     """現 cycle の **新 entry** 群の平均 log_p(o | C_now) (Lv3 helper、PLAN §4.2.1)。
 
@@ -328,10 +377,24 @@ def _compute_log_p_now(
     entry の log density を平均する。calculable な値があれば float、不能 (C 未構築 /
     新 entry なし / embedding なし) → None (_effective_change_gain と
     snapshot_for_next_cycle で共用)。
+
+    V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
+    predicted_embedding を C で評価した log density を返す。None なら旧挙動。
     """
     C_data = state.get("_efe_C")
     if not C_data or not C_data.get("components"):
         return None
+    from core.preference_distribution import estimate_density
+    log_p_fn = estimate_density(C_data["components"], method="vmf")
+
+    # V07.5 pre-action 経路: predicted_embedding の log_p を直接計算
+    if hypothetical_next is not None:
+        predicted = hypothetical_next.get("predicted_embedding")
+        if not isinstance(predicted, list):
+            return None  # graceful skip
+        return float(log_p_fn(predicted))
+
+    # post hoc 既存 logic
     embs = [
         e["embedding"] for e in (entries_with_embedding or [])
         if isinstance(e, dict) and isinstance(e.get("embedding"), list)
@@ -341,13 +404,14 @@ def _compute_log_p_now(
     if n_new <= 0:
         return None  # 新 entry なし (両実装一致 graceful)
     new_embs = embs[:n_new]  # newest first 先頭 n_new 件
-    from core.preference_distribution import estimate_density
-    log_p_fn = estimate_density(C_data["components"], method="vmf")
     return sum(log_p_fn(e) for e in new_embs) / len(new_embs)
 
 
 def _effective_change_gain(
-    state: dict, prev_snapshot: dict, entries_with_embedding: list
+    state: dict,
+    prev_snapshot: dict,
+    entries_with_embedding: list,
+    hypothetical_next: Optional[dict] = None,
 ) -> float:
     """preference との cross-entropy 改善量 (Lv3、PLAN §4.2.1、nat 単位)。
 
@@ -363,8 +427,14 @@ def _effective_change_gain(
     新 entry なし or 初 cycle (prev 値なし) → 0 (両実装一致 graceful)
 
     識別力: 旧 e1 [0,1] 値域内の小さい diff vs 新 log scale で nat 単位 (規模差大)。
+
+    V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
+    `_compute_log_p_now` 経由で predicted_embedding の log_p と prev_snapshot.log_p の
+    差分を返す = 「この candidate 実行で preference に近づく / 離れる」literal evaluation。
     """
-    log_p_now = _compute_log_p_now(state, prev_snapshot, entries_with_embedding)
+    log_p_now = _compute_log_p_now(
+        state, prev_snapshot, entries_with_embedding, hypothetical_next
+    )
     if log_p_now is None:
         return 0.0
     log_p_prev = prev_snapshot.get("effective_change_log_p")
@@ -373,7 +443,11 @@ def _effective_change_gain(
     return float(log_p_now) - float(log_p_prev)
 
 
-def _memory_link_gain(links: list, prev_snapshot: dict) -> float:
+def _memory_link_gain(
+    links: list,
+    prev_snapshot: dict,
+    hypothetical_next: Optional[dict] = None,
+) -> float:
     """A-MEM link generation + memory evolution の Noetic 近似 (Lv3、PLAN §4.1.4、nat 単位)。
 
     Slice 6.5 Step 3a (2026-05-11) 数式変更:
@@ -388,7 +462,18 @@ def _memory_link_gain(links: list, prev_snapshot: dict) -> float:
 
     識別力: 旧 max(0, diff)=4.0 vs 新 log(6/2)≈1.099 (例 strength_now=5, prev=1)、
     decay で 旧 0 (clamp) vs 新 負値 (識別、Lv3 では情報減少が見える)。
+
+    Slice 4 F-001/F-002/F-003 implementation 保持必須 (PLAN v1.2 §3-2 literal):
+    memory_link 経路は Slice 4 で確立した前 cycle EC modulation / 双方向 co_activation /
+    link-strength telemetry 4 field を破壊しない、本 commit では touch なし維持。
+
+    V07.5 commit 2 (PLAN v1.2): hypothetical_next 引数 scaffolding (signature 拡張のみ)。
+    pre-action 化には predicted memory_link_strength の予測 model が必要 (JEPA は
+    embedding のみ予測、link_strength は別 model)、commit 2 では post hoc 動作維持。
+    将来 commit で memory_link 専用予測 model 追加時に literal 拡張。
     """
+    # V07.5 commit 2 scaffolding: hypothetical_next 引数は当面 ignore (post hoc 維持)
+    _ = hypothetical_next
     import math
     strength_now = sum(
         float(l.get("strength", 0.0) or 0.0)
@@ -398,7 +483,11 @@ def _memory_link_gain(links: list, prev_snapshot: dict) -> float:
     return math.log((1.0 + strength_now) / (1.0 + strength_prev))
 
 
-def _pe_drop_gain(state: dict, prev_snapshot: dict) -> float:
+def _pe_drop_gain(
+    state: dict,
+    prev_snapshot: dict,
+    hypothetical_next: Optional[dict] = None,
+) -> float:
     """Bayesian posterior precision 上昇 (Lv3、PLAN §4.1.2、nat 単位)。
 
     Slice 6.5 Step 3a (2026-05-11、_world_model_resolution_gain から split):
@@ -411,7 +500,13 @@ def _pe_drop_gain(state: dict, prev_snapshot: dict) -> float:
 
     識別力: prev=80, now=10 で 旧 0.7 vs 新 log(80.001/10.001) ≈ 2.08 nat、
     prev=10, now=80 で 旧 0 (clamp) vs 新 ≈ -2.08 nat (識別、Lv3 では負値保持)。
+
+    V07.5 commit 2 (PLAN v1.2): hypothetical_next 引数 scaffolding (signature 拡張のみ)。
+    pre-action 化には predicted prediction_error の予測 model 必要、JEPA は embedding
+    のみ予測のため commit 2 では post hoc 動作維持。将来 commit で pe 予測 model 追加時に拡張。
     """
+    # V07.5 commit 2 scaffolding: hypothetical_next 引数は当面 ignore (post hoc 維持)
+    _ = hypothetical_next
     import math
     pe_now = state.get("last_prediction_error")
     pe_prev = prev_snapshot.get("last_prediction_error")
@@ -420,7 +515,11 @@ def _pe_drop_gain(state: dict, prev_snapshot: dict) -> float:
     return math.log((float(pe_prev) + EPS_LOG) / (float(pe_now) + EPS_LOG))
 
 
-def _density_gain(prev_snapshot: dict, fog_now: Optional[dict]) -> float:
+def _density_gain(
+    prev_snapshot: dict,
+    fog_now: Optional[dict],
+    hypothetical_next: Optional[dict] = None,
+) -> float:
     """memory graph 局所密度の MI delta 近似 (Lv3、PLAN §4.1.3、nat 単位)。
 
     Slice 6.5 Step 3a (2026-05-11、_world_model_resolution_gain から split):
@@ -433,7 +532,13 @@ def _density_gain(prev_snapshot: dict, fog_now: Optional[dict]) -> float:
 
     識別力: now=0.3, prev=0.1 で 旧 0.2 vs 新 log(0.301/0.101)≈1.092 nat、
     now=0.1, prev=0.3 で 旧 0 (clamp) vs 新 ≈ -1.092 nat (識別、Lv3 で負値捕捉)。
+
+    V07.5 commit 2 (PLAN v1.2): hypothetical_next 引数 scaffolding (signature 拡張のみ)。
+    pre-action 化には predicted fog density の予測 model 必要、commit 2 では
+    post hoc 動作維持。
     """
+    # V07.5 commit 2 scaffolding: hypothetical_next 引数は当面 ignore (post hoc 維持)
+    _ = hypothetical_next
     import math
     density_now = (fog_now or {}).get("local_density_mean")
     density_prev = prev_snapshot.get("fog_local_density_mean")
@@ -445,7 +550,11 @@ def _density_gain(prev_snapshot: dict, fog_now: Optional[dict]) -> float:
     return math.log((float(density_now) + EPS_LOG) / (float(density_prev) + EPS_LOG))
 
 
-def _competence_gain(state: dict, prev_snapshot: dict) -> float:
+def _competence_gain(
+    state: dict,
+    prev_snapshot: dict,
+    hypothetical_next: Optional[dict] = None,
+) -> float:
     """CIG C 項 (tool 上達) の log 増分 (Lv3、PLAN §4.2.2、nat 単位)。
 
     Slice 6.5 Step 3b (2026-05-11、_capability_gain から split):
@@ -456,8 +565,33 @@ def _competence_gain(state: dict, prev_snapshot: dict) -> float:
     variance 拡大で負値保持 (predictor 学習で variance 増加もありえる、Lv3 で捕捉)。
 
     識別力: 旧 max(0, ·) clamp vs 新 β·diff (負値保持) で variance 拡大時 fail (誤実装)。
+
+    V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
+    candidate tool 単独の predictor success_rate を candidate-specific competence と
+    して返す (post hoc は全 tool variance 全体評価、pre-action は candidate 単独 evaluation)。
     """
     BETA = 1.0
+
+    # V07.5 pre-action 経路: candidate tool 単独 competence evaluation
+    if hypothetical_next is not None:
+        candidate = hypothetical_next.get("candidate", {})
+        if not isinstance(candidate, dict):
+            return 0.0
+        candidate_tool = candidate.get("tool")
+        if not isinstance(candidate_tool, str) or not candidate_tool:
+            return 0.0
+        pc = state.get("predictor_confidence", {}) or {}
+        tdata = pc.get(candidate_tool, {})
+        if not isinstance(tdata, dict):
+            return 0.0
+        succ = int(tdata.get("success", 0) or 0)
+        fail = int(tdata.get("fail", 0) or 0)
+        attempts = succ + fail
+        if attempts < PREDICTOR_MIN_ATTEMPTS:
+            return 0.0  # bootstrap、competence 不明
+        return BETA * float(succ / attempts)
+
+    # post hoc 既存 logic
     pc = state.get("predictor_confidence", {}) or {}
     success_rates = []
     for tdata in pc.values():
@@ -476,7 +610,11 @@ def _competence_gain(state: dict, prev_snapshot: dict) -> float:
     return BETA * (var_prev - var_now)
 
 
-def _tool_diversity_gain(state: dict, prev_snapshot: dict) -> float:
+def _tool_diversity_gain(
+    state: dict,
+    prev_snapshot: dict,
+    hypothetical_next: Optional[dict] = None,
+) -> float:
     """tool 使用分布の Shannon entropy delta (Lv3、PLAN §4.2.3、nat 単位)。
 
     Slice 6.5 Step 3b (2026-05-11、_capability_gain から split):
@@ -490,6 +628,10 @@ def _tool_diversity_gain(state: dict, prev_snapshot: dict) -> float:
     分布不変 → 0 (両実装一致)
 
     識別力: 旧 count diff clamp vs 新 Shannon entropy diff、連発時の負値で誤実装 fail。
+
+    V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
+    candidate tool を末尾に追加した hypothetical tool 分布で entropy を計算、
+    prev_snapshot.tool_entropy との差分を返す。
     """
     import math
     ledger = state.get("action_ledger", []) or []
@@ -498,6 +640,20 @@ def _tool_diversity_gain(state: dict, prev_snapshot: dict) -> float:
         if isinstance(entry, dict) and entry.get("tool"):
             t = str(entry["tool"])
             tool_counts[t] = tool_counts.get(t, 0) + 1
+
+    # V07.5 pre-action 経路: candidate tool を末尾に append した hypothetical 分布
+    # Codex review 1 周目 P2-③ fix: candidate 欠落時に post hoc 計算に fall-through せず
+    # graceful skip で 0.0 返却 (他 6 pre-action helper との挙動整合、PLAN §6-7 graceful skip 統一)
+    if hypothetical_next is not None:
+        candidate = hypothetical_next.get("candidate", {})
+        candidate_tool = None
+        if isinstance(candidate, dict):
+            ct = candidate.get("tool")
+            if isinstance(ct, str) and ct:
+                candidate_tool = ct
+        if candidate_tool is None:
+            return 0.0  # graceful skip (pre-action 経路の literal 統一)
+        tool_counts[candidate_tool] = tool_counts.get(candidate_tool, 0) + 1
 
     total = sum(tool_counts.values())
     if total == 0:
@@ -512,7 +668,10 @@ def _tool_diversity_gain(state: dict, prev_snapshot: dict) -> float:
     return H_now - H_prev
 
 
-def _consecutive_penalty(state: dict) -> float:
+def _consecutive_penalty(
+    state: dict,
+    hypothetical_next: Optional[dict] = None,
+) -> float:
     """同 tool 連発の log ratio (Lv3、PLAN §4.3.1、nat 単位)。
 
     Slice 6.5 Step 4 (2026-05-11、_redundancy_penalty から split):
@@ -523,6 +682,11 @@ def _consecutive_penalty(state: dict) -> float:
     - 単発 (run=1): log(2) - log(2.5) ≈ -0.223 nat (負、多様、識別)
     - 5 連発 (run=5): log(6) - log(2.5) ≈ 0.876 nat (正、固着、識別)
     - 空 ledger → 0 (両実装一致 graceful)
+
+    V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
+    candidate tool を action_ledger の末尾に追加した hypothetical run で
+    consecutive_run 計算 = 「この candidate 実行で reflect 連発になるか」literal 検知。
+    cycle 55 attractor (reflect 反復) の構造的防止経路 (PLAN §1-3 直結)。
     """
     import math
     ledger = state.get("action_ledger", []) or []
@@ -530,6 +694,19 @@ def _consecutive_penalty(state: dict) -> float:
     for entry in ledger[-RECENT_TOOL_WINDOW:]:
         if isinstance(entry, dict) and entry.get("tool"):
             recent_tools.append(str(entry["tool"]))
+
+    # V07.5 pre-action 経路: candidate tool を末尾に追加した hypothetical run
+    if hypothetical_next is not None:
+        candidate = hypothetical_next.get("candidate", {})
+        candidate_tool = None
+        if isinstance(candidate, dict):
+            ct = candidate.get("tool")
+            if isinstance(ct, str) and ct:
+                candidate_tool = ct
+        if candidate_tool is None:
+            return 0.0  # graceful skip
+        recent_tools.append(candidate_tool)
+
     if not recent_tools:
         return 0.0
     last_tool = recent_tools[-1]
@@ -542,7 +719,10 @@ def _consecutive_penalty(state: dict) -> float:
     return math.log(1 + consecutive_run) - math.log(DIVERSITY_BASELINE)
 
 
-def _centroid_stuck(entries_with_embedding: list) -> float:
+def _centroid_stuck(
+    entries_with_embedding: list,
+    hypothetical_next: Optional[dict] = None,
+) -> float:
     """embedding 中心固着の log ratio (Lv3、PLAN §4.3.2、nat 単位)。
 
     Slice 6.5 Step 4 (2026-05-11、_redundancy_penalty から split):
@@ -557,12 +737,42 @@ def _centroid_stuck(entries_with_embedding: list) -> float:
     **入力順序契約**: entries_with_embedding は newest first、`[:RECENT_EMB_WINDOW]`
     で先頭 N 件 (newest 直近) を取る (_redundancy_penalty と同 pattern、Codex review
     2026-05-09 P2 #3 fix 整合)。
+
+    V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
+    predicted_embedding を含む hypothetical centroid (newest N-1 件 + predicted) で
+    mean_dist 計算 = 「この candidate 実行で embedding 空間で中心固着するか」literal 検知。
+    cycle 55 attractor (同テーマ反復) の構造的防止経路。
     """
     import math
     try:
         import numpy as np
     except ImportError:
         return 0.0
+
+    # V07.5 pre-action 経路: predicted_embedding を含む hypothetical centroid
+    if hypothetical_next is not None:
+        predicted = hypothetical_next.get("predicted_embedding")
+        if not isinstance(predicted, list):
+            return 0.0  # graceful skip
+        existing_embs = [
+            e["embedding"] for e in (entries_with_embedding or [])[:RECENT_EMB_WINDOW - 1]
+            if isinstance(e, dict) and isinstance(e.get("embedding"), list)
+        ]
+        if len(existing_embs) < RECENT_EMB_WINDOW - 1:
+            return 0.0  # 観察不足 graceful
+        recent_embs = existing_embs + [predicted]
+        arr = np.array(recent_embs, dtype=np.float32)
+        centroid = arr.mean(axis=0)
+        norm = float(np.linalg.norm(centroid))
+        if norm <= 1e-9:
+            return 0.0
+        centroid = centroid / norm
+        sims = arr @ centroid
+        distances = 1.0 - sims
+        mean_dist = float(distances.mean())
+        return math.log(CENTROID_VARIANCE_FLOOR / max(mean_dist, EPS_LOG))
+
+    # post hoc 既存 logic
     embs = [
         e["embedding"] for e in (entries_with_embedding or [])[:RECENT_EMB_WINDOW]
         if isinstance(e, dict) and isinstance(e.get("embedding"), list)
