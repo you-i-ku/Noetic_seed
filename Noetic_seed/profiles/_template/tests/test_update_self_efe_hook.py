@@ -2,9 +2,15 @@
 
 PLAN reference: WORLD_MODEL_DESIGN/INFO_GAIN_EFE_REDESIGN_PLAN.md §5.4 + §6.5
 
+V07.5 commit 6 update (PLAN v1.4 §4-1 commit 6 literal): A2 commit 4 で `_update_self` から
+`_efe_C` 更新が controller.py の `_rebuild_efe_C_snapshot` に literal 移送された (cycle
+start hook、self-referential loop 解消)。本 test も A2 lifecycle に literal 合わせて、
+`_update_self` 呼出後に `_rebuild_efe_C_snapshot(mock_state)` を literal 呼出してから
+`_efe_C` を assert する形に rewrite。`_update_self` 自体は `_efe_self_confidence` 更新のみ
+literal で、`_efe_C` は cycle start hook で literal 再構築 (V07.5 paradigm shift literal)。
+
 識別力 fixture (CLAUDE.md §5 literal + PLAN §6.5 literal):
-  - 1 回目 update_self → state["_efe_C"] 構築 + per-key confidence 反映
-  - 2 回目 update_self → C 再計算 + cycle_id 同期更新
+  - update_self → _efe_self_confidence 更新 + cycle start hook で _efe_C 構築
   - NAME_KEY exception → confidence silently ignore + _efe_self_confidence 不追加
   - 高 conf vs 低 conf で variance 差別反映 (per_key_variance dict 内容識別)
 """
@@ -13,6 +19,7 @@ import hashlib
 import pytest
 
 from core import preference_distribution as pd_mod
+from core.controller import _rebuild_efe_C_snapshot  # V07.5 commit 4 A2 lifecycle hook
 from tools import builtin as builtin_mod
 from tools.builtin import _update_self
 
@@ -74,6 +81,7 @@ def test_update_self_creates_efe_c_on_first_call(mock_state_and_bge_m3):
     assert mock_state["_efe_C_update_cycle"] == -1
 
     result = _update_self("identity", "I observe and connect", confidence=0.9)
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
 
     assert "updated" in result.lower() or "self[identity]" in result  # 成功 return
     assert mock_state["_efe_C"] is not None
@@ -89,6 +97,7 @@ def test_update_self_explicit_confidence_stored(mock_state_and_bge_m3):
     """
     mock_state = mock_state_and_bge_m3
     _update_self("identity", "X", confidence=0.9)
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
 
     assert mock_state["_efe_self_confidence"]["identity"] == 0.9
     # variance = 1/(conf+ε) = 1/0.901 ≈ 1.1099 で C 側にも反映
@@ -100,6 +109,7 @@ def test_update_self_default_confidence_when_omitted(mock_state_and_bge_m3):
     """case C: confidence 引数省略 → DEFAULT_CONFIDENCE (0.7) で補完。"""
     mock_state = mock_state_and_bge_m3
     _update_self("identity", "X")  # confidence omitted
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
 
     assert mock_state["_efe_self_confidence"]["identity"] == 0.7
 
@@ -112,10 +122,12 @@ def test_update_self_second_call_updates_cycle(mock_state_and_bge_m3):
     """
     mock_state = mock_state_and_bge_m3
     _update_self("identity", "I observe", confidence=0.9)
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate (cycle 0)
     assert mock_state["_efe_C_update_cycle"] == 0
 
     mock_state["cycle_id"] = 5  # 5 cycle 経過 simulate
     _update_self("preferences", "diverse exploration", confidence=0.3)
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate (cycle 5)
 
     assert mock_state["_efe_self_confidence"]["preferences"] == 0.3
     assert mock_state["_efe_C"]["n_components"] == 2
@@ -126,12 +138,15 @@ def test_update_self_multi_key_grows_components(mock_state_and_bge_m3):
     """case E: 複数 key 連続更新で n_components 単調増加 (累積)。"""
     mock_state = mock_state_and_bge_m3
     _update_self("identity", "X", confidence=0.7)
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
     assert mock_state["_efe_C"]["n_components"] == 1
 
     _update_self("preferences", "Y", confidence=0.7)
+    _rebuild_efe_C_snapshot(mock_state)
     assert mock_state["_efe_C"]["n_components"] == 2
 
     _update_self("role", "Z", confidence=0.7)
+    _rebuild_efe_C_snapshot(mock_state)
     assert mock_state["_efe_C"]["n_components"] == 3
     assert set(mock_state["_efe_C"]["source_keys"]) == {"identity", "preferences", "role"}
 
@@ -147,6 +162,7 @@ def test_update_self_name_key_silently_ignores_confidence(mock_state_and_bge_m3)
     # 先に non-name key を立ててから name 設定 (NAME_KEY は state.self の初期値で
     # 既に何か入ってると拒否されるため、clean な状態で初回 name set を simulate)
     result = _update_self("name", "iku", confidence=0.5)
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
 
     # name は state.self に反映される (legacy 挙動継承)
     assert mock_state["self"]["name"] == "iku"
@@ -160,7 +176,9 @@ def test_update_self_name_excluded_from_efe_c_source(mock_state_and_bge_m3):
     """case G (§5.1 + §5.4 NAME_KEY exception): name と identity 両方設定でも C source は identity のみ。"""
     mock_state = mock_state_and_bge_m3
     _update_self("name", "iku")
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
     _update_self("identity", "I observe", confidence=0.7)
+    _rebuild_efe_C_snapshot(mock_state)
 
     assert mock_state["_efe_C"]["n_components"] == 1
     assert mock_state["_efe_C"]["source_keys"] == ["identity"]
@@ -171,6 +189,7 @@ def test_update_self_confidence_clamped_to_unit_interval(mock_state_and_bge_m3):
     """case H: confidence は compute_C_from_self 側で [0.0, 1.0] clamp、変な値でも安全。"""
     mock_state = mock_state_and_bge_m3
     _update_self("identity", "X", confidence=1.5)  # over
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
 
     # _efe_self_confidence には float(1.5) 入る (clamp は compute_C_from_self 側)
     assert mock_state["_efe_self_confidence"]["identity"] == 1.5
@@ -185,10 +204,12 @@ def test_update_self_higher_confidence_sharper_C(mock_state_and_bge_m3):
     """
     mock_state = mock_state_and_bge_m3
     _update_self("identity", "X", confidence=0.9)
+    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
     var_high = mock_state["_efe_C"]["per_key_variance"]["identity"]
 
     # 別 key で低 conf
     _update_self("preferences", "Y", confidence=0.3)
+    _rebuild_efe_C_snapshot(mock_state)
     var_low = mock_state["_efe_C"]["per_key_variance"]["preferences"]
 
     assert var_high < var_low  # 高 conf → 小 variance → 鋭い peak

@@ -1,15 +1,36 @@
 """controller × Predictor 統合乗算 (段階9 Step 2) 統合テスト。
 
-STAGE9 §4-3 / §7-4 の要件:
+STAGE9 §4-3 / §7-4 の要件 (旧 multiplicative selection 前提):
   - novelty × predicted_e2 の統合乗算が正しく効く
   - predicted_e2 が低い候補は強く抑制される
   - Medium 予測が candidate.prediction に入ってる場合、それが乗算に使われる
   - 候補間の相対重み差が predicted_e2 で変動する
 
-使い方:
+★ V07.5 commit 6 (PLAN v1.4 §4-1 commit 6 + Codex 1 周目 P3 literal): commit 3 paradigm
+shift で controller_select は **argmin_π G(π) literal selection** に置換、stochastic
+weighted sampling 前提 + `_predicted_outcome_multiplier` (pressure 由来) は撤去。本 test
+の 4 test_func は全て旧 multiplicative chain 前提のため、paradigm shift 後の literal
+setup (argmin G + JEPA predict_next_conditioned_batch + compute_efe_components + state
+構築) が大規模化、commit 7 wholesale review で literal 書き直し or 削除 reserved。
+
+新 paradigm shift の literal 健全性 verify は `test_v07_5_paradigm_shift.py` (commit 6
+新規 §6-1 ~ §6-10) で literal 達成済。
+
+使い方 (skip 後の literal 復活時、PLAN v1.5+ で reserved):
   cd Noetic_seed/profiles/_template
   "C:/Users/you11/Desktop/iku/Noetic_seed/.venv/Scripts/python.exe" tests/test_controller_predictor_integration.py
 """
+import pytest
+
+# V07.5 commit 6: file 全体 skip (paradigm shift で literal setup 大規模化、
+# commit 7 wholesale review で literal 書き直し or 削除 reserved)
+pytest.skip(
+    "V07.5 commit 3 paradigm shift で controller_select の literal 経路変更 "
+    "(multiplicative chain → argmin_π G(π))、本 test は旧前提のため commit 7 で literal rewrite or 削除予定。"
+    "新 paradigm shift verify は test_v07_5_paradigm_shift.py で literal 達成済",
+    allow_module_level=True,
+)
+
 import sys
 from pathlib import Path
 
