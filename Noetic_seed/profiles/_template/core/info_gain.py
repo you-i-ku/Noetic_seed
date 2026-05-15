@@ -98,8 +98,8 @@ DIVERSITY_BASELINE = 2.5
 def compute_efe_components(
     state: dict,
     prev_snapshot: dict,
-    entries_with_embedding: list,
-    links: list,
+    entries_with_embedding: Optional[list] = None,
+    links: Optional[list] = None,
     fog_now: Optional[dict] = None,
     hypothetical_next: Optional[dict] = None,
 ) -> dict:
@@ -140,21 +140,44 @@ def compute_efe_components(
     density / memory_link (これら 3 つは predicted PE / density / link_strength の
     予測 model が必要、将来 commit で literal 拡張、本 commit 2 では signature 拡張のみ)。
 
+    V07.5 commit 2.5 (PLAN v1.3 §4-1 commit 2.5 literal): B state-centric refactor。
+    9 helper を `(state, prev_snapshot, hypothetical_next=None)` literal 統一 signature に
+    refactor、各 helper 固有 input (entries / links / fog_now) は state slice 経由で fetch。
+    本関数は **後方互換 wrapper** として旧 5-arg API (`metrics.py:420` + `test_efe_integration.py:33`)
+    を維持、新 entries / links / fog_now が non-None 時は `_efe_*_view` 一時 field 経由で state に
+    injection (シャローコピーで元 state 不変)、helper が state slice として fetch。
+
+    Active Inference posterior observer pattern literal: helper = state slice observer
+    (ゆう gut「拡張性・抽象性」観点起源、Codex review 1 周目 P2-① literal 解消)。
+
     Args / Returns: §4.5 literal、controller には流さない (Slice 7 まで「計測のみ」継承)。
     """
-    novelty = _novelty_gain(entries_with_embedding, prev_snapshot, hypothetical_next)
-    pe_drop = _pe_drop_gain(state, prev_snapshot, hypothetical_next)
-    density = _density_gain(prev_snapshot, fog_now, hypothetical_next)
-    memory_link = _memory_link_gain(links, prev_snapshot, hypothetical_next)
+    # V07.5 commit 2.5: 後方互換 wrapper — 旧 5-arg API 経由で渡された entries/links/fog_now を
+    # state に inject (シャローコピーで元 state 不変)。helper は state slice として fetch。
+    # 全 None なら state 不変経路 (新 3-arg caller、commit 3 controller 経路)。
+    if entries_with_embedding is not None or links is not None or fog_now is not None:
+        state_local = dict(state)
+        if entries_with_embedding is not None:
+            state_local["_efe_entries_view"] = entries_with_embedding
+        if links is not None:
+            state_local["_efe_links_view"] = links
+        if fog_now is not None:
+            state_local["_efe_fog_view"] = fog_now
+    else:
+        state_local = state
 
-    effective_change = _effective_change_gain(
-        state, prev_snapshot, entries_with_embedding, hypothetical_next
-    )
-    competence = _competence_gain(state, prev_snapshot, hypothetical_next)
-    tool_diversity = _tool_diversity_gain(state, prev_snapshot, hypothetical_next)
+    # 9 helper を統一 signature `(state, prev_snapshot, hypothetical_next)` で呼出
+    novelty = _novelty_gain(state_local, prev_snapshot, hypothetical_next)
+    pe_drop = _pe_drop_gain(state_local, prev_snapshot, hypothetical_next)
+    density = _density_gain(state_local, prev_snapshot, hypothetical_next)
+    memory_link = _memory_link_gain(state_local, prev_snapshot, hypothetical_next)
 
-    consecutive_pen = _consecutive_penalty(state, hypothetical_next)
-    centroid_stk = _centroid_stuck(entries_with_embedding, hypothetical_next)
+    effective_change = _effective_change_gain(state_local, prev_snapshot, hypothetical_next)
+    competence = _competence_gain(state_local, prev_snapshot, hypothetical_next)
+    tool_diversity = _tool_diversity_gain(state_local, prev_snapshot, hypothetical_next)
+
+    consecutive_pen = _consecutive_penalty(state_local, prev_snapshot, hypothetical_next)
+    centroid_stk = _centroid_stuck(state_local, prev_snapshot, hypothetical_next)
 
     epistemic_gain = novelty + pe_drop + density + memory_link
     pragmatic_gain = effective_change + competence + tool_diversity
@@ -241,9 +264,13 @@ def snapshot_for_next_cycle(
     # 受けてないため state から直接取得 (case b 採用、metrics.py signature 非破壊)。
     import math
     _prev_for_log_p = state.get(CYCLE_KEY, {}) or {}
-    effective_change_log_p_now = _compute_log_p_now(
-        state, _prev_for_log_p, entries_with_embedding
-    )
+    # V07.5 commit 2.5: B state-centric refactor — _compute_log_p_now が entries を state
+    # slice 経由で fetch するように変更されたため、本関数 (snapshot_for_next_cycle) は
+    # 旧 caller (main.py) から entries_with_embedding を引数で受け取り続けるが、
+    # _compute_log_p_now 呼出時に state slice (_efe_entries_view) として injection する。
+    state_for_log_p = dict(state)
+    state_for_log_p["_efe_entries_view"] = entries_with_embedding
+    effective_change_log_p_now = _compute_log_p_now(state_for_log_p, _prev_for_log_p)
 
     ledger = state.get("action_ledger", []) or []
     tool_counts_now: dict = {}
@@ -285,7 +312,7 @@ def snapshot_for_next_cycle(
 # ============================================================
 
 def _novelty_gain(
-    entries_with_embedding: list,
+    state: dict,
     prev_snapshot: dict,
     hypothetical_next: Optional[dict] = None,
 ) -> float:
@@ -310,12 +337,16 @@ def _novelty_gain(
     V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
     predicted_embedding を「新 entry」として既存と比較した novelty を返す。
     None なら旧挙動 (post hoc、cycle 末 measurement)。
+
+    V07.5 commit 2.5 (PLAN v1.3): B state-centric refactor — entries は state slice
+    `state["_efe_entries_view"]` 経由で fetch (compute_efe_components wrapper が injection)。
     """
     try:
         import numpy as np
     except ImportError:
         return 0.0
 
+    entries_with_embedding = state.get("_efe_entries_view") or []
     embs = [
         e["embedding"] for e in (entries_with_embedding or [])
         if isinstance(e, dict) and isinstance(e.get("embedding"), list)
@@ -363,7 +394,6 @@ def _novelty_gain(
 def _compute_log_p_now(
     state: dict,
     prev_snapshot: dict,
-    entries_with_embedding: list,
     hypothetical_next: Optional[dict] = None,
 ) -> Optional[float]:
     """現 cycle の **新 entry** 群の平均 log_p(o | C_now) (Lv3 helper、PLAN §4.2.1)。
@@ -380,6 +410,9 @@ def _compute_log_p_now(
 
     V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
     predicted_embedding を C で評価した log density を返す。None なら旧挙動。
+
+    V07.5 commit 2.5 (PLAN v1.3): B state-centric refactor — entries は state slice
+    `state["_efe_entries_view"]` 経由で fetch (compute_efe_components wrapper が injection)。
     """
     C_data = state.get("_efe_C")
     if not C_data or not C_data.get("components"):
@@ -394,7 +427,8 @@ def _compute_log_p_now(
             return None  # graceful skip
         return float(log_p_fn(predicted))
 
-    # post hoc 既存 logic
+    # post hoc 既存 logic (V07.5 commit 2.5: entries を state slice 経由で fetch)
+    entries_with_embedding = state.get("_efe_entries_view") or []
     embs = [
         e["embedding"] for e in (entries_with_embedding or [])
         if isinstance(e, dict) and isinstance(e.get("embedding"), list)
@@ -410,7 +444,6 @@ def _compute_log_p_now(
 def _effective_change_gain(
     state: dict,
     prev_snapshot: dict,
-    entries_with_embedding: list,
     hypothetical_next: Optional[dict] = None,
 ) -> float:
     """preference との cross-entropy 改善量 (Lv3、PLAN §4.2.1、nat 単位)。
@@ -431,10 +464,11 @@ def _effective_change_gain(
     V07.5 commit 2 (PLAN v1.2): `hypothetical_next` non-None で pre-action 化、
     `_compute_log_p_now` 経由で predicted_embedding の log_p と prev_snapshot.log_p の
     差分を返す = 「この candidate 実行で preference に近づく / 離れる」literal evaluation。
+
+    V07.5 commit 2.5 (PLAN v1.3): B state-centric refactor — entries 引数撤去、
+    `_compute_log_p_now` が state slice 経由で fetch。
     """
-    log_p_now = _compute_log_p_now(
-        state, prev_snapshot, entries_with_embedding, hypothetical_next
-    )
+    log_p_now = _compute_log_p_now(state, prev_snapshot, hypothetical_next)
     if log_p_now is None:
         return 0.0
     log_p_prev = prev_snapshot.get("effective_change_log_p")
@@ -444,7 +478,7 @@ def _effective_change_gain(
 
 
 def _memory_link_gain(
-    links: list,
+    state: dict,
     prev_snapshot: dict,
     hypothetical_next: Optional[dict] = None,
 ) -> float:
@@ -471,10 +505,14 @@ def _memory_link_gain(
     pre-action 化には predicted memory_link_strength の予測 model が必要 (JEPA は
     embedding のみ予測、link_strength は別 model)、commit 2 では post hoc 動作維持。
     将来 commit で memory_link 専用予測 model 追加時に literal 拡張。
+
+    V07.5 commit 2.5 (PLAN v1.3): B state-centric refactor — links は state slice
+    `state["_efe_links_view"]` 経由で fetch (compute_efe_components wrapper が injection)。
     """
     # V07.5 commit 2 scaffolding: hypothetical_next 引数は当面 ignore (post hoc 維持)
     _ = hypothetical_next
     import math
+    links = state.get("_efe_links_view") or []
     strength_now = sum(
         float(l.get("strength", 0.0) or 0.0)
         for l in (links or []) if isinstance(l, dict)
@@ -516,8 +554,8 @@ def _pe_drop_gain(
 
 
 def _density_gain(
+    state: dict,
     prev_snapshot: dict,
-    fog_now: Optional[dict],
     hypothetical_next: Optional[dict] = None,
 ) -> float:
     """memory graph 局所密度の MI delta 近似 (Lv3、PLAN §4.1.3、nat 単位)。
@@ -536,10 +574,14 @@ def _density_gain(
     V07.5 commit 2 (PLAN v1.2): hypothetical_next 引数 scaffolding (signature 拡張のみ)。
     pre-action 化には predicted fog density の予測 model 必要、commit 2 では
     post hoc 動作維持。
+
+    V07.5 commit 2.5 (PLAN v1.3): B state-centric refactor — fog_now は state slice
+    `state["_efe_fog_view"]` 経由で fetch (compute_efe_components wrapper が injection)。
     """
     # V07.5 commit 2 scaffolding: hypothetical_next 引数は当面 ignore (post hoc 維持)
     _ = hypothetical_next
     import math
+    fog_now = state.get("_efe_fog_view")
     density_now = (fog_now or {}).get("local_density_mean")
     density_prev = prev_snapshot.get("fog_local_density_mean")
     if not (
@@ -670,6 +712,7 @@ def _tool_diversity_gain(
 
 def _consecutive_penalty(
     state: dict,
+    prev_snapshot: dict,
     hypothetical_next: Optional[dict] = None,
 ) -> float:
     """同 tool 連発の log ratio (Lv3、PLAN §4.3.1、nat 単位)。
@@ -687,7 +730,11 @@ def _consecutive_penalty(
     candidate tool を action_ledger の末尾に追加した hypothetical run で
     consecutive_run 計算 = 「この candidate 実行で reflect 連発になるか」literal 検知。
     cycle 55 attractor (reflect 反復) の構造的防止経路 (PLAN §1-3 直結)。
+
+    V07.5 commit 2.5 (PLAN v1.3): B state-centric refactor — prev_snapshot を統一
+    signature 用に受け取る (本 helper では未使用、observer pattern literal 統一のため)。
     """
+    _ = prev_snapshot  # 統一 signature 受け取り、本 helper では未使用
     import math
     ledger = state.get("action_ledger", []) or []
     recent_tools = []
@@ -720,7 +767,8 @@ def _consecutive_penalty(
 
 
 def _centroid_stuck(
-    entries_with_embedding: list,
+    state: dict,
+    prev_snapshot: dict,
     hypothetical_next: Optional[dict] = None,
 ) -> float:
     """embedding 中心固着の log ratio (Lv3、PLAN §4.3.2、nat 単位)。
@@ -742,12 +790,19 @@ def _centroid_stuck(
     predicted_embedding を含む hypothetical centroid (newest N-1 件 + predicted) で
     mean_dist 計算 = 「この candidate 実行で embedding 空間で中心固着するか」literal 検知。
     cycle 55 attractor (同テーマ反復) の構造的防止経路。
+
+    V07.5 commit 2.5 (PLAN v1.3): B state-centric refactor — entries は state slice
+    `state["_efe_entries_view"]` 経由で fetch、prev_snapshot は統一 signature 用に受け取る
+    (本 helper では未使用、observer pattern literal 統一のため)。
     """
+    _ = prev_snapshot  # 統一 signature 受け取り、本 helper では未使用
     import math
     try:
         import numpy as np
     except ImportError:
         return 0.0
+
+    entries_with_embedding = state.get("_efe_entries_view") or []
 
     # V07.5 pre-action 経路: predicted_embedding を含む hypothetical centroid
     if hypothetical_next is not None:
