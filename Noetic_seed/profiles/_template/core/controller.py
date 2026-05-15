@@ -1,11 +1,19 @@
 """Controller（制御層）+ controller_select + intent-conditioned scoring"""
 import re
 import random
+import time  # V07.5 commit 3: debug metric timing (hot path I/O 計測)
 from core.config import WORLD_MODEL_CFG
 from core.state import load_pref, merge_log_view
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.eval import predict_result_novelty
 from core.predictor import get_predictor
+# V07.5 commit 3: argmin G(π) literal selection の literal 依存 module
+# (関数内 import から module top-level に literal move、Codex 2 周目 P3 fix bundle)
+from core.memory import load_all_subjective_entries, load_all_memories
+from core.memory_links import list_links
+from core.info_gain import compute_efe_components, CYCLE_KEY
+from core.metrics import compute_fog_metrics, _sort_entries_global_newest_first, LINKS_SCAN_LIMIT
+from core.jepa_runtime import predict_next_conditioned_batch
 
 # 段階5: Predictor インスタンス (WM 設定に従って初期化、モジュールシングルトン)
 _PREDICTOR = get_predictor(WORLD_MODEL_CFG.get("predictor_mode", "light"))
@@ -383,19 +391,43 @@ def _predicted_outcome_multiplier(prediction: dict, candidate: dict,
 
 
 def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
-    """D-4設計 + intent-conditioned scoring + entropy認知品質 + UPS v2 priority"""
-    energy = state.get("energy", 50) / 100.0
-    entropy = state.get("entropy", 0.65)
-    tool_rank = ctrl.get("tool_rank", {})
-    n = len(candidates)
+    """V07.5 commit 3: argmin_π G(π) literal selection (paradigm shift 核心)。
 
+    旧 multiplicative chain (tool_rank / intent_scores / sharpness / novelty /
+    _pending_priority_boost / _channel_mismatch_multiplier / _predicted_outcome_multiplier
+    / attractor_redundancy 圧縮 / random.random sampling) を literal 撤去、
+    EFE 9 成分 (commit 2.5 統一 signature) + JEPA predict_next_conditioned_batch (commit 1)
+    で **argmin_π G(π)** literal selection 達成 (PLAN v1.4 §3-1 + §4-1 commit 3 literal)。
+
+    撤去 5 経路 (tool_rank / intent_scores / _pending_priority_boost /
+    _channel_mismatch_multiplier / attractor_redundancy 圧縮) の **機構自体は維持** =
+    selection multiplier から外すのみ。各機構の state field 化 (telemetry) は保持、
+    selection には literal 流さない (Codex 軸 1 OK + 軸 4 GAP literal 反映)。
+
+    natural emergence: centroid_stuck → attractor_redundancy のみ literal 確認済
+    (commit 2.5 `_centroid_stuck` 経由)、他 4 経路 (pending/channel/tool_rank/intent) は
+    EFE 9 成分に未接続 = smoke 観察対象 (PLAN v1.4 §8-5 literal):
+    - pending 解消遅延 / channel 応答外れ / tool 選択不安定化 を smoke で監視
+    - 実害化時 hotfix (該当経路を G の項に literal 統合、別 commit)
+
+    撤去 1 経路 (_predicted_outcome_multiplier、pressure 由来) は A3 literal で完全撤去
+    (cycle 55 attractor 真因の中核解消、PLAN §1-3 literal)。
+    pressure 機構自体は維持 (`main.py:1202, 1211` の calc_pressure_signals + 累積式、
+    `reflection.py:64-82` 前倒し reflection、内発駆動 device、Codex AXIS 3 Blocker 死守)。
+
+    Codex commit 2.5 P3 #1 literal 反映: shallow copy `dict(state)` で `_efe_*_view`
+    一時 field の元 state pollution 回避。C None graceful skip (cycle 1 bootstrap
+    依存ガード、commit 4 並走不要、Codex 軸 7 GAP literal 反映)。
+
+    Args / Returns: 旧 signature 維持 (candidates / ctrl / state)、後方互換 wrapper 経路。
+    """
+    # 機構保持 (state field 化のみ、selection には流さない、telemetry 用途)
     intent_scores = _intent_conditioned_scores(candidates, state)
+    for i, c in enumerate(candidates):
+        c["_intent_score"] = intent_scores[i]  # telemetry only
 
-    # 段階14 Step B: candidate の reason embedding を cosine 比較し、attractor
-    # 空間の縮退を検出 (PLAN §4-2 literal)。state field 化で第一級観測量、
-    # Step C / D の入力にも流用。
-    # Codex review BLOCKER fix: state 保存時は JSON-safe 形 (set → sorted list、
-    # tuple pair → list of list)。ローカル redundancy は set 維持で in 判定高速。
+    # 段階14 Step B: attractor redundancy 検出 + state field 化 (telemetry)、
+    # selection 圧縮乗算は撤去 (natural emergence: centroid_stuck → attractor_redundancy literal)
     redundancy = _detect_attractor_redundancy(candidates)
     state["last_redundancy"] = {
         "redundancy_pairs": [list(p) for p in redundancy["redundancy_pairs"]],
@@ -404,52 +436,93 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         "diversity_score": redundancy["diversity_score"],
     }
 
-    sharpness = (1 - energy) * (1 - entropy)
-
-    weights = []
-    for i, c in enumerate(candidates):
-        base = tool_rank.get(c["tool"], 50) / 100.0
-        ics = intent_scores[i] / 100.0
-        score = (base + ics) / 2.0
-        w = score * sharpness + (1.0 / n) * (1 - sharpness)
-        # 事前シミュレーション（報酬予測誤差）: 予測結果新規性が低い → 動機が生まれない
-        novelty = predict_result_novelty(state, c["tool"], c.get("reason", ""))
-        w *= max(0.05, novelty)
-        # UPS v2 priority boost: 未消化 pending を解消する候補を優先
-        w *= _pending_priority_boost(state, c)
-        # 段階5: channel_mismatch 乗算 (PLAN §4-1)
-        w *= _channel_mismatch_multiplier(c, state, WORLD_MODEL_CFG)
-        # 段階5→9: Predictor による predicted_e2 乗算 (pragmatic value of EFE)。
-        # 段階9 で category 離散から predicted_e2 連続値に置換、既存 novelty
-        # (epistemic value) と同形式 max(floor, x) で統合乗算。
-        # in-context world model (NAACL 2025) の direct instance。
+    # predictor.predict (state field 化保持、selection 経路の predicted_outcome_multiplier
+    # は A3 literal 撤去、predicted_e2 / predicted_ec は main.py で prediction_error 計算継続)
+    for c in candidates:
         prediction = _PREDICTOR.predict(c, state, state.get("world_model"))
         c["predicted_outcome"] = prediction
-        # 段階9: 予測誤差計測のため candidate に記録 (main.py で log entry に転写)
-        c["_predicted_e2"] = prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
-        # 段階10 柱 C: predicted_ec も同様 (main.py で prediction_error_ec 計算に使用)
-        c["_predicted_ec"] = prediction.get("predicted_ec") if isinstance(prediction, dict) else None
-        w *= _predicted_outcome_multiplier(prediction, c, state, WORLD_MODEL_CFG)
-        # 段階14 Step B: redundant tool は weight 圧縮 (PLAN §4-2 literal)。
-        # cluster 縮退の自然帰結として圧縮、罰ではない。圧縮率は
-        # max(0.3, diversity_score) で 30%-100% の範囲。β 連動は Step C で。
-        if c["tool"] in redundancy["redundant_tool_set"]:
-            w *= max(0.3, redundancy["diversity_score"])
-        if novelty < 0.5:
-            try:
-                from core.config import RESOLUTION_LOG
-                with open(RESOLUTION_LOG, "a", encoding="utf-8") as _f:
-                    _f.write(f"  [predict] {c['tool']} novelty={novelty:.2f} "
-                             f"reason={c.get('reason','')[:40]}\n")
-            except Exception:
-                pass
-        weights.append(w)
+        c["_predicted_e2"] = (
+            prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
+        )
+        c["_predicted_ec"] = (
+            prediction.get("predicted_ec") if isinstance(prediction, dict) else None
+        )
 
-    total = sum(weights)
-    r = random.random() * total
-    cumul = 0.0
-    for i, w in enumerate(weights):
-        cumul += w
-        if r <= cumul:
-            return candidates[i]
-    return candidates[-1]
+    # V07.5 commit 3: argmin_π G(π) literal selection
+    # 1. entries / links / fog_now を取得 (metrics.py と同経路、newest first sort)
+    #
+    # V07.5 commit 3 debt track + observability (Codex review 1 周目 P2-2 reference、
+    # commit 4/6 で cycle-level cache 経路追加予定): 本 hot path I/O は metrics.py
+    # cycle 末計算と literal 重複 (両者で load_all_subjective_entries +
+    # load_all_memories + list_links + compute_fog_metrics を別タイミングで実行)。
+    # `_v07_5_io_elapsed_ms` で計測して smoke 観察可能化、実害化時 (cycle 時間延伸
+    # literal 観察) は cycle-level cache に commit 4/6 で経路追加。
+    _io_t0 = time.time()
+    entries_with_embedding = [
+        e for e in load_all_subjective_entries()
+        if isinstance(e.get("embedding"), list)
+    ] + [
+        e for e in load_all_memories()
+        if isinstance(e.get("embedding"), list)
+    ]
+    _sort_entries_global_newest_first(entries_with_embedding)
+    links = list_links(limit=LINKS_SCAN_LIMIT)
+    fog_now = compute_fog_metrics(state, entries_with_embedding, links)
+    state["_v07_5_io_elapsed_ms"] = round((time.time() - _io_t0) * 1000, 2)
+    prev_snapshot = state.get(CYCLE_KEY, {}) or {}
+
+    # 2. JEPA predict_next_conditioned_batch (commit 1) で各 candidate の predicted_embedding 取得
+    # graceful skip: torch 未 install / bge-m3 未起動 / sequence 不足で None
+    predicted_embeddings = predict_next_conditioned_batch(state, candidates)
+
+    # 3. 各 candidate の G(π) literal 計算
+    # C None graceful skip: state["_efe_C"] 未構築 cycle 1 で compute_efe_components が
+    # pragmatic value 経路を 0.0 で graceful return、G 計算継続 (commit 4 並走不要)
+    g_values = []
+    for i, c in enumerate(candidates):
+        pred_emb = (
+            predicted_embeddings[i]
+            if (predicted_embeddings is not None and i < len(predicted_embeddings))
+            else None
+        )
+        hypothetical_next = {
+            "predicted_embedding": pred_emb,
+            "candidate": c,
+        }
+        efe = compute_efe_components(
+            state,
+            prev_snapshot,
+            entries_with_embedding=entries_with_embedding,
+            links=links,
+            fog_now=fog_now,
+            hypothetical_next=hypothetical_next,
+        )
+        g_values.append(efe.get("G", 0.0))
+        c["_efe_G"] = efe.get("G", 0.0)  # telemetry: 各 candidate の G 値を保持
+
+    # 4. argmin_π G(π) literal selection (Friston FEP literal、最小化対象)
+    if not g_values:
+        return candidates[-1]
+    min_idx = g_values.index(min(g_values))
+
+    # V07.5 commit 3 P2-1 fix (Codex 1 周目 literal): 全 G 値タイ縮退検出
+    # JEPA 未起動 + 全候補同 tool 等で各 helper が同一 graceful 0.0 を返す literal case では
+    # g_values が全タイ → argmin が first-candidate 任意選択 literal 縮退。
+    # smoke で degraded=True が頻発する場合は paradigm shift literal の前提が崩れてる
+    # signal (= candidates 生成側 / JEPA / EFE 計算経路の literal 不全)、hotfix 必要。
+    g_min = min(g_values)
+    g_max = max(g_values)
+    g_spread = g_max - g_min
+    g_degraded = g_spread < 1e-6  # tie 検出 threshold (numerical noise level literal)
+
+    # selection log 雛形 (commit 5 で C_version / policy_snapshot_id / basin_snapshot_id 拡張)
+    state["last_selection_log"] = {
+        "g_values": [round(g, 6) for g in g_values],
+        "selected_idx": min_idx,
+        "selected_tool": candidates[min_idx].get("tool", ""),
+        "selection_method": "argmin_G",  # V07.5 paradigm shift literal marker
+        "degraded": g_degraded,  # P2-1 fix: 全 G タイ縮退 literal observability
+        "g_spread": round(g_spread, 6),  # G 値の literal な散らばり (smoke 観察用)
+    }
+
+    return candidates[min_idx]
