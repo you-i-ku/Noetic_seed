@@ -1,6 +1,8 @@
 """bge-m3 ONNX埋め込み・ベクトル類似度"""
 import math
 import re
+from collections import OrderedDict
+from typing import Optional
 
 try:
     import numpy as np
@@ -12,6 +14,15 @@ except ImportError:
 _onnx_session = None
 _onnx_tokenizer = None
 _onnx_tried = False
+
+# === V07.5 commit 1 (Codex AXIS 4 Medium): (text) → vector cache ===
+# bge-m3 5x encode latency 対策、LRU cache cap 1000 entries。
+# jepa_runtime の policy_embedding (5 候補 / cycle) で同じ tool+intent 文字列が
+# 反復出現する想定 (例: 同じ tool を別 cycle で再度評価)、cache hit 時 ONNX 呼出 skip。
+# thread-safe: Noetic は basically single-thread (event_emitter subscriber 同期、
+# controller cycle serial)、OrderedDict GIL 下で atomic。
+_EMBEDDING_CACHE: "OrderedDict[str, list]" = OrderedDict()
+_EMBEDDING_CACHE_MAX = 1000
 
 def _load_bge_m3():
     """bge-m3 ONNXモデルを遅延初期化で取得（HuggingFaceから自動ダウンロード）"""
@@ -63,6 +74,63 @@ def _embed_sync(texts: list) -> list | None:
         return [vec.tolist() for vec in pooled]
     except Exception:
         return None
+
+def _embed_with_cache(text: str) -> Optional[list]:
+    """単一 text の embedding を cache 経由で取得。
+
+    V07.5 commit 1 (Codex AXIS 4 Medium): bge-m3 5x encode latency 対策。
+    cache hit 時 ONNX 呼出 skip、miss 時 _embed_sync で取得 + cache 追加 (LRU)。
+
+    Returns:
+        1024D vector (list[float]) on success / cache hit、None on failure。
+    """
+    if text in _EMBEDDING_CACHE:
+        _EMBEDDING_CACHE.move_to_end(text)
+        return _EMBEDDING_CACHE[text]
+    result = _embed_sync([text])
+    if result is None or len(result) != 1:
+        return None
+    vec = result[0]
+    _EMBEDDING_CACHE[text] = vec
+    if len(_EMBEDDING_CACHE) > _EMBEDDING_CACHE_MAX:
+        _EMBEDDING_CACHE.popitem(last=False)
+    return vec
+
+
+def _embed_batch_with_cache(texts: list) -> Optional[list]:
+    """複数 text の embedding を cache 経由で取得 (batch mode)。
+
+    V07.5 commit 1 (Codex AXIS 4 Medium): cache miss だけ _embed_sync で 1 回 batch
+    呼出、cache hit は scan で取得。結果は input texts 順に整列。
+
+    Args:
+        texts: encode 対象 text list (重複あり可)。
+
+    Returns:
+        各 text の 1024D vector (list[list[float]]) on success、None on failure。
+        empty input は [] を返す (no-op success)。
+    """
+    if not texts:
+        return []
+    cached: dict = {}
+    miss_texts: list = []
+    for t in texts:
+        if t in _EMBEDDING_CACHE:
+            _EMBEDDING_CACHE.move_to_end(t)
+            cached[t] = _EMBEDDING_CACHE[t]
+        elif t not in cached:
+            miss_texts.append(t)
+    if miss_texts:
+        miss_results = _embed_sync(miss_texts)
+        if miss_results is None or len(miss_results) != len(miss_texts):
+            return None
+        for t, vec in zip(miss_texts, miss_results):
+            cached[t] = vec
+            _EMBEDDING_CACHE[t] = vec
+            if len(_EMBEDDING_CACHE) > _EMBEDDING_CACHE_MAX:
+                _EMBEDDING_CACHE.popitem(last=False)
+    return [cached[t] for t in texts]
+
 
 def cosine_similarity(a: list, b: list) -> float:
     """Pure Python cosine similarity"""

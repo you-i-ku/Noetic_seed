@@ -754,6 +754,13 @@ def _split_entry_fields(entry: dict):
     未知 field は raw 寄せで保全 + raw["_unclassified_fields"] にリスト化して
     マーカーを刻む (default policy: raw 寄せ、PLAN §20-2 軸 6 「迷ったら raw 側」)。
 
+    V07.5 commit 1 (Codex AXIS 2 High fix): id は RAW_FIELDS / SUBJECTIVE_FIELDS
+    両方に literal 含まれてるが (line 27-40)、将来 schema 変更時の regression
+    防止のため id 両側 literal 一致を assertion で防壁化する。これは V07.5
+    Proposal 2 の raw+subj id join training pair 構築 (jepa_runtime._collect_training_pairs)
+    の literal 基盤、id 1:1 対応が崩れたら Proposal 2 の training data
+    経路が成立しない (PLAN §6-7 literal)。
+
     Returns:
         (raw_part, subjective_part, unknown_fields)
     """
@@ -769,6 +776,13 @@ def _split_entry_fields(entry: dict):
         for k in unknown:
             raw[k] = entry[k]
         raw["_unclassified_fields"] = list(unknown)
+    # V07.5 commit 1 (Codex AXIS 2 High): id 1:1 完全性 assertion (PLAN §6-7 literal)
+    if "id" in entry:
+        assert raw.get("id") == subj.get("id") == entry["id"], (
+            f"raw/subj id mismatch: raw={raw.get('id')!r} subj={subj.get('id')!r} "
+            f"entry={entry.get('id')!r} — RAW_FIELDS/SUBJECTIVE_FIELDS の id 経路が破壊された "
+            f"(V07.5 Proposal 2 training pair literal 基盤違反)"
+        )
     return raw, subj, unknown
 
 
