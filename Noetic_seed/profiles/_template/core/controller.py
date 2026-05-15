@@ -24,6 +24,22 @@ from core.jepa_runtime import predict_next_conditioned_batch
 _PREDICTOR = get_predictor(WORLD_MODEL_CFG.get("predictor_mode", "light"))
 
 
+def _build_policy_snapshot_id(selected_candidate: dict) -> str:
+    """V07.5 commit 5 (PLAN v1.4 §3-5、selection log schema 拡張): selected candidate の
+    policy_snapshot_id 用 literal hash。tool + reason/intent を組み合わせた literal
+    identifier (12-char sha256 hex)、smoke 観察で literal policy 追跡可能化。
+
+    Codex 4 turn rescue 2 turn 目 verify literal: selection log に `C_version` /
+    `policy_snapshot_id` / `basin_snapshot_id` を持たせて snapshot consistency 確保。
+    """
+    import hashlib
+    tool = str(selected_candidate.get("tool", "")) if isinstance(selected_candidate, dict) else ""
+    intent_raw = selected_candidate.get("intent") or selected_candidate.get("reason", "") if isinstance(selected_candidate, dict) else ""
+    intent = str(intent_raw) if intent_raw else ""
+    raw = f"{tool}::{intent}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
 def _rebuild_efe_C_snapshot(state: dict) -> None:
     """V07.5 commit 4 (A2 literal): cycle start で preference C を re-construct し
     state["_efe_C"] に literal snapshot。cycle 中は read-only freeze、self-referential
@@ -552,7 +568,11 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
     g_spread = g_max - g_min
     g_degraded = g_spread < 1e-6  # tie 検出 threshold (numerical noise level literal)
 
-    # selection log 雛形 (commit 5 で C_version / policy_snapshot_id / basin_snapshot_id 拡張)
+    # selection log (V07.5 commit 5: C_version / policy_snapshot_id / basin_snapshot_id 拡張完了)
+    # snapshot consistency literal (Codex 4 turn rescue 2 turn 目 verify):
+    # - C_version: cycle start hook で更新された _efe_C の cycle_id (commit 4 lifecycle 経由)
+    # - policy_snapshot_id: selected candidate の tool + intent hash (smoke で policy 追跡)
+    # - basin_snapshot_id: 現 basin id (commit 5 world_model.py:423 fix 後の堅牢化 basin)
     state["last_selection_log"] = {
         "g_values": [round(g, 6) for g in g_values],
         "selected_idx": min_idx,
@@ -560,6 +580,10 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         "selection_method": "argmin_G",  # V07.5 paradigm shift literal marker
         "degraded": g_degraded,  # P2-1 fix: 全 G タイ縮退 literal observability
         "g_spread": round(g_spread, 6),  # G 値の literal な散らばり (smoke 観察用)
+        # V07.5 commit 5: snapshot consistency 3 field
+        "C_version": state.get("_efe_C_update_cycle", -1),
+        "policy_snapshot_id": _build_policy_snapshot_id(candidates[min_idx]),
+        "basin_snapshot_id": state.get("basin_state", {}).get("current_basin_id", ""),
     }
 
     return candidates[min_idx]

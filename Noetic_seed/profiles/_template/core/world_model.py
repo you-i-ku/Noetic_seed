@@ -419,7 +419,13 @@ def _classify_basin_from_snapshot(
     """
     if not subject_id or not clusters:
         return ""
+    # V07.5 commit 5 (A4 literal fix、PLAN v1.4 §3-5): basin id 堅牢化
+    # subject_id 文字列正規化で type mismatch (旧 str vs int 混在 case) literal 防止、
+    # cluster snapshot との対応取れない bug literal 解消 (段階14 K2/K4/K6 dormancy は
+    # smoke data 依存、本 fix は構造的不具合の literal 解消のみ literal 保証)。
+    subject_id_str = str(subject_id)
     for cluster in clusters:
-        if subject_id in cluster.get("memory_ids", []):
+        memory_ids_set = {str(mid) for mid in cluster.get("memory_ids", [])}
+        if subject_id_str in memory_ids_set:
             return str(cluster.get("cluster_id", ""))
     return ""
