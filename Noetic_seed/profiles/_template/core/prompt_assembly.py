@@ -249,7 +249,7 @@ def assemble_system_prompt(
     # とは layer 違い (§5-2 literal、state.self は subjective_state 専有、それ以外は world_model)。
     from core.subjective_view import build_subjective_state
     from core.world_state_view import build_world_state
-    from core.prompt import _build_recent_history_block, _build_pending_block
+    from core.prompt import _build_recent_history_block, _build_pending_block, _build_recent_resolved_block
 
     sections = [
         build_approval_protocol(),
@@ -262,6 +262,9 @@ def assemble_system_prompt(
         # V07 Phase 1 hotfix (Codex audit AUD-P1-01 fix): <pending> builder
         # を sections に接続 (commit 4 で欠落していた smoke blocker)
         _build_pending_block(state),
+        # 2026-05-16 hotfix: 消化済 pending を <recent_resolved> 別 tag 分離
+        # (cycle 40/45 再候補化問題、段階9 fix 1 設計意図を XML 構造で literal 維持)
+        _build_recent_resolved_block(state),
         # V07: <recent_history> (subjective field only、tool/args/result は world_state へ)
         _build_recent_history_block(state, limit=5),
         # V07 Phase 1 hotfix (Codex audit AUD-P1-01 fix): tool block も XML tag に統一

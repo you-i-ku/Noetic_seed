@@ -96,14 +96,19 @@ def _pending_resolved(**overrides):
 # ============================================================
 
 def test_resolved_excluded_from_unresolved_section():
-    print("== 消化済 pending が '未対応事項' に出ない ==")
+    print("== 消化済 pending が <pending> tag に出ず <recent_resolved> tag に分離 ==")
     state = _fresh_state(pending=[_pending_resolved()])
     prompt = build_prompt_propose(state, _ctrl(), _tools())
-    # 消化済 content は未対応セクションに出ない
+    # 2026-05-16 hotfix: 消化済は <pending> から literal 分離、<recent_resolved> tag へ
+    pending_start = prompt.find("<pending>")
+    pending_end = prompt.find("</pending>")
+    pending_section = prompt[pending_start:pending_end] if pending_start >= 0 else ""
     return all([
-        _assert("[pending " not in prompt, "未対応 pending マーカー '[pending ' が無い"),
-        _assert("消化済タスク" in prompt, "content 自体は参考セクションに出る"),
-        _assert("最近完了した応答" in prompt, "完了参考 heading 出現"),
+        _assert("[pending " not in pending_section, "未対応 pending マーカー '[pending ' が <pending> 内に無い"),
+        _assert("[完了 " not in pending_section, "[完了 マーカーも <pending> 内に無い (XML tag 分離の識別力)"),
+        _assert("消化済タスク" in prompt, "content 自体は <recent_resolved> tag に出る"),
+        _assert("<recent_resolved>" in prompt, "<recent_resolved> XML block 出現"),
+        _assert("</recent_resolved>" in prompt, "<recent_resolved> 閉じ tag 出現"),
     ])
 
 
@@ -119,24 +124,29 @@ def test_unresolved_displayed_in_unresolved_section():
 
 
 def test_mixed_pending_split_correctly():
-    print("== 未消化 + 消化済 混在で正しく分離 ==")
+    print("== 未消化 + 消化済 混在で <pending> と <recent_resolved> XML tag 分離 ==")
+    # content 名は互いに substring を含まないように選ぶ (識別力確保、CLAUDE.md §5)
     state = _fresh_state(pending=[
-        _pending_unresolved(id="p_u1", content="未消化A"),
-        _pending_resolved(id="p_r1", content="消化A",
+        _pending_unresolved(id="p_u1", content="未対応TaskX"),
+        _pending_resolved(id="p_r1", content="完了TaskY",
                           observed_time="2026-04-20 07:00:00"),
-        _pending_resolved(id="p_r2", content="消化B",
+        _pending_resolved(id="p_r2", content="完了TaskZ",
                           observed_time="2026-04-20 07:30:00"),
     ])
     prompt = build_prompt_propose(state, _ctrl(), _tools())
-    # 未対応セクション
-    u_start = prompt.find("[未対応事項]")
-    done_start = prompt.find("最近完了した応答")
+    # 2026-05-16 hotfix: <pending> と <recent_resolved> 別 XML tag に分離
+    pending_start = prompt.find("<pending>")
+    pending_end = prompt.find("</pending>")
+    resolved_start = prompt.find("<recent_resolved>")
+    pending_section = prompt[pending_start:pending_end] if pending_start >= 0 else ""
     return all([
-        _assert(u_start >= 0 and done_start > u_start, "未対応 → 完了参考 順序"),
-        _assert("未消化A" in prompt, "未消化content表示"),
-        _assert("消化A" in prompt, "消化A content表示 (参考)"),
-        _assert("消化B" in prompt, "消化B content表示 (参考)"),
-        _assert("[完了 " in prompt, "完了マーカー '[完了 ' 表示"),
+        _assert(pending_start >= 0 and resolved_start > pending_end, "<pending> → <recent_resolved> 順序"),
+        _assert("未対応TaskX" in pending_section, "未消化 content は <pending> 内"),
+        _assert("完了TaskY" not in pending_section, "完了TaskY content は <pending> 内に無い (識別力)"),
+        _assert("完了TaskZ" not in pending_section, "完了TaskZ content は <pending> 内に無い (識別力)"),
+        _assert("完了TaskY" in prompt, "完了TaskY content は <recent_resolved> 内に出る"),
+        _assert("完了TaskZ" in prompt, "完了TaskZ content は <recent_resolved> 内に出る"),
+        _assert("[完了 " in prompt, "完了マーカー '[完了 ' 表示 (<recent_resolved> 内)"),
     ])
 
 
@@ -179,18 +189,36 @@ def test_all_pending_empty():
 
 
 def test_all_resolved_no_unresolved_section():
-    print("== 全 pending が消化済 → 未対応は 'なし' だが完了参考は出る ==")
+    print("== 全 pending が消化済 → <pending> は 'なし'、<recent_resolved> は出る ==")
     state = _fresh_state(pending=[
         _pending_resolved(id="p_r1", content="済A"),
         _pending_resolved(id="p_r2", content="済B"),
     ])
     prompt = build_prompt_propose(state, _ctrl(), _tools())
-    # 未消化 0 件 → pending_lines は完了参考 section + entries のみ
+    # 2026-05-16 hotfix: 未消化 0 件で <pending> は "なし"、<recent_resolved> に分離
     return all([
-        _assert("最近完了した応答" in prompt, "完了参考 heading"),
-        _assert("済A" in prompt, "済A 表示"),
-        _assert("済B" in prompt, "済B 表示"),
+        _assert("<recent_resolved>" in prompt, "<recent_resolved> XML block 出現"),
+        _assert("済A" in prompt, "済A 表示 (<recent_resolved> 内)"),
+        _assert("済B" in prompt, "済B 表示 (<recent_resolved> 内)"),
         _assert("[pending " not in prompt, "未対応 pending マーカーなし"),
+    ])
+
+
+def test_no_recent_resolved_block_when_only_unresolved():
+    """2026-05-16 hotfix: resolved 0 件で <recent_resolved> block は出ない (空 block 抑制)。
+
+    識別力: 旧実装 (常に <recent_resolved> block 出す) では fail する。
+    """
+    print("== 未消化のみ → <recent_resolved> tag 出さない (空 block 抑制) ==")
+    state = _fresh_state(pending=[
+        _pending_unresolved(id="p_u1", content="未消化X"),
+    ])
+    prompt = build_prompt_propose(state, _ctrl(), _tools())
+    return all([
+        _assert("<pending>" in prompt, "<pending> XML block 出現"),
+        _assert("未消化X" in prompt, "未消化 content 表示"),
+        _assert("<recent_resolved>" not in prompt, "<recent_resolved> block 非出現 (resolved 0 件で簡素)"),
+        _assert("</recent_resolved>" not in prompt, "<recent_resolved> 閉じ tag も非出現"),
     ])
 
 
@@ -226,7 +254,8 @@ if __name__ == "__main__":
         ("消化済は直近 3 件まで", test_resolved_limited_to_3_most_recent),
         ("gap=0.0 は消化済扱い", test_gap_zero_treated_as_resolved),
         ("pending 全件なしで 'なし'", test_all_pending_empty),
-        ("全消化済で未対応に出ない", test_all_resolved_no_unresolved_section),
+        ("全消化済で <recent_resolved> 分離", test_all_resolved_no_unresolved_section),
+        ("未消化のみで <recent_resolved> 出さず (空 block 抑制)", test_no_recent_resolved_block_when_only_unresolved),
         ("旧形式 pending も表示", test_legacy_pending_type_still_works),
     ]
     results = []

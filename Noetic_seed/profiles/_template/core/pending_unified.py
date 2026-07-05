@@ -591,10 +591,15 @@ def _matches(
     if mp.get("source_action") is None and mp.get("expected_channel") is None:
         return False
 
-    # 1. source_action: 消化できる tool 名 (単一) と一致するか
+    # 1. source_action: 消化できる tool 名 と一致するか。
+    # main.py:964 で chain 実行時 tool_name は "+".join(...) で combined 形式
+    # (例: "memory_store+output_display") になる。1 cycle = 1 entry の凝集性は
+    # 保存側で維持し、観測側で split して構成要素を判定する設計 (2026-05-16 ゆう gut)。
+    # 空文字フィルタは将来の防衛 (先頭/末尾 `+` 等の edge case 対策、Codex review WARN 反映)。
     required_source = mp.get("source_action")
     if required_source is not None:
-        if tool_name != required_source:
+        parts = [p for p in tool_name.split("+") if p]
+        if required_source not in parts:
             return False
 
     # 2. expected_channel: 消化時 channel と一致するか (構造 match)

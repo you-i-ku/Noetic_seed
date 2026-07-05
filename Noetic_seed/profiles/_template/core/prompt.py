@@ -235,11 +235,17 @@ def _build_pending_block(state: dict) -> str:
     LLM② で reuse する (commit 4 で prompt_assembly が pending builder を欠落させた
     bug を構造的に防止)。
 
+    2026-05-16 hotfix: 消化済 pending を <recent_resolved> 別 tag に literal 分離。
+    V07 Phase 1 XML 化 (9bf95b3) で <pending> 内に resolved section を併置した結果、
+    LLM① が tag semantic で「pending = 未対応」と解釈し既消化 topic を再候補化する
+    現象 (cycle 40/45 同一 Self 説明 二重応答) を構造的に解消。段階9 fix 1 (a171de3)
+    の「完了認識を構造提供」設計意図は <recent_resolved> 側で literal 維持。
+
     Args:
         state: Noetic state dict (`pending` / `stream_active` / `stream_params` 含む)
 
     Returns:
-        "<pending>\n  ...\n</pending>" XML block 文字列、空 pending でも block 維持
+        "<pending>\n  ...\n</pending>" XML block 文字列、未対応 pending のみ含む。
     """
     pending = state.get("pending", []) or []
     pending_lines = []
@@ -247,9 +253,6 @@ def _build_pending_block(state: dict) -> str:
         unresolved = [p for p in pending
                       if p.get("observed_content") is None
                       and p.get("gap", 0.0) > 0.0]
-        resolved = [p for p in pending
-                    if p.get("observed_content") is not None
-                    or p.get("gap", 0.0) == 0.0]
 
         for p in sorted(unresolved, key=lambda x: -x.get("priority", 0))[:10]:
             p_type = p.get("type", "?")
@@ -271,24 +274,6 @@ def _build_pending_block(state: dict) -> str:
                 ch_tag = f" ch={p_ch}" if p_ch else ""
                 pending_lines.append(f"  [{p_type} dismiss={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
 
-        if resolved:
-            resolved_sorted = sorted(
-                resolved,
-                key=lambda p: p.get("observed_time") or "",
-                reverse=True,
-            )[:3]
-            pending_lines.append("")
-            pending_lines.append("  【最近完了した応答 (参考、既に済)】")
-            for p in resolved_sorted:
-                ch = p.get("observed_channel") or p.get("expected_channel") or ""
-                ch_tag = f" ch={ch}" if ch else ""
-                src = p.get("source_action", "?")
-                obs_time = p.get("observed_time", "") or ""
-                content = (p.get("content_intent") or p.get("content", ""))[:60]
-                pending_lines.append(
-                    f"  [完了 src={src}{ch_tag}] {content} → 観測済 ({obs_time})"
-                )
-
     stream_status = ""
     if state.get("stream_active"):
         sp = state.get("stream_params", {}) or {}
@@ -303,6 +288,54 @@ def _build_pending_block(state: dict) -> str:
 
     body = "\n".join(pending_lines) if pending_lines else "  なし"
     return f"<pending>\n{body}{stream_status}\n</pending>"
+
+
+def _build_recent_resolved_block(state: dict) -> str:
+    """<recent_resolved> XML block helper (2026-05-16 hotfix)。
+
+    消化済 pending (observed_content 有り or gap=0.0) を <pending> tag から literal
+    分離し、独立した <recent_resolved> tag で表示。段階9 fix 1 (a171de3) の
+    「完了認識を構造提供 (feedback_llm_as_brain 整合)」設計意図を XML 構造で literal
+    保持しつつ、V07 Phase 1 XML 化以降に observed された再候補化問題 (cycle 40/45
+    同一 Self 説明 二重応答) を tag 分離で構造的に解消する。
+
+    直近 3 件のみ observed_time 降順で literal 表示。resolved 0 件なら空文字列を
+    返し、prompt 側で block 自体を省略する (空 XML block を出さない簡素性)。
+
+    Returns:
+        "<recent_resolved>\n  ...\n</recent_resolved>" XML block 文字列、
+        消化済 pending なしの場合は空文字列 "" を返す。
+    """
+    pending = state.get("pending", []) or []
+    if not pending:
+        return ""
+
+    resolved = [p for p in pending
+                if p.get("observed_content") is not None
+                or p.get("gap", 0.0) == 0.0]
+
+    if not resolved:
+        return ""
+
+    resolved_sorted = sorted(
+        resolved,
+        key=lambda p: p.get("observed_time") or "",
+        reverse=True,
+    )[:3]
+
+    lines = []
+    for p in resolved_sorted:
+        ch = p.get("observed_channel") or p.get("expected_channel") or ""
+        ch_tag = f" ch={ch}" if ch else ""
+        src = p.get("source_action", "?")
+        obs_time = p.get("observed_time", "") or ""
+        content = (p.get("content_intent") or p.get("content", ""))[:60]
+        lines.append(
+            f"  [完了 src={src}{ch_tag}] {content} → 観測済 ({obs_time})"
+        )
+
+    body = "\n".join(lines)
+    return f"<recent_resolved>\n{body}\n</recent_resolved>"
 
 
 def _build_recent_history_block(state: dict, limit: int = 5) -> str:
@@ -386,8 +419,12 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
     # prompt_assembly pending 欠落 bug を構造的に防止)
     pending_block = _build_pending_block(state)
 
+    # 2026-05-16 hotfix: 消化済 pending を別 XML tag に分離 (cycle 40/45 再候補化 fix)
+    recent_resolved_block = _build_recent_resolved_block(state)
+    recent_resolved_section = f"\n{recent_resolved_block}" if recent_resolved_block else ""
+
     # V07 Phase 1 hotfix (Codex audit AUD-P2-02 fix): summaries は recent_history の
-    # 後ろに移動 (PLAN §3-4 順序整合、subjective → world → pending → history → summaries → tools → task)
+    # 後ろに移動 (PLAN §3-4 順序整合、subjective → world → pending → recent_resolved → history → summaries → tools → task)
     summary_section = f"\n<summaries>\n{summary_text}\n</summaries>" if summary_text else ""
     prompt_body = f"""[{now}]{fire_cause_line}
 
@@ -395,7 +432,7 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 
 {world_state_block}
 
-{pending_block}
+{pending_block}{recent_resolved_section}
 
 {recent_history_block}{summary_section}
 

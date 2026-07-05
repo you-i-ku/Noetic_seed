@@ -251,6 +251,35 @@ def test_observe_match_source_actions():
     ])
 
 
+def test_matches_chain_tool_name():
+    """_matches: chain 実行 combined tool 名 ("+" join) でも source_action 一致で消化対象。
+
+    main.py:964 で chain 実行時 tool_name は "+".join(all_tool_names) で combined 形式
+    (例: "memory_store+output_display") になる。1 cycle = 1 entry の凝集性は保存側で
+    維持し、観測側 (_matches) で split して構成要素を判定する (2026-05-16 ゆう gut)。
+    """
+    from core.pending_unified import _matches
+    print("== _matches: chain combined tool 名で消化 (観測側 split) ==")
+    mp = {"source_action": "output_display"}
+    pending = {"content_observable": "", "content_intent": ""}
+
+    # case 1: combined tool 名で消化される (今回 fix の核心)
+    case1 = _matches(mp, "memory_store+output_display", {}, "result", "device", pending)
+    # case 2: 単独 tool 名でも消化される (回帰防止)
+    case2 = _matches(mp, "output_display", {}, "result", "device", pending)
+    # case 3: combined だが required_source 不含なら消化されない (識別力 = 誤実装で fail)
+    case3 = _matches(mp, "memory_store+reflect", {}, "result", "device", pending)
+    # case 4: 部分一致では消化されない (split で完全一致確認、識別力 = substring match の誤実装で fail)
+    case4 = _matches(mp, "output_d+other", {}, "result", "device", pending)
+
+    return all([
+        _assert(case1 is True, "combined 'memory_store+output_display' で消化"),
+        _assert(case2 is True, "単独 'output_display' で消化 (回帰防止)"),
+        _assert(case3 is False, "combined 'memory_store+reflect' は消化されない"),
+        _assert(case4 is False, "部分一致 'output_d+other' は消化されない (完全一致)"),
+    ])
+
+
 def test_observe_skips_already_observed():
     print("== pending_observe: 既に observed 済みは skip ==")
     state = _fresh_state()
@@ -658,6 +687,7 @@ if __name__ == "__main__":
         ("observe: 基本", test_observe_basic),
         ("observe: priority 降順", test_observe_priority_descending),
         ("observe: match_source_actions", test_observe_match_source_actions),
+        ("_matches: chain combined tool 名 (観測側 split)", test_matches_chain_tool_name),
         ("observe: observed 済み skip", test_observe_skips_already_observed),
         ("observe: 該当なし → 空 list", test_observe_no_match_returns_empty),
         ("observe: limit 複数", test_observe_limit_multiple),
