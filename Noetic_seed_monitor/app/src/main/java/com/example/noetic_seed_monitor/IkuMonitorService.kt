@@ -88,6 +88,7 @@ class IkuMonitorService : Service() {
     private var _cameraTrigger: (() -> Unit)? = null
     private var _cameraStreamCallback: ((List<String>?, Map<String, Any>?) -> Unit)? = null
     private var _cameraStreamTrigger: ((String, Int, Float) -> Unit)? = null
+    private var petOverlayManager: PetOverlayManager? = null
 
     // === Screen capture state ===
     private var mediaProjection: MediaProjection? = null
@@ -140,6 +141,8 @@ class IkuMonitorService : Service() {
 
     override fun onDestroy() {
         Log.d(TAG, "Service onDestroy")
+        petOverlayManager?.dispose()
+        petOverlayManager = null
         stopScreenCapture()
         wsClient?.disconnect()
         wsClient = null
@@ -387,6 +390,14 @@ class IkuMonitorService : Service() {
         wsClient = null
         _state.value = _state.value.copy(phase = AppPhase.Disconnected, session = null)
         updatePersistentNotification("切断")
+    }
+    fun togglePetOverlay() {
+        val manager = petOverlayManager ?: PetOverlayManager(this).also { petOverlayManager = it }
+        if (manager.isShowing) {
+            manager.hide()
+        } else {
+            manager.show()
+        }
     }
 
     // === セッションデータ更新ヘルパ ===
@@ -646,6 +657,7 @@ class IkuMonitorService : Service() {
             addProperty("decision", if (approved) "yes" else "no")
         }
         wsClient?.send(msg)
+        petOverlayManager?.onApprovalDecision(approved)
         val s = _state.value.session ?: return
         _state.value = _state.value.copy(session = s.copy(approvalRequests = s.approvalRequests.filter { it.id != id }))
     }

@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Pets
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material3.*
@@ -612,6 +613,7 @@ fun AppWithDrawer(state: IkuState, vm: IkuViewModel) {
                         onMenuClick = { scope.launch { drawerState.open() } },
                         onSendChat = { text -> vm.sendChat(text) },
                         onApproval = { id, approved -> vm.sendApproval(id, approved) },
+                        onPetToggle = { vm.togglePetOverlay() },
                         onPauseToggle = {
                             vm.sendServerCommand(if (state.paused) "resume" else "pause")
                         },
@@ -748,6 +750,7 @@ fun MainScreen(
     onMenuClick: () -> Unit,
     onSendChat: (String) -> Unit = {},
     onApproval: (String, Boolean) -> Unit = { _, _ -> },
+    onPetToggle: () -> Unit = {},
     onPauseToggle: () -> Unit = {},
 ) {
     val bgColor by animateColorAsState(
@@ -785,6 +788,17 @@ fun MainScreen(
                     color = Color.White, fontWeight = FontWeight.Bold,
                 )
                 Spacer(modifier = Modifier.weight(1f))
+                IconButton(
+                    onClick = onPetToggle,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        Icons.Default.Pets,
+                        contentDescription = "ペット表示",
+                        tint = Color(0xFF4FC3F7),
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
                 // pause/resume トグル
                 IconButton(
                     onClick = onPauseToggle,
