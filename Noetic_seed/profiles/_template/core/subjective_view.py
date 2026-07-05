@@ -122,6 +122,36 @@ def _graph_summary(state: dict) -> dict:
 
 
 # ============================================================
+# preference_alignment (V10 Sedimentary C 案 C、2026-07-05)
+# ============================================================
+
+def _preference_alignment_line(state: dict) -> Optional[str]:
+    """前 cycle の post-hoc effective_change (log p*(o|C) diff) を 1 行にする。
+
+    P2 affordance literal: 「前 cycle の観測が自分の preference に近づいたか
+    離れたか」を iku が読める材料として置くだけ。解釈も行動指示もしない。
+
+    metrics.py build_cycle_metrics_event が state["last_efe_snapshot"] に
+    stash した値を読む。snapshot 不在 / effective_change 非数値 (bootstrap 期
+    や C 未構築 cycle) は None → build_subjective_state 側で行ごと省略。
+    """
+    snap = state.get("last_efe_snapshot") or {}
+    ec = snap.get("effective_change")
+    if not isinstance(ec, (int, float)):
+        return None
+    if ec > 0:
+        direction = "preference に近づいた"
+    elif ec < 0:
+        direction = "preference から離れた"
+    else:
+        direction = "変化なし"
+    return (
+        f"  preference_alignment: 前 cycle effective_change={ec:+.3f} nat"
+        f" ({direction})"
+    )
+
+
+# ============================================================
 # related_memory (hybrid 80 字、暫定 fallback、commit 6 で正規化)
 # ============================================================
 
@@ -237,6 +267,12 @@ def build_subjective_state(state: dict) -> str:
         f"    ego:    self_edges={ego['self_edges']}, memory_1hop_count={ego['memory_1hop_count']}",
         f"    global: cluster_mi={glob['cluster_mi']}, frontier={glob['frontier_node_count']}, maturity={glob['graph_maturity']}",
     ]
+
+    # V10 案 C (2026-07-05): 前 cycle の preference alignment を表示 (P2 affordance、
+    # 表示のみ)。snapshot 不在 (bootstrap 期) は行ごと省略
+    alignment = _preference_alignment_line(state)
+    if alignment:
+        graph_lines.append(alignment)
 
     memory_lines = ["  related_memory:"]
     if rm:

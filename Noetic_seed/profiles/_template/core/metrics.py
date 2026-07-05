@@ -421,6 +421,19 @@ def build_cycle_metrics_event(
         state, prev_snapshot, entries_with_embedding or [], links or [], fog_now=fog
     )
 
+    # V10 Sedimentary C 案 C (2026-07-05): post-hoc EFE の主観 affordance 用 snapshot。
+    # subjective_view が <subjective_state> に preference_alignment 1 行を表示する
+    # (P2 affordance literal: 表示のみ、行動指示なし。iku が「自分の観測が自分の
+    # 選好に近づいたか」を読める材料を置くだけ)。
+    if isinstance(state, dict):
+        state["last_efe_snapshot"] = {
+            "cycle_id": cycle_id_now,
+            "G": efe_dict.get("G"),
+            "effective_change": efe_dict.get("effective_change"),
+            "epistemic_gain": efe_dict.get("epistemic_gain"),
+            "pragmatic_gain": efe_dict.get("pragmatic_gain"),
+        }
+
     dispositions = state.get("dispositions", {}) or {}
     self_disp_keys = list(
         (dispositions.get("self") or {}).keys()

@@ -44,6 +44,20 @@ UNIFORM_VARIANCE = 1.0 / EPS
 
 _DEFAULT_DIM = 1024
 
+# ============================================================
+# V10 Sedimentary C (2026-07-05): 堆積資格フィルタ定数
+# ============================================================
+# 主体性 = 時定数 × フィルタの設計。1 cycle の LLM 出力は C に直結させず
+# (V07.5 A2/A3 維持)、資格を満たした「堆積」だけが C の成分になる。
+# - 時定数: C 再構築は cycle start snapshot のみ (A2)。reflection NOTES は
+#   reflect 発火 (≈10 cycle 毎) + cycle 跨ぎでしか C に到達しない = 構造的低速化
+# - フィルタ: confidence (自己評価) / attempts (関心の持続) / 上限 cap (mixture 安定)
+SEDIMENT_CONF_MIN = 0.7             # opinion (reflection NOTES) の confidence 資格下限
+SEDIMENT_MAX_OPINIONS = 8           # opinion 成分上限 (confidence 降順)
+SEDIMENT_MAX_PENDING = 5            # pending 成分上限 (attempts 降順)
+SEDIMENT_PENDING_MIN_ATTEMPTS = 3   # 持続関心の資格 (attempts 下限、1-2 回は通過ノイズ扱い)
+SEDIMENT_PENDING_CONF_SCALE = 10.0  # attempts → confidence 変換分母 (min(1, attempts/10))
+
 
 def compute_C_from_self(
     state_self: dict,
@@ -147,6 +161,166 @@ def compute_C_from_self(
         "per_key_variance": per_key_variance,
         "C_entropy": _mixture_entropy_upper_bound(components, _DEFAULT_DIM),
         "n_components": n,
+    }
+
+
+def compute_C(state: dict, load_memories_fn=None) -> dict:
+    """state 全体 → 多源 preference distribution C (V10 Sedimentary C、2026-07-05)。
+
+    compute_C_from_self (identity 単源) の後継 entry point。3 つの source から
+    vMF mixture 成分を構成する:
+
+      ① identity 層: state.self の可変層 string (NAME_KEY 除外、既存資格規則そのまま)。
+         confidence は state["_efe_self_confidence"] (欠損 key は DEFAULT_CONFIDENCE)。
+      ② opinion 堆積層: reflection NOTES (origin=="reflection") のうち
+         metadata.confidence >= SEDIMENT_CONF_MIN のもの。confidence 降順で
+         SEDIMENT_MAX_OPINIONS 件まで。entry に embedding があれば再 embed せず流用。
+      ③ pending 持続関心層: state.pending の type=="pending" / 未 observed /
+         attempts >= SEDIMENT_PENDING_MIN_ATTEMPTS。attempts 降順で
+         SEDIMENT_MAX_PENDING 件まで。confidence = min(1.0, attempts /
+         SEDIMENT_PENDING_CONF_SCALE) (関心の持続が peak の鋭さに変換される)。
+
+    設計原則 (V10 paradigm、2026-07-05 ゆう合意):
+      - 「LLM は主体の素材供給者、主体は堆積のプロセス」。1 cycle の LLM 出力は
+        C に直結しない (A3 維持)。資格フィルタを生き延びた蓄積だけが選好になる
+      - drift_is_not_developer_error: C は「現在の関心」追従 (homeostatic ではない)。
+        opinion / pending の入替りで C も動く、固定 identity への回帰項なし
+      - 数学構造は compute_C_from_self と同一 (vMF mixture、weight 均等 1/n、
+        variance = 1/(conf+ε))。Slice 3「重み全部 1.0」原則を weight 側で継承
+
+    Args:
+        state: Noetic state dict (self / _efe_self_confidence / pending を参照)
+        load_memories_fn: memory 全 load callable (test 注入用)。None なら
+            core.memory.load_all_memories を遅延 import (循環 import 回避)
+
+    Returns:
+        compute_C_from_self と同 schema + 追加 field:
+            "source_breakdown": {"self": int, "opinion": int, "pending": int}
+        components[*] に "source" key ("self" / "opinion" / "pending") 追加。
+        全 source 空 → 均一 sentinel (compute_C_from_self 空 dict と同値)。
+
+    Bootstrap:
+        白紙 iku (self 空 + memory 空 + pending 空) → components=[] の均一 sentinel。
+        update_self 1 回 → ① のみの単峰 C (= 旧 compute_C_from_self と同挙動)。
+        reflect が NOTES を刻み始めると ② が、関心が持続すると ③ が堆積する。
+    """
+    self_confidence = state.get("_efe_self_confidence", {}) or {}
+
+    # ① identity 層 (compute_C_from_self と同一資格規則)
+    specs = []
+    for k, v in (state.get("self") or {}).items():
+        if k == NAME_KEY:
+            continue
+        conf = float(self_confidence.get(k, DEFAULT_CONFIDENCE))
+        specs.append({
+            "key": k,
+            "text": str(v),
+            "mean": None,
+            "confidence": max(0.0, min(1.0, conf)),
+            "source": "self",
+        })
+
+    # ② opinion 堆積層 (reflection NOTES、confidence 資格 + cap)
+    if load_memories_fn is None:
+        from core.memory import load_all_memories as load_memories_fn
+    try:
+        memories = load_memories_fn() or []
+    except Exception:
+        memories = []
+    opinion_cands = []
+    for m in memories:
+        if not isinstance(m, dict) or m.get("origin") != "reflection":
+            continue
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        try:
+            conf = float((m.get("metadata") or {}).get("confidence", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if conf < SEDIMENT_CONF_MIN:
+            continue
+        opinion_cands.append((conf, str(m.get("created_at", "")), m, content))
+    opinion_cands.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    for conf, _created, m, content in opinion_cands[:SEDIMENT_MAX_OPINIONS]:
+        emb = m.get("embedding")
+        specs.append({
+            "key": f"opinion:{m.get('id', '')}",
+            "text": content,
+            "mean": emb if isinstance(emb, list) else None,
+            "confidence": max(0.0, min(1.0, conf)),
+            "source": "opinion",
+        })
+
+    # ③ pending 持続関心層 (attempts 資格 + cap)
+    pending_cands = []
+    for p in state.get("pending", []) or []:
+        if not isinstance(p, dict) or p.get("type") != "pending":
+            continue
+        if p.get("observed_content") is not None:
+            continue
+        attempts = int(p.get("attempts", 1) or 1)
+        if attempts < SEDIMENT_PENDING_MIN_ATTEMPTS:
+            continue
+        text = (p.get("content_intent") or p.get("content") or "").strip()
+        if not text:
+            continue
+        pending_cands.append((attempts, p, text))
+    pending_cands.sort(key=lambda t: t[0], reverse=True)
+    for attempts, p, text in pending_cands[:SEDIMENT_MAX_PENDING]:
+        specs.append({
+            "key": f"pending:{p.get('id', '')}",
+            "text": text,
+            "mean": None,
+            "confidence": min(1.0, attempts / SEDIMENT_PENDING_CONF_SCALE),
+            "source": "pending",
+        })
+
+    if not specs:
+        empty = compute_C_from_self({}, self_confidence=None)
+        empty["source_breakdown"] = {"self": 0, "opinion": 0, "pending": 0}
+        return empty
+
+    # mean 未確定 spec を 1 batch で embed (opinion の既存 embedding は流用)
+    to_embed = [s for s in specs if s["mean"] is None]
+    if to_embed:
+        try:
+            vecs = _embed_sync([s["text"] for s in to_embed]) if is_vector_ready() else None
+        except Exception:
+            vecs = None
+        if vecs is not None and len(vecs) == len(to_embed):
+            for s, vec in zip(to_embed, vecs):
+                s["mean"] = vec
+
+    n = len(specs)
+    weight = 1.0 / n
+    components = []
+    source_keys = []
+    per_key_confidence = {}
+    per_key_variance = {}
+    breakdown = {"self": 0, "opinion": 0, "pending": 0}
+    for s in specs:
+        variance = 1.0 / (s["confidence"] + EPS)
+        components.append({
+            "key": s["key"],
+            "mean": s["mean"],
+            "variance": variance,
+            "weight": weight,
+            "source": s["source"],
+        })
+        source_keys.append(s["key"])
+        per_key_confidence[s["key"]] = s["confidence"]
+        per_key_variance[s["key"]] = variance
+        breakdown[s["source"]] += 1
+
+    return {
+        "components": components,
+        "source_keys": source_keys,
+        "per_key_confidence": per_key_confidence,
+        "per_key_variance": per_key_variance,
+        "C_entropy": _mixture_entropy_upper_bound(components, _DEFAULT_DIM),
+        "n_components": n,
+        "source_breakdown": breakdown,
     }
 
 

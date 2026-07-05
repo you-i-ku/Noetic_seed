@@ -47,20 +47,23 @@ def _rebuild_efe_C_snapshot(state: dict) -> None:
     真因の 1 つ) を構造的に literal 解消 (PLAN v1.4 §3-4 + §6-2 literal)。
 
     first-cycle bootstrap: state["_efe_C"] None or empty な cycle 1 でも
-    compute_C_from_self が空 dict 許容 (空 self → empty C components literal)、
+    compute_C が空 state 許容 (空 self + 空 memory + 空 pending → 均一 sentinel)、
     commit 3 controller_select の `_efe_C is None` graceful skip 依存ガードを literal 解消。
 
+    V10 Sedimentary C (2026-07-05): compute_C_from_self (identity 単源) →
+    compute_C (identity + opinion 堆積 + pending 持続関心の 3 源) に切替。
+    資格フィルタ (confidence / attempts / cap) を生き延びた蓄積だけが C の成分に
+    なる = 「評価結果の蓄積の結果として意味づけが立ち上がる」当初設計意図の配管接続。
+    cycle start snapshot + cycle 中 freeze (A2) は不変 = LLM 出力が同 cycle 内で
+    自分の選好になる self-referential loop は引き続き構造的に不可能。
+
     Active Inference posterior observer pattern literal: cycle start で C を
-    "homeostatic prior preferences" として固定 snapshot (Friston FEP literal
-    「C は agent が存在し続けるための条件」)、cycle 中の self-referential update を禁止。
+    prior preferences として固定 snapshot、cycle 中の self-referential update を禁止。
     """
     # lazy import: scipy 直接依存を controller.py module load 時に literal 必須化させない
     # (preference_distribution.py:35 `from scipy import special` 経路、per-profile venv 前提)
-    from core.preference_distribution import compute_C_from_self
-    state["_efe_C"] = compute_C_from_self(
-        state.get("self", {}),
-        self_confidence=state.get("_efe_self_confidence", {}),
-    )
+    from core.preference_distribution import compute_C
+    state["_efe_C"] = compute_C(state)
     state["_efe_C_update_cycle"] = state.get("cycle_id", 0)
 
 
