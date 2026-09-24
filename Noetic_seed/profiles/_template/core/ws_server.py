@@ -290,16 +290,18 @@ def stop_ws_server():
     # 呼び出し元で少し sleep して確実に解放を待つこと
 
 
-def broadcast(msg: dict):
-    """全接続クライアントにメッセージを送信（スレッドセーフ）"""
-    if not _ws_clients:
-        return
+def broadcast(msg: dict) -> int:
+    """送信キューに登録し、受付時の接続数を返す。到達数ではない。0 件なら登録しない。"""
+    client_count = len(_ws_clients)
+    if client_count == 0:
+        return 0
     text = json.dumps(msg, ensure_ascii=False)
     if msg.get("type") in ("log", "state", "e_values"):
         _ws_log_buffer.append(msg)
         if len(_ws_log_buffer) > _LOG_BUFFER_MAX:
             _ws_log_buffer.pop(0)
     _send_queue.put(text)
+    return client_count
 
 
 def broadcast_log(text: str):

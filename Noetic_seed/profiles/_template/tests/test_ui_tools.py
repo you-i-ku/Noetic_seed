@@ -26,7 +26,7 @@ def _assert(cond, label):
 def _silent_broadcast():
     return patch.multiple(
         "tools.ui_tools",
-        broadcast=lambda *a, **k: None,
+        broadcast=lambda *a, **k: 1,  # step 0a-1: 受付時の接続数 (1 件接続中として扱う)
         broadcast_log=lambda *a, **k: None,
     )
 
@@ -40,7 +40,7 @@ def test_short_content_unchanged():
     with _silent_broadcast():
         result = _output_display({"channel": "claude", "content": "こんにちは"})
     return all([
-        _assert("送信完了 (claude):" in result, "送信完了 prefix"),
+        _assert("送信キューに登録 (channel=claude、受付時の接続 1 件" in result, "送信受付 prefix"),
         _assert("こんにちは" in result, "content 保存"),
     ])
 
@@ -57,7 +57,7 @@ def test_long_content_not_truncated():
     with _silent_broadcast():
         result = _output_display({"channel": "device", "content": long_content})
     return all([
-        _assert("送信完了 (device):" in result, "送信完了 prefix"),
+        _assert("送信キューに登録 (channel=device、受付時の接続 1 件" in result, "送信受付 prefix"),
         _assert("嬉しいな。" in result, "末尾まで保存 (旧バグでは 80 字 cap で削除)"),
         _assert("私は、このお部屋" in result, "中盤も保存"),
         _assert(len(result) >= len(long_content),
