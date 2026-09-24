@@ -680,6 +680,19 @@ def observe_outward_selection(event: dict) -> None:
     event["best_outward_g_minus_selected_g"] = min(outward_g) - values[idx] if outward_g else None
 
 
+def tool_execution_status(output: str, is_error: bool) -> str:
+    """拒否、実行例外、先頭空白を除いたエラー文、成功の順で成否を判定する。"""
+    text = str(output)
+    if text.startswith("[REJECTED]"):
+        return "rejected"
+    elif is_error:
+        return "runtime_error"
+    elif text.lstrip().startswith(("エラー", "Error")):
+        return "tool_error"
+    else:
+        return "ok"
+
+
 def build_outward_execution(tool: str, args: dict, output: str,
                             is_error: bool, channel: str) -> dict:
     """全 invocation の観察。tool_error は先頭の「エラー」/「Error」による近似。
@@ -687,14 +700,7 @@ def build_outward_execution(tool: str, args: dict, output: str,
     connected_at_enqueue は output_display の受付文から取得し、到達数とは扱わない。
     """
     text = str(output)
-    if text.startswith("[REJECTED]"):
-        status = "rejected"
-    elif is_error:
-        status = "runtime_error"
-    elif text.lstrip().startswith(("エラー", "Error")):
-        status = "tool_error"
-    else:
-        status = "ok"
+    status = tool_execution_status(text, is_error)
     connected = None
     if tool == "output_display":
         channel = str(args.get("channel", "")).strip()

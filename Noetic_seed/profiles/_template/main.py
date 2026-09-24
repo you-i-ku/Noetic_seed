@@ -875,6 +875,7 @@ def main():
         _pending_observations.clear()
 
         chain_tools = selected.get("tools", [selected["tool"]])
+        from core.metrics import tool_execution_status
         all_results = []
         all_tool_names = []
         intent = ""
@@ -888,6 +889,7 @@ def main():
         # 採点 hook が実行ごとに保存した E を per_tool に対応づける。
         # 1 cycle = 1 log entry + entry["per_tool"] に tool 単位 metadata (Y 方式)。
         per_tool_entries: list = []
+        invocation_entries: list = []
         _successful_tools = set()
         _cycle_ev = None
         _cycle_pt = None
@@ -993,6 +995,16 @@ def main():
             # 各段の先頭だけを chain[i] に対応させる。名前一致かつ採点完了が必要。
             # 追加実行は E のみ保存し、先頭の失敗・拒否・別名・欠測を繰り上げない。
             for invocation_idx, invocation in enumerate(summary.tool_invocations):
+                _input = invocation.tool_input or {}
+                invocation_entries.append({
+                    "tool": invocation.tool_name, "tool_id": invocation.tool_id,
+                    "chain_position": chain_idx, "invocation_position": invocation_idx,
+                    "args": copy.deepcopy({k: v for k, v in _input.items()
+                                           if k not in ("tool_intent", "tool_expected_outcome", "message")}),
+                    "status": tool_execution_status(str(invocation.output), invocation.is_error),
+                    "in_cycle_result": False,
+                    "result": cap_tool_result(str(invocation.output)),
+                })
                 _matches = [ev for tid, name, ev in _hook_ctx["evaluations"]
                             if tid == invocation.tool_id and name == invocation.tool_name]
                 _unique_id = (bool(invocation.tool_id) and
@@ -1007,6 +1019,8 @@ def main():
                     "chain_position": chain_idx,
                     "invocation_position": invocation_idx,
                     "is_error": invocation.is_error,
+                    "intent": str(_input.get("tool_intent", "") or ""),
+                    "expect": str(_input.get("tool_expected_outcome", "") or ""),
                     **{k: _tool_ev.get(k) if _tool_ev is not None else None
                        for k in ("e1", "e2", "e2_raw", "e3", "e4", "eff")},
                 }
@@ -1064,7 +1078,14 @@ def main():
                 _executed_targets.add(_exec_key)
 
             prev_result = str(rec.output)[:500]
+            # 参照は JSON のバイト位置ではなく、結合した Python 文字列内の位置。
+            _result_start = sum(len(part) for part in all_results) + len("\n---\n") * len(all_results)
+            _result_start += len(f"[{rec.tool_name}]\n")
             all_results.append(f"[{rec.tool_name}]\n{cap_tool_result(str(rec.output))}")
+            invocation_entries[-1]["in_cycle_result"] = True
+            invocation_entries[-1]["result_ref"] = {
+                "start": _result_start, "length": len(invocation_entries[-1]["result"]),
+            }
             if _inv_last is not None:
                 _inv_last["in_cycle_result"] = True
             all_tool_names.append(rec.tool_name)
@@ -1113,6 +1134,13 @@ def main():
 
         tool_name = "+".join(all_tool_names)
         result_str = ("\n---\n".join(all_results))[:50000]
+        for invocation in invocation_entries:
+            ref = invocation.get("result_ref")
+            if ref is not None:
+                if ref["start"] + ref["length"] <= len(result_str):
+                    del invocation["result"]
+                else:
+                    del invocation["result_ref"]
 
         if intent:
             print(f"  intent: {intent}")
@@ -1190,6 +1218,7 @@ def main():
             "tool": tool_name,
             "channel": _get_channel(tool_name),
             "result": result_str,
+            "invocations": invocation_entries,
             "perspective": make_perspective(),  # 段階11-A: iku 自身の tool 行動 → self/actual
         }
         if parse_failed:

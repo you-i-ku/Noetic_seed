@@ -25,7 +25,7 @@ UNTAGGED_NETWORK = "_untagged"
 # 未知 field は raw 寄せ + _unclassified_fields マーカー (SCHEMA_META_FIELDS) で
 # 明示し、schema_warnings.jsonl に記録する (cap SCHEMA_WARNINGS_CAP 超で archive)。
 RAW_FIELDS = frozenset({
-    "id", "time", "channel", "tool", "args", "result", "type",
+    "id", "time", "channel", "tool", "args", "result", "type", "invocations",
 })
 SUBJECTIVE_FIELDS = frozenset({
     "id", "intent", "expect",
@@ -744,6 +744,20 @@ def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
         lines.append(line)
         total += len(line)
     return "\n".join(lines)
+
+
+def invocation_result(entry: dict, invocation: dict) -> str:
+    """個別 result (空文字も含む) を優先し、無ければ result_ref の文字位置で復元。
+
+    result_ref は保存・再読込後の entry.result に対する Python 文字列の位置と長さ。
+    どちらも無い旧記録は空文字を返す。
+    """
+    if "result" in invocation:
+        return invocation["result"]
+    ref = invocation.get("result_ref")
+    if ref is not None:
+        return entry.get("result", "")[ref["start"]:ref["start"] + ref["length"]]
+    return ""
 
 
 def _split_entry_fields(entry: dict):

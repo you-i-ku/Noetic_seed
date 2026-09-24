@@ -5,7 +5,7 @@ from core.config import MEMORY_DIR
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.memory import (
     memory_store, memory_update, memory_forget, memory_network_search,
-    UNTAGGED_NETWORK,
+    UNTAGGED_NETWORK, invocation_result,
 )
 from core.state import load_state
 from core.tag_registry import is_tag_registered, list_registered_tags
@@ -14,8 +14,42 @@ from core.tag_registry import is_tag_registered, list_registered_tags
 _WORLD_DEPRECATION_WARNED = False
 
 
+def _memory_executions(entry):
+    """0d-2 の主観と raw を段・番号で結合。理由欄や invocations が無い旧記録は対象外。"""
+    per_tool = entry.get("per_tool", [])
+    if not any("intent" in pt or "expect" in pt for pt in per_tool):
+        return []
+    invocations = {(inv["chain_position"], inv["invocation_position"]): inv
+                   for inv in entry.get("invocations", [])}
+    return [(pt, invocations[(pt["chain_position"], pt["invocation_position"])])
+            for pt in per_tool
+            if (pt.get("chain_position"), pt.get("invocation_position")) in invocations]
+
+
+def _memory_search_texts(entry):
+    """既存 entry と各実行を独立して照合する。400 字制限はベクトル経路だけ。"""
+    return [f"{entry.get('intent','')} {str(entry.get('result',''))}"] + [
+        f"{pt.get('intent','')} {pt.get('expect','')} {invocation_result(entry, inv)}"
+        for pt, inv in _memory_executions(entry)]
+
+
+def _memory_execution_lines(entry, detail=False):
+    """一覧は各実行の理由100字、ID詳細は理由・予想・引数・結果を各200字で表示。"""
+    lines = []
+    limit = 200 if detail else 100
+    for pt, inv in _memory_executions(entry):
+        line = (f"{pt['chain_position']}-{pt['invocation_position']} {inv['tool']} "
+                f"[{inv['status']}] intent={pt.get('intent','')[:limit]}")
+        if detail:
+            line += (f" expect={pt.get('expect','')[:200]} "
+                     f"args={json.dumps(inv.get('args', {}), ensure_ascii=False)[:200]} "
+                     f"result={invocation_result(entry, inv)[:200]}")
+        lines.append(line)
+    return "".join("\n" + line for line in lines)
+
+
 def _search_memory(args):
-    """v1互換: memory/archive_*.jsonlからエントリをベクトル/キーワード検索"""
+    """archive を検索。entry と各実行の最大点で順位付けし、ID部分一致で詳細を返す。"""
     query = args.get("query", "")
     search_id = args.get("id", "")
     n = min(int(args.get("max_results", "") or "5"), 20)
@@ -35,7 +69,8 @@ def _search_memory(args):
                     if search_id in entry.get("id", ""):
                         return (f"id={entry.get('id','')} time={entry.get('time','')} "
                                 f"tool={entry.get('tool','')} intent={entry.get('intent','')[:200]} "
-                                f"result={str(entry.get('result',''))[:200]}")
+                                f"result={str(entry.get('result',''))[:200]}"
+                                + _memory_execution_lines(entry, detail=True))
                 except Exception:
                     pass
         return f"ID '{search_id}' に一致するエントリなし"
@@ -63,17 +98,24 @@ def _search_memory(args):
     # ベクトル検索
     if is_vector_ready():
         try:
-            texts = [f"{e.get('intent','')} {str(e.get('result',''))}"[:400] for e in all_entries]
+            texts = []
+            text_ranges = []
+            for entry in all_entries:
+                start = len(texts)
+                texts.extend(text[:400] for text in _memory_search_texts(entry))
+                text_ranges.append((start, len(texts)))
             vecs = _embed_sync([query] + texts)
-            if vecs and len(vecs) == 1 + len(all_entries):
+            if vecs and len(vecs) == 1 + len(texts):
                 q_vec = vecs[0]
                 scored = sorted(
-                    [(cosine_similarity(q_vec, vecs[i+1]), i, all_entries[i]) for i in range(len(all_entries))],
+                    [(max(cosine_similarity(q_vec, vecs[j+1]) for j in range(start, end)),
+                      i, all_entries[i]) for i, (start, end) in enumerate(text_ranges)],
                     key=lambda x: x[0], reverse=True
                 )[:n]
                 return "\n".join(
                     f"[{round(s*100)}%] id={e.get('id','')} time={e.get('time','')} "
                     f"tool={e.get('tool','')} intent={e.get('intent','')[:100]}"
+                    + _memory_execution_lines(e)
                     for s, _, e in scored
                 )
         except Exception:
@@ -83,16 +125,17 @@ def _search_memory(args):
     query_tokens = set(re.findall(r'\w+', query.lower()))
     scored = []
     for idx, entry in enumerate(all_entries):
-        text = f"{entry.get('intent','')} {str(entry.get('result',''))}".lower()
-        tokens = set(re.findall(r'\w+', text))
-        if query_tokens & tokens:
-            scored.append((len(query_tokens & tokens) / max(len(query_tokens), 1), idx, entry))
+        score = max(len(query_tokens & set(re.findall(r'\w+', text.lower())))
+                    / max(len(query_tokens), 1) for text in _memory_search_texts(entry))
+        if score:
+            scored.append((score, idx, entry))
     scored.sort(key=lambda x: x[0], reverse=True)
     if not scored:
         return f"'{query}' に一致するエントリなし"
     return "\n".join(
         f"[{round(s*100)}%] id={e.get('id','')} time={e.get('time','')} "
         f"tool={e.get('tool','')} intent={e.get('intent','')[:100]}"
+        + _memory_execution_lines(e)
         for s, _, e in scored[:n]
     )
 
