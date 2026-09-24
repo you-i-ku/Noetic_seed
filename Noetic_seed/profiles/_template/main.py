@@ -73,7 +73,8 @@ from datetime import datetime
 # DualLoggerの設定（printをファイルにも書き出す）
 from core.config import (
     DualLogger, RAW_LOG_FILE, STATE_FILE, DEFAULT_PRESSURE_PARAMS,
-    ENV_INJECT_INTERVAL, _NOTIFICATION_HOURS, llm_cfg, BASE_DIR, prompt_budget
+    ENV_INJECT_INTERVAL, _NOTIFICATION_HOURS, llm_cfg, BASE_DIR, prompt_budget,
+    cap_tool_result
 )
 sys.stdout = DualLogger(RAW_LOG_FILE)
 
@@ -871,7 +872,7 @@ def main():
                 _executed_targets.add(_exec_key)
 
             prev_result = str(rec.output)[:500]
-            all_results.append(f"[{rec.tool_name}]\n{str(rec.output)[:20000]}")
+            all_results.append(f"[{rec.tool_name}]\n{cap_tool_result(str(rec.output))}")
             all_tool_names.append(rec.tool_name)
             _exec_line = f"  実行: {rec.tool_name} → {str(rec.output)[:100]}"
             print(_exec_line)
