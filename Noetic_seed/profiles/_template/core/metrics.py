@@ -716,6 +716,68 @@ def emit_outward_attempt(event: dict) -> dict:
     return event
 
 
+_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome", "message")
+
+
+def build_tool_invocation_events(records: list, *, run_id: str, attempt_id: str,
+                                 entry_id, cycle_id, time: str) -> list:
+    """1 実行 1 行の観察イベント (0d-1)。records は main が summary から写した値。
+
+    record: chain_position / invocation_position / tool_id / tool / mode /
+    tool_input / output / is_error / in_cycle_result。
+    intent・expect・message は承認 3 層をそのまま (無ければ空文字)、args は
+    それを除いた runtime 記録上の引数。status は 0b の build_outward_execution と同じ判定。
+    entry 未成立なら entry_id / cycle_id は None のまま渡す。
+    """
+    from core.config import cap_tool_result
+    events = []
+    for r in records:
+        ti = r.get("tool_input") or {}
+        output = str(r.get("output", ""))
+        events.append({
+            "event_type": "tool_invocation", "run_id": run_id,
+            "attempt_id": attempt_id, "time": time,
+            "entry_id": entry_id, "cycle_id": cycle_id,
+            "chain_position": r["chain_position"],
+            "invocation_position": r["invocation_position"],
+            "tool_id": r.get("tool_id", ""), "tool": r["tool"], "mode": r["mode"],
+            "intent": str(ti.get("tool_intent", "") or ""),
+            "expect": str(ti.get("tool_expected_outcome", "") or ""),
+            "message": str(ti.get("message", "") or ""),
+            "args": {k: v for k, v in ti.items() if k not in _APPROVAL_FIELDS},
+            "is_error": bool(r.get("is_error")),
+            "status": build_outward_execution(r["tool"], ti, output,
+                                              bool(r.get("is_error")), "")["status"],
+            "result": cap_tool_result(output),
+            "in_cycle_result": bool(r.get("in_cycle_result")),
+        })
+    return events
+
+
+def emit_tool_invocations(events: list) -> int:
+    """観察イベントを 1 行ずつ append。state を受け取らない。再試行しない。
+
+    append と index 更新の失敗を区別して print する。index だけ失敗した行は
+    保存済みなので次の行へ進む (再試行による重複を作らない)。append の失敗は
+    送出する (残りは書かない)。戻り値は append できた行数。
+    """
+    from core.config import MEMORY_DIR
+    target = MEMORY_DIR / METRICS_FILE_NAME
+    written = 0
+    for event in events:
+        try:
+            _atomic_append_jsonl(target, event)
+        except Exception as e:
+            print(f"  [invocation] append 失敗 ({written}/{len(events)} 行保存済み): {e}")
+            raise
+        written += 1
+        try:
+            _update_metrics_index(MEMORY_DIR / INDEX_FILE_NAME, target.name, event)
+        except Exception as e:
+            print(f"  [invocation] index 更新失敗 (行は保存済み): {e}")
+    return written
+
+
 def summarize_outward(events: list, k: int = 5) -> dict:
     """観察イベントだけを集計する。割合の分母を各項目に明記する。
 

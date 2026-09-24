@@ -568,8 +568,11 @@ def main():
             "best_outward_g_minus_selected_g": None,
             "exec": [], "utterances": [], "inputs": list(_outward_pending_inputs),
         }
+        # 0d-1: 全実行の理由・引数・結果の観察バッファ。entry_id は entry 成立後に入る。
+        invocations = {"records": [], "entry_id": None, "cycle_id": None}
         try:
-            result = _run_one_fire(*args, **kwargs, _outward_event=event)
+            result = _run_one_fire(*args, **kwargs, _outward_event=event,
+                                   _invocation_buf=invocations)
             if isinstance(result, dict) and result.get("llm1_error"):
                 event["end"] = "llm1_error"
             elif event["end"] == "error":
@@ -582,9 +585,21 @@ def main():
                 del _outward_pending_inputs[:len(event["inputs"])]
             except Exception as e:
                 print(f"  [outward] emit skip: {e}")
+            try:
+                if invocations["records"]:
+                    from core.metrics import build_tool_invocation_events, emit_tool_invocations
+                    emit_tool_invocations(build_tool_invocation_events(
+                        invocations["records"], run_id=event["run_id"],
+                        attempt_id=event["attempt_id"],
+                        entry_id=invocations["entry_id"], cycle_id=invocations["cycle_id"],
+                        time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ))
+            except Exception as e:
+                print(f"  [invocation] emit skip: {e}")
 
     def _run_one_fire(fire_cause, _tunnel_fire, pp, threshold, tick_dt,
-                      _micro_iter=0, fire_candidates=None, _outward_event=None):
+                      _micro_iter=0, fire_candidates=None, _outward_event=None,
+                      _invocation_buf=None):
         """1 fire iteration 本体。micro-loop から複数回呼ばれる可能性。
 
         state / _runtime / _hook_ctx / _pending_observations / TOOLS /
@@ -930,6 +945,22 @@ def main():
 
             if _outward_event is not None:
                 _observe_outward(_outward_event, "executions", (chain_tool, summary.tool_invocations))
+            _inv_last = None
+            if _invocation_buf is not None:
+                try:
+                    for _i, _r in enumerate(summary.tool_invocations):
+                        _inv_last = {
+                            "chain_position": chain_idx, "invocation_position": _i,
+                            "tool_id": _r.tool_id, "tool": _r.tool_name,
+                            "mode": "forced" if chain_idx == 0 else "free",
+                            "tool_input": copy.deepcopy(_r.tool_input or {}),
+                            "output": str(_r.output), "is_error": _r.is_error,
+                            "in_cycle_result": False,
+                        }
+                        _invocation_buf["records"].append(_inv_last)
+                except Exception as e:
+                    _inv_last = None
+                    print(f"  [invocation] observation skip: {e}")
 
             # 段階9 Step 0: LLM② debug log を拡充。
             # 従来は finish_reason だけ。assistant_messages (LLM② 思考) と
@@ -1034,6 +1065,8 @@ def main():
 
             prev_result = str(rec.output)[:500]
             all_results.append(f"[{rec.tool_name}]\n{cap_tool_result(str(rec.output))}")
+            if _inv_last is not None:
+                _inv_last["in_cycle_result"] = True
             all_tool_names.append(rec.tool_name)
             _exec_line = f"  実行: {rec.tool_name} → {str(rec.output)[:100]}"
             print(_exec_line)
@@ -1208,6 +1241,9 @@ def main():
                     )
 
         event_emitter.fire_event(state, entry)
+        if _invocation_buf is not None:
+            _invocation_buf["entry_id"] = entry["id"]
+            _invocation_buf["cycle_id"] = cid
 
         maybe_compress_log(state, set(TOOLS.keys()))
 

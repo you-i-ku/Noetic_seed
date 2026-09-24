@@ -179,7 +179,19 @@ def _main_factory(env, source):
     return env["factory"]()
 
 
-def _fire_harness(monkeypatch, tmp_path, source=MAIN_SOURCE, mode="normal", selector=None):
+class SeqProvider(FakeProvider):
+    """呼ばれるたびに次の段の tool_uses を返す (0d-1 の複数段テスト用)。"""
+
+    def stream(self, request):
+        self.requests.append(copy.deepcopy(request))
+        uses = self.calls.pop(0) if self.calls else []
+        if isinstance(uses, Exception):
+            raise uses
+        return AssistantMessage(tool_uses=uses)
+
+
+def _fire_harness(monkeypatch, tmp_path, source=MAIN_SOURCE, mode="normal", selector=None,
+                  stages=None, proposal=None, env_overrides=None, hook_runner=None):
     state = {"cycle_id": 3, "run_id": "r", "session_id": "s", "self": {},
              "energy": 50, "entropy": 0.65, "subjective_entries": [], "raw_events": [],
              "pending": [], "files_read": [], "files_written": [], "summaries": [],
@@ -194,13 +206,15 @@ def _fire_harness(monkeypatch, tmp_path, source=MAIN_SOURCE, mode="normal", sele
                "x_like": "liked", "elyth_post": "エラー: failed"}
     for name, output in outputs.items():
         registry.register(ToolSpec(name, name, {"type": "object"}, PermissionMode.READ_ONLY,
-                                    lambda a, text=output: text))
+                                    lambda a, text=output: a.get("echo", text)))
     requests = []
-    runtime = ConversationRuntime(FakeProvider(calls, requests, mode == "runtime_error"), registry,
-                                  HookRunner(), PermissionEnforcer(PermissionMode.ALLOW))
+    provider = (SeqProvider(copy.deepcopy(stages), requests) if stages is not None
+                else FakeProvider(calls, requests, mode == "runtime_error"))
+    runtime = ConversationRuntime(provider, registry,
+                                  hook_runner or HookRunner(), PermissionEnforcer(PermissionMode.ALLOW))
     tools = {n: {"desc": n} for n in outputs}
     prompts, candidates_seen, selected_seen = [], [], []
-    proposal = "1. [考える] → reflect (pe2=40, pec=0.2)\n2. [応答] → output_display (pe2=70, pec=0.5)"
+    proposal = proposal or "1. [考える] → reflect (pe2=40, pec=0.2)\n2. [応答] → output_display (pe2=70, pec=0.5)"
 
     def llm(prompt, **kw):
         prompts.append(prompt)
@@ -232,8 +246,16 @@ def _fire_harness(monkeypatch, tmp_path, source=MAIN_SOURCE, mode="normal", sele
                make_perspective=lambda **kw: kw,
                event_emitter=SimpleNamespace(fire_event=lambda s, e: s["raw_events"].append(e)),
                maybe_compress_log=Mock(), pending_prune=Mock(), load_pref=lambda: {})
+    env.update(env_overrides or {})
     functions = _main_factory(env, source)
     return functions, state, prompts, requests, candidates_seen, selected_seen, cycle_emit
+
+
+def _outward_lines(directory):
+    """0b の観察行だけ。0d-1 の tool_invocation 行は数えない。"""
+    return [e for e in (json.loads(s) for s in (directory / metrics.METRICS_FILE_NAME)
+                        .read_text(encoding="utf-8").splitlines())
+            if e["event_type"] == "outward_attempt"]
 
 
 def _run(function):
@@ -251,7 +273,7 @@ def test_fire_exit_once_and_full_invocations(mode, end, monkeypatch, fixed_io):
             _run(funcs["observed"])
     else:
         _run(funcs["observed"])
-    lines = [json.loads(s) for s in (fixed_io / metrics.METRICS_FILE_NAME).read_text(encoding="utf-8").splitlines()]
+    lines = _outward_lines(fixed_io)
     assert len(lines) == 1 and lines[0]["attempt_id"] == "r_1"
     event = lines[0]
     assert event["end"] == end and event["cycle_id"] == 3
@@ -299,7 +321,7 @@ def test_emit_failure_isolated_and_input_buffer_retained(monkeypatch, fixed_io):
     monkeypatch.setattr(metrics, "emit_outward_attempt", real_emit)
     _run(funcs["observed"])
     _run(funcs["observed"])
-    events = [json.loads(s) for s in (fixed_io / metrics.METRICS_FILE_NAME).read_text(encoding="utf-8").splitlines()]
+    events = _outward_lines(fixed_io)
     assert [e["attempt_id"] for e in events] == ["r_2", "r_3"]
     assert events[0]["inputs"] == [
         {"seq": 1, "channel": "device", "source": "chat", "cycle_at_record": 3},
@@ -316,7 +338,7 @@ def test_input_and_utterance_sequence_across_fires(monkeypatch, fixed_io):
     funcs["input"]("elyth", "mcp")
     assert state == before
     _run(funcs["observed"])
-    events = [json.loads(s) for s in (fixed_io / metrics.METRICS_FILE_NAME).read_text(encoding="utf-8").splitlines()]
+    events = _outward_lines(fixed_io)
     assert events[0]["utterances"][0]["seq"] == 1
     assert [(i["seq"], i["channel"], i["source"], i["cycle_at_record"])
             for i in events[1]["inputs"]] == [(2, "device", "chat", 4), (3, "elyth", "mcp", 4)]
@@ -334,7 +356,7 @@ def test_observer_processing_failure_isolated(monkeypatch, fixed_io):
     observed = _fire_harness(monkeypatch, fixed_io)
     result_after = _run(observed[0]["observed"])
     assert result_before == result_after and baseline[1] == observed[1]
-    events = [json.loads(s) for s in (fixed_io / metrics.METRICS_FILE_NAME).read_text(encoding="utf-8").splitlines()]
+    events = _outward_lines(fixed_io)
     assert len(events) == 1 and events[0]["end"] == "completed"
 
 
