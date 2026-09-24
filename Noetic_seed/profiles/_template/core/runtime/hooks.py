@@ -67,8 +67,9 @@ class HookRunner:
     def register_pre(self, handler: PreHandler) -> None:
         self._pre.append(handler)
 
-    def register_post(self, handler: PostHandler) -> None:
-        self._post.append(handler)
+    def register_post(self, handler: Callable, *, with_tool_id: bool = False) -> None:
+        """with_tool_id=True の handler にだけ、実行識別子を第4引数で渡す。"""
+        self._post.append((handler, with_tool_id))
 
     def register_failure(self, handler: FailureHandler) -> None:
         self._fail.append(handler)
@@ -95,11 +96,12 @@ class HookRunner:
         return acc
 
     def run_post_tool_use(self, tool_name: str, tool_input: dict,
-                          output: str) -> HookRunResult:
+                          output: str, *, tool_id: Optional[str] = None) -> HookRunResult:
         acc = HookRunResult.allow()
-        for handler in self._post:
+        for handler, with_tool_id in self._post:
             try:
-                r = handler(tool_name, tool_input, output)
+                r = (handler(tool_name, tool_input, output, tool_id) if with_tool_id
+                     else handler(tool_name, tool_input, output))
             except Exception as e:
                 return HookRunResult(
                     failed=True,

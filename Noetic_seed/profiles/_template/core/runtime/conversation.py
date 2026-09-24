@@ -360,7 +360,7 @@ class ConversationRuntime:
             return rec
 
         post = self.hook_runner.run_post_tool_use(
-            tool_name, current_input, output
+            tool_name, current_input, output, tool_id=tool_id
         )
         rec.post_hook_messages = list(post.messages)
 

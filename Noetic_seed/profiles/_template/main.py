@@ -371,7 +371,7 @@ def main():
         print(f"  [bash_hint] Level-aware 制約 hint 注入: bash")
 
     # hook context (state_before snapshot, fire 毎に更新)
-    _hook_ctx = {"state_before": {}}
+    _hook_ctx = {"state_before": {}, "evaluations": []}
 
     # hook runner 初期化 (file guard + approval 3 層 + post eval + failure)
     _hook_runner = HookRunner()
@@ -424,17 +424,23 @@ def main():
         ],
     )
 
-    def _post_hook_with_sync(tool_name, tool_input, output):
+    def _post_hook_with_sync(tool_name, tool_input, output, tool_id=None):
         """tool 実行直後: disk から fresh state を in-place 取込 →
         base_post_hook で mutation → save_state で永続化。
         tool handler が内部で save_state した変更と hook の E 値等の
-        mutation を正しくマージする。"""
+        mutation を正しくマージする。採点完了後の E を runtime の tool_id と
+        保存する。各 runtime 呼出しで記録をリセットし、ID が欠落・重複して
+        一意に対応しない実行は欠測とする。"""
         _refresh_state()
         result = _base_post_hook(tool_name, tool_input, output)
         save_state(state)
+        if not result.failed and not result.denied:
+            _hook_ctx["evaluations"].append(
+                (tool_id, tool_name, copy.deepcopy(state.get("e_values", {})))
+            )
         return result
 
-    _hook_runner.register_post(_post_hook_with_sync)
+    _hook_runner.register_post(_post_hook_with_sync, with_tool_id=True)
     # 段階12 Step 5 (PLAN §9): 身体改変反映待ち pending 自動追加。
     # write_file / edit_file が core/* / tools/* / main.py / .mcp.json を
     # 成功書換えしたら「reboot で反映を完了する」内発的 intent を pending 化。
@@ -500,7 +506,8 @@ def main():
         pressure は nonlocal で main() のものを直接 mutate。
 
         Returns:
-            dict {"executed": bool, "e1"-"e4": str ("N%"), "sc_bonus": float,
+            dict {"executed": bool, "e_available": bool,
+                  "e1"-"e4": str ("N%") or None, "sc_bonus": float,
                   "cid": int, "llm1_error": bool} または None (tool 未実行)。
         """
         nonlocal pressure
@@ -770,10 +777,12 @@ def main():
         _executed_targets = set()
         _last_llm_text = ""
         first_args: dict = {}  # 段階8 改善1: 先頭 tool の args を log entry に保存
-        # 段階10.5 Fix 1: chain 内の各 tool 実行直後に state["e_values"] snapshot +
-        # selected["chain"][chain_idx] の個別 pe2/pec を紐付けて per_tool metadata を蓄積。
+        # 採点 hook が実行ごとに保存した E を per_tool に対応づける。
         # 1 cycle = 1 log entry + entry["per_tool"] に tool 単位 metadata (Y 方式)。
         per_tool_entries: list = []
+        _successful_tools = set()
+        _cycle_ev = None
+        _cycle_pt = None
 
         for chain_idx, chain_tool in enumerate(chain_tools):
             if chain_tool not in ctrl["allowed_tools"]:
@@ -797,6 +806,7 @@ def main():
             # default system_prompt (全 tool 視界) で LLM が自由に判断するため、
             # forced_sp 生成も chain 0 のみで十分。
             # memory/feedback_llm2_iter0_forced_contract.md 参照。
+            _hook_ctx["evaluations"] = []
             try:
                 if chain_idx == 0:
                     forced_sp = assemble_system_prompt(
@@ -848,6 +858,57 @@ def main():
                 print(f"  (tool 未実行: finish_reason={summary.finish_reason})")
                 parse_failed = f"no_tool: {summary.finish_reason}"
                 break
+
+            # 各段の先頭だけを chain[i] に対応させる。名前一致かつ採点完了が必要。
+            # 追加実行は E のみ保存し、先頭の失敗・拒否・別名・欠測を繰り上げない。
+            for invocation_idx, invocation in enumerate(summary.tool_invocations):
+                _matches = [ev for tid, name, ev in _hook_ctx["evaluations"]
+                            if tid == invocation.tool_id and name == invocation.tool_name]
+                _unique_id = (bool(invocation.tool_id) and
+                              sum(r.tool_id == invocation.tool_id
+                                  for r in summary.tool_invocations) == 1)
+                _ok = (not invocation.is_error and
+                       not str(invocation.output).startswith("[REJECTED]"))
+                _tool_ev = _matches[0] if _ok and _unique_id and len(_matches) == 1 else None
+                pt_entry = {
+                    "tool": invocation.tool_name,
+                    "tool_id": invocation.tool_id,
+                    "chain_position": chain_idx,
+                    "invocation_position": invocation_idx,
+                    "is_error": invocation.is_error,
+                    **{k: _tool_ev.get(k) if _tool_ev is not None else None
+                       for k in ("e1", "e2", "e2_raw", "e3", "e4", "eff")},
+                }
+                _chain_list = selected.get("chain")
+                _chain_item = (_chain_list[chain_idx]
+                               if isinstance(_chain_list, list) and chain_idx < len(_chain_list)
+                               else None)
+                if (invocation_idx == 0 and _tool_ev is not None
+                        and isinstance(_chain_item, dict)
+                        and _chain_item.get("tool") == invocation.tool_name):
+                    _tool_pe2 = _chain_item.get("predicted_e2")
+                    _tool_pec = _chain_item.get("predicted_ec")
+                    if isinstance(_tool_pe2, int):
+                        pt_entry["predicted_e2"] = _tool_pe2
+                        _pt_e2_m = re.search(r'\d+', str(_tool_ev.get("e2", "")))
+                        if _pt_e2_m:
+                            _pt_actual_e2 = max(0, min(100, int(_pt_e2_m.group(0))))
+                            pt_entry["actual_e2"] = _pt_actual_e2
+                            pt_entry["prediction_error"] = abs(_tool_pe2 - _pt_actual_e2)
+                    if isinstance(_tool_pec, (int, float)):
+                        from core.predictor import clamp_ec as _clamp_ec
+                        pt_entry["predicted_ec"] = float(_tool_pec)
+                        pt_entry["actual_ec"] = _clamp_ec(_tool_ev.get("eff", 0.0))
+                        if "prediction_error" in pt_entry:
+                            pt_entry["prediction_error_ec"] = abs(
+                                float(_tool_pec) - pt_entry["actual_ec"]
+                            )
+                per_tool_entries.append(pt_entry)
+                if _ok:
+                    _successful_tools.add(invocation.tool_name)
+                    # 最後の成功が採点未完了なら代表 E も欠測。前の採点を流用しない。
+                    _cycle_ev = _tool_ev
+                    _cycle_pt = pt_entry
 
             rec = summary.tool_invocations[-1]
             ti = rec.tool_input or {}
@@ -913,51 +974,6 @@ def main():
             if _tool_ch:
                 observe_channel_activity(state.get("world_model"), _tool_ch)
 
-            # 段階10.5 Fix 1 追補: approval reject された tool は post hook が走らず
-            # state["e_values"] が前 tool の値のまま残るため、per_tool に記録すると
-            # 学習が bias する。該当 entry を skip して chain ループの次 iter へ。
-            if str(rec.output).startswith("[REJECTED]"):
-                continue
-
-            # --- 段階10.5 Fix 1: per_tool snapshot ---
-            # post tool hook (hooks.py:231) が state["e_values"] を書き込んだ直後。
-            # ここで snapshot を取らないと chain 次 tool の hook で上書きされて消える。
-            # selected["chain"][chain_idx] から tool 単位 predicted_e2/predicted_ec を引く。
-            _tool_ev = dict(state.get("e_values", {}))
-            _chain_list = selected.get("chain") if isinstance(selected, dict) else None
-            _tool_pe2 = None
-            _tool_pec = None
-            if isinstance(_chain_list, list) and chain_idx < len(_chain_list):
-                _chain_item = _chain_list[chain_idx]
-                if isinstance(_chain_item, dict):
-                    _tool_pe2 = _chain_item.get("predicted_e2")
-                    _tool_pec = _chain_item.get("predicted_ec")
-            pt_entry = {
-                "tool": rec.tool_name,
-                "chain_position": chain_idx,
-                "e1": _tool_ev.get("e1", ""),
-                "e2": _tool_ev.get("e2", ""),
-                "e2_raw": _tool_ev.get("e2_raw", ""),
-                "e3": _tool_ev.get("e3", ""),
-                "e4": _tool_ev.get("e4", ""),
-                "eff": float(_tool_ev.get("eff", 0.0) or 0.0),
-            }
-            if isinstance(_tool_pe2, int):
-                pt_entry["predicted_e2"] = _tool_pe2
-                _pt_e2_m = re.search(r'\d+', str(_tool_ev.get("e2", "")))
-                if _pt_e2_m:
-                    _pt_actual_e2 = max(0, min(100, int(_pt_e2_m.group(0))))
-                    pt_entry["actual_e2"] = _pt_actual_e2
-                    pt_entry["prediction_error"] = abs(_tool_pe2 - _pt_actual_e2)
-            if isinstance(_tool_pec, (int, float)):
-                from core.predictor import clamp_ec as _clamp_ec
-                pt_entry["predicted_ec"] = float(_tool_pec)
-                pt_entry["actual_ec"] = _clamp_ec(_tool_ev.get("eff", 0.0))
-                if "prediction_error" in pt_entry:
-                    pt_entry["prediction_error_ec"] = abs(
-                        float(_tool_pec) - pt_entry["actual_ec"]
-                    )
-            per_tool_entries.append(pt_entry)
 
         if not all_tool_names:
             return None
@@ -972,8 +988,7 @@ def main():
 
         sc_bonus = calc_state_change_bonus(_hook_ctx["state_before"], state)
 
-        _executed_tools = set(all_tool_names)
-        if "output_display" in _executed_tools:
+        if "output_display" in _successful_tools:
             _uec = state.get("unresponded_external_count", 0)
             if _uec > 0:
                 state["unresponded_external_count"] = _uec - 1
@@ -982,11 +997,11 @@ def main():
                 state["unresponded_external_count"] = 0
             save_state(state)
 
-        _ev = state.get("e_values", {})
-        e1 = _ev.get("e1", "")
-        e2 = _ev.get("e2", "")
-        e3 = _ev.get("e3", "")
-        e4 = _ev.get("e4", "")
+        _ev = _cycle_ev if _cycle_ev is not None else {}
+        e1 = _ev.get("e1")
+        e2 = _ev.get("e2")
+        e3 = _ev.get("e3")
+        e4 = _ev.get("e4")
         eff_change = float(_ev.get("eff", 0.0) or 0.0)
         _target_for_ec = _chain_action_key.split(":", 1)[1] if ":" in _chain_action_key else ""
 
@@ -994,9 +1009,10 @@ def main():
             _ec_str = f" ec={eff_change:.2f}" if eff_change < 0.5 else ""
             print(f"  E1={e1} E2={e2} E3={e3} E4={e4}{_ec_str}")
 
-        delta = _update_energy(state, e2, e3, e4)
-        if delta != 0:
-            print(f"  energy: {round(state['energy'], 1)} (delta={delta:+.2f})")
+        if _cycle_ev is not None:
+            delta = _update_energy(state, e2, e3, e4)
+            if delta != 0:
+                print(f"  energy: {round(state['energy'], 1)} (delta={delta:+.2f})")
 
         _FLAG_TERMS = ["AIアシスタント", "AI assistant", "AIAssistant"]
         detected = [t for t in _FLAG_TERMS if t in propose_resp or t in _last_llm_text]
@@ -1068,29 +1084,14 @@ def main():
             entry["e3"] = e3
         if e4:
             entry["e4"] = e4
-        # 段階9: 予測誤差記録 (chain 全体 = chain[0] 由来、後方互換)。
-        # MediumPredictor の "second half" — pressure 加算 + confidence 自己学習に
-        # 繋げて Active Inference epistemic signal 化する。
-        _pe2 = selected.get("_predicted_e2") if isinstance(selected, dict) else None
-        if isinstance(_pe2, int):
-            entry["predicted_e2"] = _pe2
-            _actual_e2_m = re.search(r'\d+', str(e2)) if e2 else None
-            if _actual_e2_m:
-                _actual_e2 = max(0, min(100, int(_actual_e2_m.group(0))))
-                entry["actual_e2"] = _actual_e2
-                entry["prediction_error"] = abs(_pe2 - _actual_e2)
-                # 段階10 柱 A: state 直下にも書き込み。
-                # reflection.py:15 で参照されてたが誰も書いてなかった既存 bug の副次修復。
-                # entropy.py の calc_pressure_signals で pe signal として pressure 加算にも使う。
+        # cycle の E と同じ実行の予測だけを使用する。先頭の予測で代用しない。
+        if _cycle_ev is not None and _cycle_pt is not None:
+            for key in ("predicted_e2", "actual_e2", "prediction_error",
+                        "predicted_ec", "actual_ec", "prediction_error_ec"):
+                if key in _cycle_pt:
+                    entry[key] = _cycle_pt[key]
+            if "prediction_error" in entry:
                 state["last_prediction_error"] = entry["prediction_error"]
-                # 段階10 柱 C: predicted_ec の実測誤差 (chain 全体、後方互換)。
-                _pec = selected.get("_predicted_ec") if isinstance(selected, dict) else None
-                if isinstance(_pec, (int, float)):
-                    from core.predictor import clamp_ec
-                    entry["predicted_ec"] = float(_pec)
-                    # 段階10.5 Bug fix: actual_ec を 0.0-1.0 に clamp (従来は生値)
-                    entry["actual_ec"] = clamp_ec(eff_change)
-                    entry["prediction_error_ec"] = abs(float(_pec) - entry["actual_ec"])
 
         # 段階10.5 Fix 1: 1 cycle = 1 entry + per_tool に tool 単位 metadata (Y 方式)。
         # update_predictor_confidence を chain ループ後の per_tool loop で tool 単位 call。
@@ -1145,6 +1146,7 @@ def main():
 
         return {
             "executed": True,
+            "e_available": _cycle_ev is not None,
             "e1": e1, "e2": e2, "e3": e3, "e4": e4,
             "sc_bonus": sc_bonus,
             "cid": cid,
@@ -1490,31 +1492,32 @@ def main():
 
         # fire cycle 完了後の後処理 (最後の iter 結果を元に 1 回だけ実施)
         if _last_fire_result and _last_fire_result.get("executed"):
-            def _e_to_float(e_str):
-                m = re.search(r'(\d+)', str(e_str))
-                return int(m.group(1)) / 100.0 if m else 0.5
-            e1_val = _e_to_float(_last_fire_result["e1"])
-            e2_val = _e_to_float(_last_fire_result["e2"])
-            e3_val = _e_to_float(_last_fire_result["e3"])
-            e4_val = _e_to_float(_last_fire_result["e4"]) if _last_fire_result["e4"] else 0.5
-            _sc_bonus = _last_fire_result["sc_bonus"]
             pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
-            state["last_e1"] = e1_val
-            state["last_e2"] = e2_val
-            state["last_e3"] = e3_val
-            state["last_e4"] = e4_val
+            if _last_fire_result.get("e_available", False):
+                def _e_to_float(e_str):
+                    m = re.search(r'(\d+)', str(e_str))
+                    return int(m.group(1)) / 100.0 if m else 0.5
+                e1_val = _e_to_float(_last_fire_result["e1"])
+                e2_val = _e_to_float(_last_fire_result["e2"])
+                e3_val = _e_to_float(_last_fire_result["e3"])
+                e4_val = _e_to_float(_last_fire_result["e4"]) if _last_fire_result["e4"] else 0.5
+                _sc_bonus = _last_fire_result["sc_bonus"]
+                state["last_e1"] = e1_val
+                state["last_e2"] = e2_val
+                state["last_e3"] = e3_val
+                state["last_e4"] = e4_val
 
-            _spiral = getattr(main, '_cached_spiral', None)
-            _consistency = _spiral.get("consistency", 0) if _spiral else 0
+                _spiral = getattr(main, '_cached_spiral', None)
+                _consistency = _spiral.get("consistency", 0) if _spiral else 0
 
-            ent_before = state.get("entropy", 0.65)
-            apply_negentropy(state, e1_val, e2_val, e3_val, e4_val,
-                            state_change_bonus=_sc_bonus, consistency_bonus=_consistency)
-            ent_after = state.get("entropy", 0.65)
-            print(f"  entropy: {ent_after:.3f} (neg={ent_before - ent_after:.4f} "
-                  f"sc={_sc_bonus:.1f} con={_consistency:.2f})")
-            broadcast_e_values(state.get("cycle_id", 0), e1_val, e2_val, e3_val,
-                               e4_val, ent_before - ent_after)
+                ent_before = state.get("entropy", 0.65)
+                apply_negentropy(state, e1_val, e2_val, e3_val, e4_val,
+                                state_change_bonus=_sc_bonus, consistency_bonus=_consistency)
+                ent_after = state.get("entropy", 0.65)
+                print(f"  entropy: {ent_after:.3f} (neg={ent_before - ent_after:.4f} "
+                      f"sc={_sc_bonus:.1f} con={_consistency:.2f})")
+                broadcast_e_values(state.get("cycle_id", 0), e1_val, e2_val, e3_val,
+                                   e4_val, ent_before - ent_after)
             broadcast_state(state)
             state["pressure"] = round(pressure, 2)
             save_state(state)
