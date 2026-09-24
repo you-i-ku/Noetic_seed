@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -587,6 +588,7 @@ def _update_metrics_index(
 
     既存 ``memory.py:_update_jsonl_index`` と同 semantic だが、metrics 専用に
     1 行 1 entry の append step で count increment + from/to 更新する。
+    count は cycle と outward_attempt を含む全 event 数（cycle 数ではない）。
     """
     index_path = Path(index_path)
     index_path.parent.mkdir(exist_ok=True, parents=True)
@@ -606,6 +608,167 @@ def _update_metrics_index(
         json.dumps(index, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+# ============================================================
+# 外向き行動の観察 (state / prompt / G から独立)
+# ============================================================
+
+OUTWARD_ACT_TOOLS = frozenset({
+    "output_display", "elyth_post", "elyth_reply", "elyth_like", "elyth_follow",
+    "elyth_mark_read", "x_post", "x_reply", "x_quote", "x_like",
+})
+OUTWARD_SENSE_TOOLS = frozenset({
+    "elyth_info", "elyth_get", "x_timeline", "x_search", "x_get_notifications",
+    "camera_stream", "screen_peek", "mic_record", "WebSearch", "WebFetch",
+})
+OUTWARD_UTTERANCE_TOOLS = frozenset({
+    "output_display", "elyth_post", "elyth_reply", "x_post", "x_reply", "x_quote",
+})
+OUTWARD_ARGUMENT_TOOLS = frozenset({"http_request", "view_image", "listen_audio"})
+
+
+def classify_outward(tool: str, args: Optional[dict] = None) -> str:
+    """act / sense / control / undetermined / internal。args=None は候補段階。
+
+    URL は http(s)、profile 内のローカル画像・音声は internal。
+    profile 外や欠落した path は未判定のまま残す。
+    """
+    if tool in OUTWARD_ACT_TOOLS:
+        return "act"
+    if tool in OUTWARD_SENSE_TOOLS:
+        return "sense"
+    if tool == "camera_stream_stop":
+        return "control"
+    if tool in OUTWARD_ARGUMENT_TOOLS:
+        if args is None:
+            return "undetermined"
+        if tool == "http_request":
+            return "sense" if str(args.get("method", "GET")).strip().upper() == "GET" else "act"
+        path = str(args.get("path", "")).strip()
+        if path.lower().startswith(("https://", "http://")):
+            return "sense"
+        if path:
+            from core.config import BASE_DIR
+            resolved = (BASE_DIR / path).resolve()
+            if resolved.is_relative_to(BASE_DIR.resolve()):
+                return "internal"
+        return "undetermined"
+    return "internal"
+
+
+def observe_outward_candidates(event: dict, candidates: list) -> None:
+    """パーサ通過後の全構成 tool を分類。未判定数は構成 tool の出現数。"""
+    kinds = [classify_outward(tool) for c in candidates
+             for tool in c.get("tools", [c.get("tool", "")])]
+    event.update(proposed_act="act" in kinds, proposed_sense="sense" in kinds,
+                 proposed_undetermined=kinds.count("undetermined"))
+    if not candidates:
+        event["end"] = "no_candidate"
+
+
+def observe_outward_selection(event: dict) -> None:
+    """controller が渡した同順序の候補と G から、働きかける候補の差を測る。"""
+    tools = event.get("candidate_tools", [])
+    values = event.get("g_values", [])
+    idx = event.get("selected_idx")
+    if not isinstance(idx, int) or len(tools) != len(values) or not 0 <= idx < len(tools):
+        return
+    acts = [any(classify_outward(t) == "act" for t in chain) for chain in tools]
+    outward_g = [g for g, act in zip(values, acts) if act]
+    event["selected_act"] = acts[idx]
+    event["best_outward_g_minus_selected_g"] = min(outward_g) - values[idx] if outward_g else None
+
+
+def build_outward_execution(tool: str, args: dict, output: str,
+                            is_error: bool, channel: str) -> dict:
+    """全 invocation の観察。tool_error は先頭の「エラー」/「Error」による近似。
+
+    connected_at_enqueue は output_display の受付文から取得し、到達数とは扱わない。
+    """
+    text = str(output)
+    if text.startswith("[REJECTED]"):
+        status = "rejected"
+    elif is_error:
+        status = "runtime_error"
+    elif text.lstrip().startswith(("エラー", "Error")):
+        status = "tool_error"
+    else:
+        status = "ok"
+    connected = None
+    if tool == "output_display":
+        channel = str(args.get("channel", "")).strip()
+        match = re.search(r"受付時の接続 (\d+) 件", text)
+        if status == "ok" and match:
+            connected = int(match.group(1))
+        elif is_error and "接続している受け手が 0 件" in text:
+            connected = 0
+    return {"tool": tool, "channel": channel, "status": status,
+            "connected_at_enqueue": connected, "category": classify_outward(tool, args)}
+
+
+def emit_outward_attempt(event: dict) -> dict:
+    """観察イベントを append。state を受け取らず、cycle snapshot を更新しない。"""
+    from core.config import MEMORY_DIR
+    target = MEMORY_DIR / METRICS_FILE_NAME
+    _atomic_append_jsonl(target, event)
+    _update_metrics_index(MEMORY_DIR / INDEX_FILE_NAME, target.name, event)
+    return event
+
+
+def summarize_outward(events: list, k: int = 5) -> dict:
+    """観察イベントだけを集計する。割合の分母を各項目に明記する。
+
+    後続入力は同じ run 内で seq が大きく同 channel、fire 差が 0..k のもの。
+    k は後続 fire 数（初期値5）。末尾で k fire を観測できない発話は、入力が
+    あっても分母から除外する。同じ入力を複数発話に割り当ててよい。
+    """
+    if k < 0:
+        raise ValueError("k must be non-negative")
+    attempts = [e for e in events if e.get("event_type") == "outward_attempt"]
+    total = len(attempts)
+
+    def ratio(count, denominator):
+        return {"count": count, "denominator": denominator,
+                "rate": count / denominator if denominator else None}
+
+    summary = {"attempts": total}
+    for key in ("proposed_act", "proposed_sense", "selected_act"):
+        summary[key] = ratio(sum(bool(e.get(key)) for e in attempts), total)
+    summary["proposed_undetermined"] = ratio(
+        sum(bool(e.get("proposed_undetermined")) for e in attempts), total)
+    summary["proposed_undetermined"]["tools"] = sum(e.get("proposed_undetermined", 0) for e in attempts)
+    executions = [rec for e in attempts for rec in e.get("exec", [])]
+    summary["execution"] = {}
+    for status in ("ok", "rejected", "runtime_error", "tool_error", "not_invoked"):
+        item = ratio(sum(any(rec.get("status") == status for rec in e.get("exec", []))
+                         for e in attempts), total)
+        item["invocations"] = sum(rec.get("status") == status for rec in executions)
+        summary["execution"][status] = item
+
+    runs = {}
+    for e in attempts:
+        run_id = e.get("run_id", e.get("attempt_id", "").rsplit("_", 1)[0])
+        runs.setdefault(run_id, []).append(e)
+    matched, unmatched, incomplete = [], [], []
+    for run_id, fires in runs.items():
+        for i, fire in enumerate(fires):
+            for utterance in fire.get("utterances", []):
+                if utterance.get("tool") not in OUTWARD_UTTERANCE_TOOLS:
+                    continue
+                ref = {"attempt_id": fire.get("attempt_id"), **utterance}
+                if i + k >= len(fires):
+                    incomplete.append(ref)
+                    continue
+                found = any(inp.get("channel") == utterance.get("channel")
+                            and inp["seq"] > utterance["seq"]
+                            for later in fires[i:i + k + 1] for inp in later.get("inputs", []))
+                (matched if found else unmatched).append(ref)
+    summary["following_input"] = {
+        **ratio(len(matched), len(matched) + len(unmatched)),
+        "matched": matched, "unmatched": unmatched, "incomplete": incomplete, "k": k,
+    }
+    return summary
 
 
 # ============================================================

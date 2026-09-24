@@ -446,7 +446,8 @@ def _predicted_outcome_multiplier(prediction: dict, candidate: dict,
     return mult
 
 
-def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
+def controller_select(candidates: list, ctrl: dict, state: dict,
+                      observe: dict | None = None) -> dict:
     """V07.5 commit 3: argmin_π G(π) literal selection (paradigm shift 核心)。
 
     旧 multiplicative chain (tool_rank / intent_scores / sharpness / novelty /
@@ -475,7 +476,7 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
     一時 field の元 state pollution 回避。C None graceful skip (cycle 1 bootstrap
     依存ガード、commit 4 並走不要、Codex 軸 7 GAP literal 反映)。
 
-    Args / Returns: 旧 signature 維持 (candidates / ctrl / state)、後方互換 wrapper 経路。
+    observe 指定時だけ独立した辞書に候補 tools・G・選択位置を渡す。state と戻り値は不変。
     """
     # 機構保持 (state field 化のみ、selection には流さない、telemetry 用途)
     intent_scores = _intent_conditioned_scores(candidates, state)
@@ -589,4 +590,14 @@ def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
         "basin_snapshot_id": state.get("basin_state", {}).get("current_basin_id", ""),
     }
 
+    if observe is not None:
+        try:
+            observe.update({
+                "candidate_tools": [list(c.get("tools", [c.get("tool", "")]))
+                                    for c in candidates],
+                "g_values": list(g_values),
+                "selected_idx": min_idx,
+            })
+        except Exception as e:
+            print(f"  [outward] selection observation skip: {e}")
     return candidates[min_idx]

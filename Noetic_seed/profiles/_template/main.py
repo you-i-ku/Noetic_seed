@@ -496,8 +496,91 @@ def main():
     # 3 箇所書込 (Session + UPS + archive) の Session 経路の実装。
     _pending_observations: list = []
 
+    # 観察者専用。state / prompt / 次回 G 用 snapshot には載せない。
+    _outward_seq = 0
+    _outward_fire_no = 0
+    _outward_pending_inputs = []
+
+    def _record_outward_input(channel, source):
+        nonlocal _outward_seq
+        try:
+            _outward_seq += 1
+            _outward_pending_inputs.append({
+                "seq": _outward_seq, "channel": channel, "source": source,
+                "cycle_at_record": state.get("cycle_id", 0),
+            })
+        except Exception as e:
+            print(f"  [outward] input observation skip: {e}")
+
+    def _observe_outward(event, phase, payload=None):
+        """観察失敗は本体に伝播させない。発話と入力は同じ seq を使う。"""
+        nonlocal _outward_seq
+        try:
+            from core.metrics import (
+                observe_outward_candidates, observe_outward_selection,
+                build_outward_execution, OUTWARD_UTTERANCE_TOOLS,
+            )
+            if phase == "candidates":
+                observe_outward_candidates(event, payload)
+            elif phase == "selection":
+                observe_outward_selection(event)
+            elif phase == "executions":
+                planned_tool, invocations = payload
+                for rec in invocations:
+                    observed = build_outward_execution(
+                        rec.tool_name, rec.tool_input or {}, rec.output,
+                        rec.is_error, _get_channel(rec.tool_name),
+                    )
+                    event["exec"].append(observed)
+                    if observed["status"] == "ok" and rec.tool_name in OUTWARD_UTTERANCE_TOOLS:
+                        _outward_seq += 1
+                        event["utterances"].append({
+                            "seq": _outward_seq, "channel": observed["channel"],
+                            "tool": rec.tool_name,
+                        })
+                if not any(rec.tool_name == planned_tool for rec in invocations):
+                    event["exec"].append({"tool": planned_tool, "channel": _get_channel(planned_tool),
+                                          "status": "not_invoked", "connected_at_enqueue": None})
+                if not invocations:
+                    event["end"] = "not_invoked"
+            elif phase in ("runtime_error", "not_invoked"):
+                event["end"] = phase
+                event["exec"].append({"tool": payload, "channel": _get_channel(payload),
+                                      "status": phase, "connected_at_enqueue": None})
+        except Exception as e:
+            print(f"  [outward] observation skip ({phase}): {e}")
+
+    def _run_observed_fire(*args, **kwargs):
+        """fire 出口で1回だけ emit。入力バッファは書き出し成功時だけ消費する。"""
+        nonlocal _outward_fire_no
+        _outward_fire_no += 1
+        event = {
+            "event_type": "outward_attempt", "run_id": state.get("run_id", ""),
+            "attempt_id": f"{state.get('run_id', '')}_{_outward_fire_no}",
+            "cycle_id": state.get("cycle_id", 0),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "end": "error", "proposed_act": False, "proposed_sense": False,
+            "proposed_undetermined": 0, "selected_act": False,
+            "best_outward_g_minus_selected_g": None,
+            "exec": [], "utterances": [], "inputs": list(_outward_pending_inputs),
+        }
+        try:
+            result = _run_one_fire(*args, **kwargs, _outward_event=event)
+            if isinstance(result, dict) and result.get("llm1_error"):
+                event["end"] = "llm1_error"
+            elif event["end"] == "error":
+                event["end"] = "completed" if result and result.get("executed") else "not_invoked"
+            return result
+        finally:
+            try:
+                from core.metrics import emit_outward_attempt
+                emit_outward_attempt(event)
+                del _outward_pending_inputs[:len(event["inputs"])]
+            except Exception as e:
+                print(f"  [outward] emit skip: {e}")
+
     def _run_one_fire(fire_cause, _tunnel_fire, pp, threshold, tick_dt,
-                      _micro_iter=0, fire_candidates=None):
+                      _micro_iter=0, fire_candidates=None, _outward_event=None):
         """1 fire iteration 本体。micro-loop から複数回呼ばれる可能性。
 
         state / _runtime / _hook_ctx / _pending_observations / TOOLS /
@@ -696,6 +779,8 @@ def main():
             _src = "stream" if _is_stream else "pending"
             print(f"  [vision] 画像を認識: {len(_pending_img_paths)}枚 ({_src}: {_first_pending_rel})")
         candidates = parse_candidates(propose_resp, ctrl["allowed_tools"])
+        if _outward_event is not None:
+            _observe_outward(_outward_event, "candidates", candidates)
         print(f"  LLM①raw: {propose_resp.strip()[:300]}")
         print(f"  候補({len(candidates)}件): {[(c['tool'], c['reason'][:40]) for c in candidates]}")
 
@@ -713,7 +798,11 @@ def main():
             ics_v = round(ics_debug[ci], 1)
             if ics_v != 50.0:
                 print(f"    ics: {c['tool']}({c['reason'][:30]}) = {ics_v}")
-        selected = controller_select(candidates, ctrl, state)
+        if _outward_event is None:
+            selected = controller_select(candidates, ctrl, state)
+        else:
+            selected = controller_select(candidates, ctrl, state, observe=_outward_event)
+            _observe_outward(_outward_event, "selection")
         _sel_line = f"  選択: {selected['tool']} - {selected['reason'][:60]}"
         # 段階14 Step C: penalty (β 値含む) を smoke raw_log で観察可能化
         # (memo line 142-144 「β を第一級観測量として扱う」literal 整合、
@@ -786,6 +875,8 @@ def main():
 
         for chain_idx, chain_tool in enumerate(chain_tools):
             if chain_tool not in ctrl["allowed_tools"]:
+                if _outward_event is not None:
+                    _observe_outward(_outward_event, "not_invoked", chain_tool)
                 print(f"  (Controller却下: {chain_tool})")
                 parse_failed = f"却下: {chain_tool}"
                 break
@@ -828,8 +919,13 @@ def main():
                     summary = _runtime.run_turn(user_input=user_input)
             except Exception as e:
                 print(f"  LLM② run_turn エラー (chain {chain_idx+1}): {e}")
+                if _outward_event is not None:
+                    _observe_outward(_outward_event, "runtime_error", chain_tool)
                 parse_failed = f"runtime error: {e}"
                 break
+
+            if _outward_event is not None:
+                _observe_outward(_outward_event, "executions", (chain_tool, summary.tool_invocations))
 
             # 段階9 Step 0: LLM② debug log を拡充。
             # 従来は finish_reason だけ。assistant_messages (LLM② 思考) と
@@ -1222,6 +1318,7 @@ def main():
                 from core.world_model import ensure_channel, observe_channel_activity
                 _spec = channel_from_device_input()
                 _channel_id = _spec["id"]
+                _record_outward_input(_channel_id, "chat")
                 _input_tag = _spec["tools_in"][0] if _spec["tools_in"] else f"[{_channel_id}_input]"
 
                 _wm = state.get("world_model")
@@ -1285,6 +1382,7 @@ def main():
                         _spec = _rec.get("channel_spec") or channel_from_mcp_client(
                             _rec.get("client_name", ""))
                         _channel_id = _spec["id"]
+                        _record_outward_input(_channel_id, "mcp")
                         _input_tag = _spec["tools_in"][0] if _spec["tools_in"] else f"[{_channel_id}_input]"
 
                         _wm = state.get("world_model")
@@ -1464,7 +1562,7 @@ def main():
             # tunnel 発火時は fire_candidates=None で渡す: 既存 scalar 経路
             # [発火原因: tunnel] が prompt 表示される (Codex review P2-1 fix、tunnel
             # は PLAN STAGE13 対象外の既存 Noetic 特殊 trigger、backward compat 維持)。
-            _fire_result = _run_one_fire(fire_cause, _tunnel_fire, pp,
+            _fire_result = _run_observed_fire(fire_cause, _tunnel_fire, pp,
                                           threshold, tick_dt, _micro_iter,
                                           fire_candidates=None if _tunnel_fire else fire_candidates)
 
