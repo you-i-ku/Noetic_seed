@@ -25,7 +25,6 @@ def _bootstrap_venv():
 
     import subprocess
 
-    _pip = _venv / ("Scripts/pip.exe" if _is_win else "bin/pip")
     _req = _here / "requirements.txt"
 
     # venv がなければ作成
@@ -38,9 +37,14 @@ def _bootstrap_venv():
     # 反映される経路 (= 身体拡張の汎用チェーン) を成立させるため、venv 既存でも
     # 必ず実行する。pip は idempotent: 既 install pkg は manifest 検査で skip
     # されるので、全 install 済なら数秒、差分のみ DL する。
+    # pip.exe は起動用 stub で、作成時の python.exe の絶対パスが埋め込まれている。
+    # profile をコピーすると stub がコピー元の venv を指したままになり、同期が
+    # 別の venv に対して行われる (2026-09-24 実例)。この venv の python で
+    # `-m pip` を呼び、必ず自分の venv に入れる。
     if _req.exists():
         print("[bootstrap] requirements.txt から身体仕様を同期中...")
-        subprocess.run([str(_pip), "install", "--quiet", "-r", str(_req)], check=True)
+        subprocess.run([str(_venv_python), "-m", "pip", "install", "--quiet", "-r", str(_req)],
+                       check=True)
         print("[bootstrap] 同期完了。venv で再起動します...\n")
     else:
         print(f"[bootstrap] WARNING: {_req} が見つかりません。空 venv で起動します。\n")
