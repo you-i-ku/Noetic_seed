@@ -481,6 +481,9 @@ def get_relevant_memories(
     """プロンプト用: 直近intentに関連する記憶を取得。
     4ネットワーク検索 + archive の直近外部入力を合わせて返す。
     外部入力は優先的に先頭へ入れる（外部からの会話は忘却耐性を与える）。
+    主観記録は空を除いた末尾3件からIDあり・未採用のものを追加。
+    抜粋は intent 優先、なければ expect の
+    先頭80字（超過時は …）、通常の記憶は content。抜粋付与はコピーに行う。
 
     段階11-C G-lite Phase 1: use_links=True で memory_links graph 経由の
     近傍 memory を merge (既存 semantic search と併用、opt-in)。
@@ -509,15 +512,13 @@ def get_relevant_memories(
     query_parts = [i for i in recent_intents if i]
     # external 原文も query に混ぜて類似度検索の精度を上げる
     query_parts.extend(str(m.get("content", "")) for m in external_mems)
-    if not query_parts:
-        return external_mems
-
     query = " ".join(query_parts)[:500]
     # 段階11-D Phase 7 Step 7.1: tag_filter=None で全 networks (UNTAGGED 含む)、
     # list 指定で絞込 (memory_network_search 内部で list_registered_tags +
     # UNTAGGED_NETWORK fallback、明示 list は list_registered_tags 経由で
     # is_tag_registered フィルタ)
-    network_mems = memory_network_search(query, networks=tag_filter, limit=limit)
+    network_mems = (memory_network_search(query, networks=tag_filter, limit=limit)
+                    if query_parts else [])
 
     # 外部入力を先頭に（重複除去）
     seen_ids = {m.get("id") for m in external_mems if m.get("id")}
@@ -638,8 +639,11 @@ def get_relevant_memories(
     # format_memories_for_prompt 等の既存 caller は本 field を consume しない
     # ので後方互換、PLAN §4 Phase 2 commit 5 literal)。
     # 境界: <=80 字は marker なし、>80 字は先頭 80 字 + "…" marker。
-    for m in merged:
-        content = m.get("content", "")
+    for i, entry in enumerate(merged):
+        m = dict(entry)
+        merged[i] = m
+        content = ((m.get("intent") or m.get("expect", ""))
+                   if m.get("kind") == "subjective" else m.get("content", ""))
         content_str = str(content) if content else ""
         if len(content_str) > 80:
             m["excerpt_80chars"] = content_str[:80] + "…"
