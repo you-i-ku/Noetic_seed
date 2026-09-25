@@ -478,6 +478,8 @@ def main():
         policy_fn=_policy_fn,
     )
 
+    from core.prompt_trace import TracingProvider
+    _rt_provider = TracingProvider(_rt_provider)
     # ConversationRuntime (system_prompt は fire 毎に assemble 差替)
     _runtime = ConversationRuntime(
         provider=_rt_provider,
@@ -571,8 +573,10 @@ def main():
         # 0d-1: 全実行の理由・引数・結果の観察バッファ。entry_id は entry 成立後に入る。
         invocations = {"records": [], "entry_id": None, "cycle_id": None}
         try:
-            result = _run_one_fire(*args, **kwargs, _outward_event=event,
-                                   _invocation_buf=invocations)
+            from core.prompt_trace import trace_fire
+            with trace_fire(event):
+                result = _run_one_fire(*args, **kwargs, _outward_event=event,
+                                       _invocation_buf=invocations)
             if isinstance(result, dict) and result.get("llm1_error"):
                 event["end"] = "llm1_error"
             elif event["end"] == "error":
@@ -778,7 +782,9 @@ def main():
             save_state(state)
 
         try:
-            propose_resp = call_llm(propose_prompt, max_tokens=prompt_budget["completion_reserve"], temperature=1.0,
+            from core.prompt_trace import trace_llm1
+            propose_resp = trace_llm1(call_llm, propose_prompt, cycle_id=state.get("cycle_id", 0),
+                                    max_tokens=prompt_budget["completion_reserve"], temperature=1.0,
                                     image_paths=_pending_img_paths if _pending_img_paths else None)
             append_debug_log("LLM1 (Propose)", propose_resp)
         except Exception as e:
@@ -920,6 +926,8 @@ def main():
             # memory/feedback_llm2_iter0_forced_contract.md 参照。
             _hook_ctx["evaluations"] = []
             try:
+                from core.prompt_trace import set_chain_position
+                set_chain_position(chain_idx, state.get("cycle_id", 0))
                 if chain_idx == 0:
                     forced_sp = assemble_system_prompt(
                         state=state,

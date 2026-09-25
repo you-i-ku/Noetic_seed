@@ -210,6 +210,15 @@ def _fire_harness(monkeypatch, tmp_path, source=MAIN_SOURCE, mode="normal", sele
     requests = []
     provider = (SeqProvider(copy.deepcopy(stages), requests) if stages is not None
                 else FakeProvider(calls, requests, mode == "runtime_error"))
+    # main の provider 接続をそのまま使う（起動処理・外部 I/O は実行しない）。
+    from core.prompt_trace import TracingProvider
+    setup = next((n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Assign)
+                 and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+                 and n.value.func.id == "TracingProvider"), None)
+    provider_env = {"TracingProvider": TracingProvider, "_rt_provider": provider}
+    if setup is not None:
+        exec(compile(ast.Module(body=[setup], type_ignores=[]), "provider_setup", "exec"), provider_env)
+    provider = provider_env["_rt_provider"]
     runtime = ConversationRuntime(provider, registry,
                                   hook_runner or HookRunner(), PermissionEnforcer(PermissionMode.ALLOW))
     tools = {n: {"desc": n} for n in outputs}
