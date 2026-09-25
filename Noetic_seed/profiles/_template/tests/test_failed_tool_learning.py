@@ -22,7 +22,7 @@ from core.entropy import apply_negentropy
 from core.eval import _update_energy
 from core.providers.base import AssistantMessage, BaseProvider, ToolUseBlock
 from core.runtime.conversation import ConversationRuntime
-from core.runtime.hooks import HookRunner, HookRunResult
+from core.runtime.hooks import HookRunner, HookRunResult, make_post_tool_use_evaluation
 from core.runtime.permissions import PermissionEnforcer, PermissionMode
 from core.runtime.registry import ToolRegistry
 from core.runtime.tool_schema import ToolSpec
@@ -87,7 +87,7 @@ def _call(tool, tool_id, score=80, **kwargs):
     return ToolUseBlock(id=tool_id, name=tool, input={"score": score, **kwargs})
 
 
-def _exercise(stages, planned=None, completed=False, old_e=True):
+def _exercise(stages, planned=None, completed=False, old_e=True, llm_responses=None):
     planned = planned or [calls[0].name for calls in stages]
     state = {
         "cycle_id": 10, "session_id": "test", "energy": 50.0, "entropy": 0.8,
@@ -99,7 +99,7 @@ def _exercise(stages, planned=None, completed=False, old_e=True):
     }
     if old_e:
         state["e_values"] = {**{k: "99%" for k in ("e1", "e2", "e2_raw", "e3", "e4")},
-                             "eff": 0.99}
+                             "eff": 0.99, "scored": True}
     before = copy.deepcopy(state)
     hooks = HookRunner()
     hooks.register_pre(lambda n, a: HookRunResult.deny() if a.get("deny")
@@ -120,7 +120,9 @@ def _exercise(stages, planned=None, completed=False, old_e=True):
             raise RuntimeError("evaluation failed before mutation")
         score = args["score"]
         state["e_values"] = {**{k: f"{score}%" for k in ("e1", "e2", "e2_raw", "e3", "e4")},
-                             "eff": score / 100}
+                             "eff": score / 100, "scored": True}
+        if "scored" in args:
+            state["e_values"]["scored"] = args["scored"]
         if args.get("eval_fail") == "after":
             raise RuntimeError("evaluation failed after mutation")
         return HookRunResult.allow()
@@ -150,6 +152,19 @@ def _exercise(stages, planned=None, completed=False, old_e=True):
     )
     post_code = _compile_main_parts(env)
     with ExitStack() as stack:
+        if llm_responses is not None:
+            from tempfile import TemporaryDirectory
+            tmp = stack.enter_context(TemporaryDirectory())
+            stack.enter_context(patch("core.config.RESOLUTION_LOG", Path(tmp) / "ledger.log"))
+            stack.enter_context(patch("core.state.append_debug_log"))
+            stack.enter_context(patch("core.eval.is_vector_ready", return_value=False))
+            from core.pending_unified import try_observe_all
+            env["observe"] = stack.enter_context(patch(
+                "core.pending_unified.try_observe_all", wraps=try_observe_all))
+            env["_base_post_hook"] = make_post_tool_use_evaluation(
+                state, lambda: env["_hook_ctx"]["state_before"],
+                Mock(side_effect=llm_responses), lambda: state["cycle_id"], lambda: [],
+            )
         for path in ("core.world_model.update_basin_state",
                      "core.transfer_entropy.maybe_te_maintenance",
                      "core.memory_links.prune_weak_links"):

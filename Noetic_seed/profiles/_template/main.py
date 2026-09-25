@@ -438,7 +438,8 @@ def main():
         _refresh_state()
         result = _base_post_hook(tool_name, tool_input, output)
         save_state(state)
-        if not result.failed and not result.denied:
+        if (not result.failed and not result.denied
+                and state.get("e_values", {}).get("scored") is True):
             _hook_ctx["evaluations"].append(
                 (tool_id, tool_name, copy.deepcopy(state.get("e_values", {})))
             )

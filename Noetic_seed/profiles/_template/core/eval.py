@@ -75,7 +75,10 @@ def _update_energy(state: dict, e2: str, e3: str, e4: str) -> float:
 
 
 def eval_with_llm(intent: str, expect: str, result: str, recent_intents: list, call_llm_fn) -> dict | None:
-    """LLMにE1-E4を一括評価させる。失敗時はNone（ベクトル類似度にフォールバック）。"""
+    """LLMにE1-E4を一括評価させ、3項目以上をパースできれば辞書を返す。
+    3項目未満・例外時はNone。ベクトルによる補完はしない。
+    4項目の完全性・有限数値・0〜1の範囲は呼出側のhookで検証する。
+    """
     recent_str = " / ".join(recent_intents[:3]) if recent_intents else "(none)"
     prompt = f"""以下の行動を評価してください。各項目を0-100の数値で採点してください。
 説明や分析は不要です。必ず以下の形式のみで出力してください:

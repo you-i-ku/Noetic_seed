@@ -3,7 +3,7 @@
 PHASE4_TASKS.md Step B の成功条件を網羅:
   - tool 実行 → hook 発火 → state に E 値/ledger/pending 更新
   - 既存 E2 cap (0.3 + eff*0.7) が効く
-  - LLM 評価失敗時のフォールバック
+  - LLM 評価失敗時は採点欠測
   - tool 失敗時は post_tool_use_failure で tool_errors に記録
 
 使い方:
@@ -65,7 +65,7 @@ def _mock_llm_low_e2(prompt, max_tokens=None, temperature=None):
 
 
 def _mock_llm_fail(prompt, max_tokens=None, temperature=None):
-    """eval_with_llm 内で例外を吐く mock。フォールバック動作確認用。"""
+    """eval_with_llm 内で例外を吐く mock。採点欠測の確認用。"""
     raise RuntimeError("LLM 接続失敗")
 
 
@@ -99,6 +99,7 @@ def test_eval_basic():
         _assert("e3" in e_values, "e3 保存"),
         _assert("e4" in e_values, "e4 保存"),
         _assert("eff" in e_values, "eff 保存"),
+        _assert(e_values.get("scored") is True, "採点完了"),
         _assert(e_values["e1"].endswith("%"), "% 表記"),
         _assert(isinstance(e_values["eff"], float), "eff は float"),
     ])
@@ -193,17 +194,18 @@ def test_eval_e2_cap_with_eff():
     ])
 
 
-def test_eval_llm_failure_fallback():
-    print("== eval hook: LLM 失敗でもクラッシュせず default スコアで進む ==")
+def test_eval_llm_failure_missing():
+    print("== eval hook: LLM 失敗でもクラッシュせず採点欠測で進む ==")
     state = _fresh_state()
     before = deepcopy(state)
     hook = _make_hook(state, before, call_llm=_mock_llm_fail)
     r = hook("write_file", _full_input(), "完了")
     e_values = state.get("e_values", {})
     return all([
-        _assert(not r.denied, "denied=False"),
-        _assert(e_values.get("e1") == "50%", "e1 default=50%"),
-        _assert(e_values.get("e3") == "50%", "e3 default=50%"),
+        _assert(not r.denied and not r.failed, "tool 成功を維持"),
+        _assert(e_values == {"scored": False, "eff": e_values.get("eff")},
+                "欠測は scored と eff のみ"),
+        _assert(state["pending"] == [], "E3 由来 pending を追加しない"),
         _assert(len(state.get("action_ledger", [])) == 1, "ledger は追記される"),
     ])
 
@@ -347,7 +349,7 @@ if __name__ == "__main__":
         ("eval: unresolved_intent 追加", test_eval_updates_unresolved_intent),
         ("eval: E2 cap (eff=0 → 30%)", test_eval_e2_cap_zero_eff),
         ("eval: E2 cap (eff>0 → 緩む)", test_eval_e2_cap_with_eff),
-        ("eval: LLM 失敗 fallback", test_eval_llm_failure_fallback),
+        ("eval: LLM 失敗は欠測", test_eval_llm_failure_missing),
         ("eval: intent 空でも動作", test_eval_empty_intent),
         ("eval: 戻り値 messages", test_eval_message_format),
         ("failure: 基本", test_failure_basic),

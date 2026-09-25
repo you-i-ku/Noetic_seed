@@ -242,6 +242,9 @@ def make_post_tool_use_evaluation(
 
     内部は eval.py の既存関数を順次呼ぶ薄い wrapper。戻り値 state は
     factory に渡された参照を破壊的に更新する (Noetic 既存流儀)。
+    E1-E4 がすべて有限数値・0〜1 の時だけ scored=True とする。
+    欠測時は E2 cap と E3 由来 pending を止め、e_values を scored=False と
+    eff のみに置き換える。effective_change・ledger・減衰・観測判定は続ける。
 
     Args:
         state: メイン state への参照。hook 内で破壊的に更新される。
@@ -262,6 +265,7 @@ def make_post_tool_use_evaluation(
         (Step A の PreToolUse hook で存在が保証されている前提)。
         欠損 (policy=warn で抜けた等) 時も crash せず空文字で進む。
     """
+    import math
     from core import eval as _eval
 
     def _handler(tool_name: str, tool_input: dict,
@@ -273,14 +277,19 @@ def make_post_tool_use_evaluation(
         recent_intents = get_recent_intents() or []
         output_str = str(output)
 
-        # 1. E1-E4 評価 (LLM 0.7 + vec 0.3 ブレンド、失敗時 None)
+        # 1. LLM の E1-E4 がそろった時だけ採点完了。補完・ブレンドはしない。
         scores = _eval.eval_with_llm(
             intent, expect, output_str, recent_intents, call_llm_fn
         ) or {}
-        e1 = float(scores.get("e1", 0.5))
-        e2_raw = float(scores.get("e2", 0.5))
-        e3 = float(scores.get("e3", 0.5))
-        e4 = float(scores.get("e4", 0.5))
+        scored = all(
+            isinstance(scores.get(key), (int, float))
+            and not isinstance(scores[key], bool)
+            and 0 <= scores[key] <= 1
+            and math.isfinite(scores[key])
+            for key in ("e1", "e2", "e3", "e4")
+        )
+        if scored:
+            e1, e2_raw, e3, e4 = (float(scores[key]) for key in ("e1", "e2", "e3", "e4"))
 
         # 2. effective_change (5 層)
         target_id = ""
@@ -299,7 +308,8 @@ def make_post_tool_use_evaluation(
         )
 
         # 3. E2 cap: (0.3 + eff*0.7)
-        e2 = _eval.apply_effective_change_to_e2(e2_raw, eff)
+        if scored:
+            e2 = _eval.apply_effective_change_to_e2(e2_raw, eff)
 
         # 4. Action Ledger
         action_key = _eval._extract_action_key(tool_name, tool_input)
@@ -311,26 +321,28 @@ def make_post_tool_use_evaluation(
         # 5. unresolved_intent 更新 (rate-distortion 容量管理)
         # Step C-2 以降: UPS v2 形式で pending に追加 (source_action=tool_name,
         # lag_kind="cycles", semantic_merge=True)。内部ロジックは不変。
-        e3_str = _pct_str(e3)
-        _eval.update_unresolved_intents(
-            state=state, intent=intent, e3_str=e3_str, cycle_id=cycle_id,
-            source_action=tool_name, lag_kind="cycles",
-        )
+        if scored:
+            e3_str = _pct_str(e3)
+            _eval.update_unresolved_intents(
+                state=state, intent=intent, e3_str=e3_str, cycle_id=cycle_id,
+                source_action=tool_name, lag_kind="cycles",
+            )
 
         # 6. 既存 unresolved_intent の gap を relevance で減衰
         _eval.update_gaps_by_relevance(
             state=state, result_str=output_str, ec=eff,
         )
 
-        # 7. state["e_values"] に最新スコアを保存 (Noetic 既存慣習)
-        state["e_values"] = {
-            "e1": _pct_str(e1),
-            "e2": _pct_str(e2),
-            "e2_raw": _pct_str(e2_raw),
-            "e3": e3_str,
-            "e4": _pct_str(e4),
-            "eff": round(eff, 4),
-        }
+        # 7. 欠測時も置き換え、前回のスコアを残さない。
+        state["e_values"] = {"scored": scored, "eff": round(eff, 4)}
+        if scored:
+            state["e_values"].update({
+                "e1": _pct_str(e1),
+                "e2": _pct_str(e2),
+                "e2_raw": _pct_str(e2_raw),
+                "e3": e3_str,
+                "e4": _pct_str(e4),
+            })
 
         # 8. 段階8 v4: 全 pending の match_pattern で自己消化判定
         # tool 側に rules を持たせず、pending 側が「誰が自分を消化できるか」を
@@ -345,9 +357,13 @@ def make_post_tool_use_evaluation(
             cycle_id=cycle_id,
         )
 
+        score_message = (
+            f"e2={_pct_str(e2)} e3={e3_str} e4={_pct_str(e4)}"
+            if scored else "scored=False (採点欠測)"
+        )
         return HookRunResult.allow(messages=[
             f"[post_eval] tool={tool_name} "
-            f"e2={_pct_str(e2)} e3={e3_str} e4={_pct_str(e4)} "
+            f"{score_message} "
             f"eff={eff:.3f}"
         ])
 
