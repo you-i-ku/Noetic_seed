@@ -178,6 +178,7 @@ def _search_entry():
 
 def _search_setup(monkeypatch, directory, entries, route):
     monkeypatch.setattr(memory_tool, "MEMORY_DIR", directory)
+    monkeypatch.setattr(memory, "MEMORY_DIR", directory)
     (directory / "archive_test.jsonl").write_text(
         "\n".join(json.dumps(e, ensure_ascii=False) for e in entries), encoding="utf-8")
     monkeypatch.setattr(memory_tool, "is_vector_ready", lambda: route != "unavailable")

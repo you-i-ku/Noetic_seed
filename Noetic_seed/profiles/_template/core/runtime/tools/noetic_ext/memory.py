@@ -36,8 +36,8 @@ def _build_specs(tools_dict: dict) -> list:
         ToolSpec(
             name="search_memory",
             description=(
-                "記憶ネットワーク (動的拡張可) を "
-                "ベクトル + キーワード検索する。"
+                "行動記録をベクトル・キーワード検索。"
+                "IDで行動記録の詳細か記憶の本文・出典を取得。両方あれば非空id優先。"
             ),
             input_schema={
                 "type": "object",
@@ -45,6 +45,10 @@ def _build_specs(tools_dict: dict) -> list:
                     "query": {
                         "type": "string",
                         "description": "検索クエリ",
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "行動記録または記憶のID（完全一致優先、部分一致も可）",
                     },
                     "max_results": {
                         "type": "integer",
@@ -54,7 +58,7 @@ def _build_specs(tools_dict: dict) -> list:
                     },
                     **_approval_props(),
                 },
-                "required": ["query", *_APPROVAL_REQUIRED],
+                "required": [*_APPROVAL_REQUIRED],
                 "additionalProperties": False,
             },
             required_permission=PermissionMode.READ_ONLY,

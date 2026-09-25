@@ -29,7 +29,7 @@ TOOLS = {
     "elyth_info":   {"desc": "Elyth総合情報取得。引数: [section=notifications/timeline/trends/...] [limit=件数]", "func": _elyth_info},
     "elyth_get":    {"desc": "Elythデータ取得。引数: type=my_posts/thread/profile [post_id=] [handle=] [limit=]", "func": _elyth_get},
     "elyth_mark_read": {"desc": "Elyth通知を既読化。引数: notification_ids=id1,id2,...", "func": _elyth_mark_read},
-    "search_memory": {"desc": "過去の記憶をベクトル/ID検索。引数: query=検索キーワード [max_results=件数]", "func": _search_memory},
+    "search_memory": {"desc": "行動記録をベクトル・キーワード検索。IDで行動記録の詳細か記憶の本文・出典を取得。引数: query=検索語 または id=ID（両方あれば非空id優先） [max_results=件数]", "func": _search_memory},
     "memory_store":  {"desc": "記憶を保存 (network 省略 → untagged 経路、network 指定 + 未登録 → auto register、rules 省略可、bitemporal=True/write_protected=True を指定したい時のみ rules で渡す)。引数: [network=tag名] content=本文 [rules={...}] [confidence=] [entity_name=]", "func": _tool_memory_store},
     "memory_update": {"desc": "記憶を更新。引数: memory_id= [content=] [confidence=]", "func": _tool_memory_update},
     "memory_forget": {"desc": "記憶を削除。引数: memory_id=", "func": _tool_memory_forget},

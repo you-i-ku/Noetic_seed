@@ -5,7 +5,7 @@ from core.config import MEMORY_DIR
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.memory import (
     memory_store, memory_update, memory_forget, memory_network_search,
-    UNTAGGED_NETWORK, invocation_result,
+    UNTAGGED_NETWORK, invocation_result, load_all_memories,
 )
 from core.state import load_state
 from core.tag_registry import is_tag_registered, list_registered_tags
@@ -49,34 +49,59 @@ def _memory_execution_lines(entry, detail=False):
 
 
 def _search_memory(args):
-    """archive を検索。entry と各実行の最大点で順位付けし、ID部分一致で詳細を返す。"""
+    """query は archive を各実行の最大点で検索。非空 id は query より優先。
+
+    ID は archive完全一致→記憶完全一致→archive部分一致→記憶部分一致。
+    同段は既存の走査順。記憶は登録タグと untagged から読み、本文を短縮せず
+    保存時の出典と返す。読み出しで元記憶・確信・リンクを更新しない。
+    """
     query = args.get("query", "")
     search_id = args.get("id", "")
     n = min(int(args.get("max_results", "") or "5"), 20)
 
     MEMORY_DIR.mkdir(exist_ok=True)
     archive_files = sorted(MEMORY_DIR.glob("archive_*.jsonl"), reverse=True)
-    if not archive_files:
-        return "記憶ファイルがまだありません"
-
     if search_id:
+        archive_match = None
         for f in archive_files:
             for line in f.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
                 try:
                     entry = json.loads(line)
-                    if search_id in entry.get("id", ""):
+                    if search_id == entry.get("id", ""):
                         return (f"id={entry.get('id','')} time={entry.get('time','')} "
                                 f"tool={entry.get('tool','')} intent={entry.get('intent','')[:200]} "
                                 f"result={str(entry.get('result',''))[:200]}"
                                 + _memory_execution_lines(entry, detail=True))
+                    if archive_match is None and search_id in entry.get("id", ""):
+                        archive_match = entry
                 except Exception:
                     pass
+        memories = load_all_memories()
+        memory_match = next((m for m in memories if m.get("id") == search_id), None)
+        if memory_match is None and archive_match is not None:
+            entry = archive_match
+            return (f"id={entry.get('id','')} time={entry.get('time','')} "
+                    f"tool={entry.get('tool','')} intent={entry.get('intent','')[:200]} "
+                    f"result={str(entry.get('result',''))[:200]}"
+                    + _memory_execution_lines(entry, detail=True))
+        if memory_match is None:
+            memory_match = next((m for m in memories if search_id in m.get("id", "")), None)
+        if memory_match is not None:
+            source = {key: memory_match[key] for key in (
+                "id", "network", "created_at", "updated_at", "origin", "source_context",
+                "perspective", "metadata",
+            ) if key in memory_match}
+            return (json.dumps(source, ensure_ascii=False)
+                    + "\n" + memory_match.get("content", ""))
         return f"ID '{search_id}' に一致するエントリなし"
 
     if not query:
         return "エラー: queryまたはidを指定してください"
+
+    if not archive_files:
+        return "記憶ファイルがまだありません"
 
     all_entries = []
     for f in archive_files:
