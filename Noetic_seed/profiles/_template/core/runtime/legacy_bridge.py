@@ -16,7 +16,7 @@ legacy tool も ConversationRuntime 経由で LLM② から呼出可能になる
   保つため、claw 同名 tool があっても legacy が勝つ
 - skip_names で明示除外可能 (noetic_stub 等、bridge より後で登録したい場合に使用)
 - handler は tools_dict[name]["func"] 呼出の単純な passthrough
-- input_schema は承認 3 層 + additionalProperties=True の緩い形
+- input_schema は理由・予想 (必須) / note (任意) + additionalProperties=True の緩い形
   (H-2 C.4 で native ToolSpec に昇格時に厳密化される)
 
 ### 登録順序 (main.py)
@@ -58,7 +58,7 @@ _READ_ONLY_LEGACY_TOOLS = frozenset({
 
 
 def _make_passthrough_schema() -> dict:
-    """承認 3 層 + free-form args の最小 schema。
+    """理由・予想 (必須) / note (任意) + free-form args の最小 schema。
 
     bridge 経由の tool は args 形式が多様なので additionalProperties=True で
     LLM の任意指定を許容する。H-2 C.4 で native ToolSpec に昇格時に厳密な
@@ -75,12 +75,12 @@ def _make_passthrough_schema() -> dict:
                 "type": "string",
                 "description": "期待する結果 (1 文、80 字目安)",
             },
-            "message": {
+            "note": {
                 "type": "string",
-                "description": "端末前の協力者への一言 (対等な口調、報告・共有)",
+                "description": "自由に書ける欄",
             },
         },
-        "required": ["tool_intent", "tool_expected_outcome", "message"],
+        "required": ["tool_intent", "tool_expected_outcome"],
         "additionalProperties": True,
     }
 
@@ -104,11 +104,17 @@ def register_legacy_bridge(
     Returns:
         実際に登録した tool 数 (skip した数は含まない)。
     """
-    schema = _make_passthrough_schema()
     count = 0
     for name, meta in tools_dict.items():
         if name in skip_names:
             continue
+        schema = _make_passthrough_schema()
+        if name in {"reboot", "http_request", "mic_record", "camera_stream",
+                    "screen_peek", "secret_write"}:
+            schema["properties"]["message"] = {
+                "type": "string",
+                "description": "操作に添える説明 (省略可)",
+            }
         perm = (
             PermissionMode.READ_ONLY
             if name in _READ_ONLY_LEGACY_TOOLS

@@ -21,14 +21,14 @@ def _approval_props() -> dict:
             "type": "string",
             "description": "期待する結果 (1 文、80 字目安)",
         },
-        "message": {
+        "note": {
             "type": "string",
-            "description": "端末前の協力者への一言",
+            "description": "自由に書ける欄",
         },
     }
 
 
-_APPROVAL_REQUIRED = ["tool_intent", "tool_expected_outcome", "message"]
+_APPROVAL_REQUIRED = ["tool_intent", "tool_expected_outcome"]
 
 
 def _build_specs(tools_dict: dict) -> list:

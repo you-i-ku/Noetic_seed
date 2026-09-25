@@ -22,7 +22,7 @@ from tools import TOOLS, memory_tool
 from test_outward_metrics import SeqProvider, _fire_harness, _run, fixed_io  # noqa: F401
 
 
-APPROVAL = {"tool_intent": "本文を確認", "tool_expected_outcome": "保存内容がわかる", "message": "確認中"}
+APPROVAL = {"tool_intent": "本文を確認", "tool_expected_outcome": "保存内容がわかる", "note": "確認中"}
 
 
 def _write(directory, name, rows):
@@ -164,8 +164,9 @@ def test_provider_schema_id_only_reaches_registered_handler(store, provider_name
         assert rec.output == "エラー: queryまたはidを指定してください"
     for selectors in ({"id": 1}, {"id": "mem_target", "extra": 1}):
         assert not validator.is_valid({**selectors, **APPROVAL})
-    for field in APPROVAL:
+    for field in ("tool_intent", "tool_expected_outcome"):
         assert not validator.is_valid({k: v for k, v in args.items() if k != field})
+    assert validator.is_valid({k: v for k, v in args.items() if k != "note"})
     call = response.tool_uses[0]
     validator.validate(call.input)
     if provider_name == "claude_code":

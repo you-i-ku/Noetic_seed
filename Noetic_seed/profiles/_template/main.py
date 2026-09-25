@@ -357,11 +357,11 @@ def main():
     register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
     register_legacy_bridge(_rt_registry, TOOLS, skip_names=NOETIC_TOOL_NAMES)
     register_noetic_tools(_rt_registry, TOOLS)
-    # claw ネイティブ tool (file_ops/web/shell/task/...) は元々承認 3 層なし。
+    # claw ネイティブ tool (file_ops/web/shell/task/...) は元々理由・予想・note なし。
     # Noetic 固有要件として registry 登録後に input_schema へ一括注入する。
     _approval_injected = ensure_approval_props(_rt_registry)
     if _approval_injected:
-        print(f"  [approval] 承認 3 層注入: {_approval_injected} tool")
+        print(f"  [approval] 理由・予想・note 注入: {_approval_injected} tool")
 
     # claw ネイティブ file 系 tool の description に Noetic 固有制約 (sandbox/
     # 外書込禁止、secrets 保護) を hint として追記。LLM が事前に制約を知れる。
@@ -403,8 +403,24 @@ def main():
     # 存在しない pkg は deny (LLM hallucination 抑止)、人気 pkg と Levenshtein
     # 1-2 は typosquatting 警告。1 時間 in-memory cache、不通時 warning + 続行。
     _hook_runner.register_pre(make_install_command_check_hook())
+    # Approval callback (pause_on_await + 3 層 UI + smoke auto_approve_all
+    # + 段階13 Phase 6.2 AgentSpec DSL policy_fn)
+    # PLAN §5-4: settings.json approval.rules から policy_fn を生成、
+    # tool_name + path のみで approval 要否を判定 (LLM 由来 field 影響ゼロ)
+    from core.runtime.approval_rules import make_policy_fn
+    # ★ workspace_root=BASE_DIR は **本番運用必須** (Codex rescue 7 周目
+    # RISK-6 評価): None だと path_resolver が raw fallback で canonical 化
+    # されず、path traversal / Windows case / whitespace 等 path quirk family
+    # で bypass 発生。test 後方互換 (None) は単体 test 限定。
+    _policy_fn = make_policy_fn(
+        rules=_approval_cfg.get("rules", []),
+        default_action=_approval_cfg.get("default", "approve"),
+        workspace_root=BASE_DIR,
+    )
     _hook_runner.register_pre(make_pre_tool_use_approval_check(
         missing_field_policy=_approval_cfg.get("missing_field_policy", "deny"),
+        auto_approve_all=_approval_cfg.get("auto_approve_all", False),
+        policy_fn=_policy_fn,
     ))
 
     # eval (LLM3 / E 値評価) は claude_code provider 経由なら settings.json
@@ -459,20 +475,6 @@ def main():
         get_cycle_id=lambda: state.get("cycle_id", 0),
     ))
 
-    # Approval callback (pause_on_await + 3 層 UI + smoke auto_approve_all
-    # + 段階13 Phase 6.2 AgentSpec DSL policy_fn)
-    # PLAN §5-4: settings.json approval.rules から policy_fn を生成、
-    # tool_name + path のみで approval 要否を判定 (LLM 由来 field 影響ゼロ)
-    from core.runtime.approval_rules import make_policy_fn
-    # ★ workspace_root=BASE_DIR は **本番運用必須** (Codex rescue 7 周目
-    # RISK-6 評価): None だと path_resolver が raw fallback で canonical 化
-    # されず、path traversal / Windows case / whitespace 等 path quirk family
-    # で bypass 発生。test 後方互換 (None) は単体 test 限定。
-    _policy_fn = make_policy_fn(
-        rules=_approval_cfg.get("rules", []),
-        default_action=_approval_cfg.get("default", "approve"),
-        workspace_root=BASE_DIR,
-    )
     _approval_cb = make_approval_callback(
         pause_on_await=_approval_cfg.get("pause_on_await", True),
         auto_approve_all=_approval_cfg.get("auto_approve_all", False),
@@ -1009,7 +1011,7 @@ def main():
                     "tool": invocation.tool_name, "tool_id": invocation.tool_id,
                     "chain_position": chain_idx, "invocation_position": invocation_idx,
                     "args": copy.deepcopy({k: v for k, v in _input.items()
-                                           if k not in ("tool_intent", "tool_expected_outcome", "message")}),
+                                           if k not in ("tool_intent", "tool_expected_outcome", "note")}),
                     "status": tool_execution_status(str(invocation.output), invocation.is_error),
                     "in_cycle_result": False,
                     "result": cap_tool_result(str(invocation.output)),
@@ -1074,7 +1076,7 @@ def main():
                 # 段階8 改善1: 承認 3 層フィールドを除いた tool 固有 args を保存
                 first_args = {
                     k: v for k, v in ti.items()
-                    if k not in ("tool_intent", "tool_expected_outcome", "message")
+                    if k not in ("tool_intent", "tool_expected_outcome", "note")
                 }
 
             _target_id = (ti.get("reply_to_id") or ti.get("post_id")

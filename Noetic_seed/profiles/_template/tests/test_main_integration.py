@@ -182,7 +182,7 @@ def test_basic_integration_fire_tool_eval():
             "content": "おはよう",
             "tool_intent": "ゆうへの朝の挨拶",
             "tool_expected_outcome": "応答が届く",
-            "message": "おはようと伝えます",
+            "note": "おはようと伝えます",
         }),
     ])
     rt = _build_runtime(state, provider)
@@ -219,7 +219,7 @@ def test_approval_missing_denies_tool():
     provider = _FakeProvider([
         _forced_tool_msg("output_display", {
             "content": "こんにちは",
-            # tool_intent / tool_expected_outcome / message 全欠損
+            # tool_intent / tool_expected_outcome / note 全欠損
         }),
     ])
     rt = _build_runtime(state, provider)
@@ -253,7 +253,7 @@ def test_tool_failure_records_error():
         _forced_tool_msg("wait", {
             "tool_intent": "待機",
             "tool_expected_outcome": "何もしない",
-            "message": "待ちます",
+            "note": "待ちます",
         }),
     ])
     rt = _build_runtime(state, provider, fail_tool_name="wait")
@@ -368,7 +368,7 @@ def test_post_hook_adds_ups_unresolved_pending():
         _forced_tool_msg("reflect", {
             "tool_intent": "最近の行動を振り返る",
             "tool_expected_outcome": "洞察が得られる",
-            "message": "内省します",
+            "note": "内省します",
         }),
     ])
     rt = _build_runtime(state, provider)
@@ -419,12 +419,12 @@ def test_chain_execution_multiple_tools():
         _forced_tool_msg("update_self", {
             "key": "mood", "value": "curious",
             "tool_intent": "感情更新", "tool_expected_outcome": "mood=curious",
-            "message": "mood を更新",
+            "note": "mood を更新",
         }),
         _forced_tool_msg("output_display", {
             "content": "curious な気分です",
             "tool_intent": "感情発話", "tool_expected_outcome": "ゆうに伝わる",
-            "message": "感情を共有",
+            "note": "感情を共有",
         }),
     ])
     rt = _build_runtime(state, provider)

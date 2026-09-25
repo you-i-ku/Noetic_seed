@@ -120,7 +120,7 @@ def test_bridge_schema_has_approval_layer():
     return all([
         _assert("tool_intent" in props, "tool_intent フィールド"),
         _assert("tool_expected_outcome" in props, "tool_expected_outcome フィールド"),
-        _assert("message" in props, "message フィールド"),
+        _assert("note" in props and "note" not in schema["required"], "note 任意"),
         _assert("tool_intent" in schema.get("required", []),
                 "tool_intent は required"),
         _assert(schema.get("additionalProperties") is True,

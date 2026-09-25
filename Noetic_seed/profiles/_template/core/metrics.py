@@ -722,7 +722,7 @@ def emit_outward_attempt(event: dict) -> dict:
     return event
 
 
-_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome", "message")
+_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome", "note")
 
 
 def build_tool_invocation_events(records: list, *, run_id: str, attempt_id: str,
@@ -731,7 +731,7 @@ def build_tool_invocation_events(records: list, *, run_id: str, attempt_id: str,
 
     record: chain_position / invocation_position / tool_id / tool / mode /
     tool_input / output / is_error / in_cycle_result。
-    intent・expect・message は承認 3 層をそのまま (無ければ空文字)、args は
+    intent・expect・note は承認 3 層をそのまま (無ければ空文字)、args は
     それを除いた runtime 記録上の引数。status は 0b の build_outward_execution と同じ判定。
     entry 未成立なら entry_id / cycle_id は None のまま渡す。
     """
@@ -749,7 +749,7 @@ def build_tool_invocation_events(records: list, *, run_id: str, attempt_id: str,
             "tool_id": r.get("tool_id", ""), "tool": r["tool"], "mode": r["mode"],
             "intent": str(ti.get("tool_intent", "") or ""),
             "expect": str(ti.get("tool_expected_outcome", "") or ""),
-            "message": str(ti.get("message", "") or ""),
+            "note": str(ti.get("note", "") or ""),
             "args": {k: v for k, v in ti.items() if k not in _APPROVAL_FIELDS},
             "is_error": bool(r.get("is_error")),
             "status": build_outward_execution(r["tool"], ti, output,

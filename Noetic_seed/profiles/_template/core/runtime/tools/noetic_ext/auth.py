@@ -18,14 +18,14 @@ def _approval_props() -> dict:
             "type": "string",
             "description": "期待する結果 (1 文、80 字目安)",
         },
-        "message": {
+        "note": {
             "type": "string",
-            "description": "端末前の協力者への一言",
+            "description": "自由に書ける欄",
         },
     }
 
 
-_APPROVAL_REQUIRED = ["tool_intent", "tool_expected_outcome", "message"]
+_APPROVAL_REQUIRED = ["tool_intent", "tool_expected_outcome"]
 
 
 def _build_specs(tools_dict: dict) -> list:
@@ -54,7 +54,7 @@ def _build_specs(tools_dict: dict) -> list:
         ToolSpec(
             name="secret_read",
             description=(
-                "sandbox/secrets/ に保存された秘密情報を読む。承認不要だが、"
+                "sandbox/secrets/ に保存された秘密情報を読む。"
                 "name パターン (英数字 / _ . -) に従う必要あり。"
             ),
             input_schema={
@@ -75,7 +75,7 @@ def _build_specs(tools_dict: dict) -> list:
         ToolSpec(
             name="secret_write",
             description=(
-                "sandbox/secrets/ に秘密情報を書き込む。承認必須、最大 1 MB、"
+                "sandbox/secrets/ に秘密情報を書き込む。最大 1 MB、"
                 "name は英数字 / _ . - のみ。"
             ),
             input_schema={
@@ -88,6 +88,10 @@ def _build_specs(tools_dict: dict) -> list:
                     "content": {
                         "type": "string",
                         "description": "書き込む内容 (最大 1 MB)",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "操作に添える説明 (省略可)",
                     },
                     **_approval_props(),
                 },

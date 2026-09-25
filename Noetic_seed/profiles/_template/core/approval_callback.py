@@ -5,11 +5,11 @@ Phase 4 Step E-2c: Step A で「Step E に委譲」と記録した
 
 ## 動作フロー (APPROVAL_PROMPT_SPEC §6.2)
 ```
-PreToolUse hook (3 層チェック) 通過
+PreToolUse hook (理由・予想と、確認時の note をチェック) 通過
   ↓
 approval_callback 呼出 (本ファイル)
   - pause_on_await=True → ws_server.set_paused(True)  (pressure tick 停止)
-  - 3 層 UI payload 整形 (args / intent&expected / message)
+  - 3 層 UI payload 整形 (args / intent&expected / note)
   - ws_server.request_approval() で WS 送信 + 応答待ち
   ↓
 UI で OK/NG 判定 (WS 接続なければターミナル input)
@@ -28,7 +28,7 @@ from typing import Callable, Optional
 ApprovalCallback = Callable[[str, dict, list], bool]
 
 
-_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome", "message")
+_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome", "note")
 
 
 def _format_preview(
@@ -46,7 +46,7 @@ def _format_preview(
          intent:   <tool_intent>
          expected: <tool_expected_outcome>
       ③ to you (= 協力者):
-         <message>
+         <note>
       ---
       [pre_hook messages (あれば)]
     """
@@ -63,7 +63,7 @@ def _format_preview(
         f"   intent:   {tool_input.get('tool_intent') or '(空)'}",
         f"   expected: {tool_input.get('tool_expected_outcome') or '(空)'}",
         "③ to you (= 協力者):",
-        f"   {tool_input.get('message') or '(空)'}",
+        f"   {tool_input.get('note') or '(空)'}",
     ]
 
     # 段階7 Step 5: memory_store で未登録タグ → 新タグ発明フラグ

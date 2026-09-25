@@ -99,7 +99,7 @@ _NOETIC_BASH_HINT = (
     "破壊的コマンド (rm -rf /, dd of=/dev/sd*, fork bomb, mkfs 等) は"
     "Level 問わず常に自動拒否。"
     "注意喚起コマンド (rm -rf, sudo, chmod 777, curl|bash, eval, --force push) は"
-    "承認画面に警告付きで表示。"
+    "警告を表示。"
 )
 
 
@@ -156,12 +156,11 @@ def ensure_noetic_file_hints(registry: ToolRegistry) -> int:
 
 
 def ensure_approval_props(registry: ToolRegistry) -> int:
-    """Registry 全 tool の input_schema に承認 3 層を後付け注入する。
+    """Registry 全 tool に理由・予想 (必須) と note (任意) を注入する。
 
-    Noetic 固有の承認 3 層 (tool_intent / tool_expected_outcome / message)
-    は全 tool で required。claw 本家準拠の tool (file_ops/web/shell/task/...)
-    は元々 3 層を持たないため、この関数で registry 登録後に一括注入する。
-    noetic_ext / legacy_bridge は既に 3 層持ちなので no-op で skip。
+    claw 本家準拠の tool は元々これらを持たないため登録後に追加する。
+    本来の用途の message の定義・必須指定は保持する。
+    noetic_ext / legacy_bridge は既に定義済みなので no-op で skip。
 
     claw 本家ソース (file_ops.py 等) には触らず、input_schema を実行時に
     書き換えるので claw 準拠との分離を保つ。

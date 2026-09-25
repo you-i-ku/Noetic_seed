@@ -17,7 +17,8 @@ task/worker/mcp/…) を扱う。Noetic 固有機能 (認知 / 記憶 / 身体�
 - handler: **legacy func 温存**。tools/__init__.py の TOOLS[name]["func"] を参照
 - permission: READ_ONLY (観測・query) / WORKSPACE_WRITE (state 変更) /
   DANGER_FULL_ACCESS (外部装置作動・機密書込)
-- 承認 3 層 (tool_intent / tool_expected_outcome / message): 全 tool で required
+- tool_intent / tool_expected_outcome: 全 tool で required。note は任意の自由欄。
+  確認対象の操作では hook が note の欠損を検査する。固有の message は別の引数。
 
 ### 本 package の責務外
 

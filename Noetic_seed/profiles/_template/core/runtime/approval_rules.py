@@ -73,17 +73,28 @@ policy_fn = 「**rules engine** が **DSL で書かれた pattern 集合** を�
 fallback で安全。
 """
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 
 _VALID_ACTIONS = ("approve", "auto")
 
 
+@dataclass(frozen=True)
+class ApprovalPolicy:
+    """bool 呼出と、同じ評価による (確認要否, 最初の規則/default) を提供。"""
+
+    evaluate: Callable[[str, dict], tuple[bool, str]]
+
+    def __call__(self, tool_name: str, tool_input: dict) -> bool:
+        return self.evaluate(tool_name, tool_input)[0]
+
+
 def make_policy_fn(
     rules: list,
     default_action: str = "approve",
     workspace_root=None,
-) -> Callable[[str, dict], bool]:
+) -> ApprovalPolicy:
     """rules + default から policy 関数を生成。
 
     Args:
@@ -98,6 +109,7 @@ def make_policy_fn(
     Returns:
         signature: (tool_name: str, tool_input: dict) -> bool
             True = 承認必要 / False = auto bypass
+        evaluate(tool_name, tool_input) -> (bool, str): 同じ判定と規則の理由。
 
     Raises:
         ValueError: default_action が "approve" / "auto" 以外、または
@@ -143,21 +155,18 @@ def make_policy_fn(
             "action": action,
         })
 
-    def policy_fn(tool_name: str, tool_input: dict) -> bool:
-        """rules を順次評価、hit した rule の action を採用。
-
-        Returns:
-            True: 承認必要 (approval UI 発火経路)
-            False: auto bypass
-        """
-        for rule in compiled:
+    def evaluate(tool_name: str, tool_input: dict) -> tuple[bool, str]:
+        """最初に一致した規則の判定と理由。未一致なら default。"""
+        for idx, rule in enumerate(compiled):
             if tool_name not in rule["tools"]:
                 continue
             if rule["body_modify"]:
                 raw_path = str(tool_input.get("path") or "")
                 if not is_body_modify_path(raw_path, root):
                     continue
-            return rule["action"] == "approve"
-        return default_requires_approval
+            reason = (f"rules[{idx}]: tools={sorted(rule['tools'])}, "
+                      f"body_modify={rule['body_modify']}, action={rule['action']}")
+            return rule["action"] == "approve", reason
+        return default_requires_approval, f"default: {default_action}"
 
-    return policy_fn
+    return ApprovalPolicy(evaluate)

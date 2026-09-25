@@ -42,6 +42,32 @@ def _round_trip(monkeypatch, directory, entry):
     return {**raw, **subj}
 
 
+def test_business_message_survives_fire_and_memory(monkeypatch, fixed_io):
+    call = ToolUseBlock(id="both", name="reflect", input={
+        "tool_intent": "理由", "tool_expected_outcome": "予想",
+        "note": "自由欄", "message": "業務本文", "echo": "結果"})
+    entry = _round_trip(monkeypatch, fixed_io, _fire(monkeypatch, fixed_io, [[call]]))
+    assert entry["args"] == {"message": "業務本文", "echo": "結果"}
+    assert entry["invocations"][0]["args"] == {"message": "業務本文", "echo": "結果"}
+
+
+@pytest.mark.parametrize("kind", ["old", "new", "mixed"])
+def test_record_read_preserves_old_fields(monkeypatch, fixed_io, kind):
+    old = {"tool": "reflect", "message": "旧欄", "args": {"note": "昔の業務引数"},
+           "result": "旧結果"}
+    new = {"tool": "reflect", "note": "新欄", "args": {"message": "業務本文"},
+           "result": "新結果"}
+    invs = [old] if kind == "old" else [new] if kind == "new" else [old, new]
+    entry = {"id": "s_0001", "time": "T", "tool": "reflect", "result": "",
+             "invocations": invs, "per_tool": []}
+    loaded = _round_trip(monkeypatch, fixed_io, entry)
+    assert loaded["invocations"] == invs
+    if kind != "new":
+        inv = loaded["invocations"][0]
+        assert "note" not in inv and inv.get("note", "") == ""
+        assert inv["args"]["note"] == "昔の業務引数"
+
+
 def test_record_every_execution_and_round_trip(monkeypatch, fixed_io):
     """末尾だけ保存・同名や重複IDで結合・重複スキップの結果消失・承認欄混入を検出。"""
     stages = copy.deepcopy(STAGES)
@@ -64,7 +90,7 @@ def test_record_every_execution_and_round_trip(monkeypatch, fixed_io):
     assert [memory.invocation_result(loaded, p) for p in invs] == expected
     for inv, call in zip(invs, [c for stage in stages for c in stage]):
         assert inv["args"] == {k: v for k, v in call.input.items()
-                               if k not in ("tool_intent", "tool_expected_outcome", "message")}
+                               if k not in ("tool_intent", "tool_expected_outcome", "note")}
         assert ("result_ref" in inv) == inv["in_cycle_result"]
         assert ("result" in inv) != ("result_ref" in inv)
 
@@ -172,7 +198,7 @@ def _search_entry():
                 {"chain_position": 0, "invocation_position": 0, "tool_id": "same", "tool": "reflect",
                  "status": "ok", "args": {}, "result_ref": {"start": 0, "length": len(first)}},
                 {"chain_position": 1, "invocation_position": 0, "tool_id": "same", "tool": "reflect",
-                 "status": "rejected", "args": {"note": "後段引数"},
+                 "status": "rejected", "args": {"payload": "後段引数"},
                  "result_ref": {"start": len(first), "length": len(second)}}]}
 
 
@@ -215,7 +241,7 @@ def test_search_each_execution_and_id_detail(monkeypatch, fixed_io, route, query
     assert "後段引数" not in result and "outcome_token" not in result
     detail = memory_tool._search_memory({"id": "arget"})
     assert "expect=expect_token 後段の予想" in detail
-    assert 'args={"note": "後段引数"}' in detail
+    assert 'args={"payload": "後段引数"}' in detail
     assert "result=outcome_token 後段の結果" in detail
     if route == "vector":
         assert all(len(t) <= 400 for t in spy.call_args.args[0][1:])

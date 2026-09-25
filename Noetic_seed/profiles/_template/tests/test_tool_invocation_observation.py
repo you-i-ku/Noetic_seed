@@ -25,17 +25,17 @@ from test_outward_metrics import _fire_harness, _outward_lines, _run, fixed_io  
 # 1 段目の最後と 2 段目の最後は同じ reflect + path で、2 段目は重複スキップされる。
 STAGES = [
     [ToolUseBlock(id="a", name="reflect", input={
-        "tool_intent": "理由A", "tool_expected_outcome": "予想A", "message": "伝A",
-        "note": "引数A", "echo": "結果A"}),
+        "tool_intent": "理由A", "tool_expected_outcome": "予想A", "note": "伝A",
+        "payload": "引数A", "echo": "結果A"}),
      ToolUseBlock(id="b", name="x_like", input={
-         "tool_intent": "理由B", "tool_expected_outcome": "予想B", "message": "伝B",
-         "note": "引数B", "echo": "[REJECTED] 拒否B"}),
+         "tool_intent": "理由B", "tool_expected_outcome": "予想B", "note": "伝B",
+         "payload": "引数B", "echo": "[REJECTED] 拒否B"}),
      ToolUseBlock(id="c", name="reflect", input={
-         "tool_intent": "理由C", "tool_expected_outcome": "予想C", "message": "伝C",
+         "tool_intent": "理由C", "tool_expected_outcome": "予想C", "note": "伝C",
          "path": "p", "echo": "結果C"})],
-    [ToolUseBlock(id="d", name="elyth_post", input={"note": "引数D", "echo": "エラー: 失敗D"}),
+    [ToolUseBlock(id="d", name="elyth_post", input={"payload": "引数D", "echo": "エラー: 失敗D"}),
      ToolUseBlock(id="e", name="reflect", input={
-         "tool_intent": "理由E", "tool_expected_outcome": "予想E", "message": "伝E",
+         "tool_intent": "理由E", "tool_expected_outcome": "予想E", "note": "伝E",
          "path": "p", "echo": "結果E"})],
 ]
 PROPOSAL = ("1. [考える] → reflect+x_like (pe2=40, pec=0.2)\n"
@@ -76,12 +76,43 @@ def test_build_empty():
 def test_build_approval_fields_split_and_missing():
     """承認 3 層が args に混ざる / 欠けた実行を落とす誤実装を検出する。"""
     events = _build([
-        _record(tool_input={"tool_intent": "I", "tool_expected_outcome": "X", "message": "M",
+        _record(tool_input={"tool_intent": "I", "tool_expected_outcome": "X", "note": "M",
                             "path": "a.txt"}),
         _record(tool_id="u", tool_input={"path": "b.txt"}),
     ])
-    assert [(e["intent"], e["expect"], e["message"], e["args"]) for e in events] == [
+    assert [(e["intent"], e["expect"], e["note"], e["args"]) for e in events] == [
         ("I", "X", "M", {"path": "a.txt"}), ("", "", "", {"path": "b.txt"})]
+
+
+def test_business_message_and_note_are_separate():
+    event = _build([_record(tool_input={"note": "自由欄", "message": "送信本文"})])[0]
+    assert event["note"] == "自由欄" and event["args"] == {"message": "送信本文"}
+    assert "message" not in event
+    event = _build([_record(tool_input={"message": "送信本文"})])[0]
+    assert event["note"] == "" and event["args"] == {"message": "送信本文"}
+
+
+@pytest.mark.parametrize("kind", ["old", "new", "mixed"])
+def test_old_new_observation_records_are_read_without_migration(monkeypatch, fixed_io, kind):
+    """旧行の message と args.note を保存し、note 未記録と空文字を区別する。"""
+    old = {"event_type": "tool_invocation", "tool": "reflect", "message": "旧承認欄",
+           "args": {"note": "昔の業務引数"}}
+    path = fixed_io / metrics.METRICS_FILE_NAME
+    prefix = (json.dumps(old, ensure_ascii=False) + "\n").encode("utf-8")
+    if kind in ("old", "mixed"):
+        path.write_bytes(prefix)
+    if kind in ("new", "mixed"):
+        metrics.emit_tool_invocations(_build([_record(tool_input={
+            "note": "新自由欄", "message": "新送信本文"})]))
+    loaded = _invocation_lines(fixed_io)
+    if kind in ("old", "mixed"):
+        assert loaded[0] == old and "note" not in loaded[0]
+        assert loaded[0].get("note", "") == ""  # 未記録であり、当時の空欄を示さない
+        assert path.read_bytes().startswith(prefix)
+    if kind in ("new", "mixed"):
+        assert loaded[-1]["note"] == "新自由欄"
+        assert loaded[-1]["args"] == {"message": "新送信本文"}
+    assert len(loaded) == (2 if kind == "mixed" else 1)
 
 
 @pytest.mark.parametrize("output,is_error,status", [
@@ -125,8 +156,8 @@ def test_all_invocations_recorded_with_own_reason(monkeypatch, fixed_io):
     assert [e["expect"] for e in events] == ["予想A", "予想B", "予想C", "", "予想E"]
     assert [e["result"] for e in events] == ["結果A", "[REJECTED] 拒否B", "結果C", "エラー: 失敗D", "結果E"]
     assert [e["args"] for e in events] == [
-        {"note": "引数A", "echo": "結果A"}, {"note": "引数B", "echo": "[REJECTED] 拒否B"},
-        {"path": "p", "echo": "結果C"}, {"note": "引数D", "echo": "エラー: 失敗D"},
+        {"payload": "引数A", "echo": "結果A"}, {"payload": "引数B", "echo": "[REJECTED] 拒否B"},
+        {"path": "p", "echo": "結果C"}, {"payload": "引数D", "echo": "エラー: 失敗D"},
         {"path": "p", "echo": "結果E"}]
     assert [e["status"] for e in events] == ["ok", "rejected", "ok", "tool_error", "ok"]
     # 結果リストに入ったのは 1 段目の末尾だけ (2 段目の末尾は重複スキップ)

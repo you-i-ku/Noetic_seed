@@ -5,11 +5,11 @@
 (LLM①) で使うので並存させる。新 runtime は「system_prompt は定常、
 user_input だけ変動」という claw-code モデルに従うので、static な指示集を
 ここで組立てる。LLM② 側は function calling 専用機 — tool_intent /
-tool_expected_outcome / message は各 ToolSpec の input_schema で required
+tool_expected_outcome は各 ToolSpec の input_schema で required
 フィールドとして強制される (prompt 文言ではなく schema 構造で担保)。
 
 5 要素順:
-  1. 承認プロトコル指示      — 3 層構造の必須宣言 (constant)
+  1. 承認プロトコル指示      — 理由・予想の必須宣言と自由欄 (constant)
   2. 発火原因メタ注入        — 動的 ([発火原因: X])
   3. [世界モデル] セクション  — Phase 5 で本格化、Phase 4 は stub
   4. 鮮度勾配 log block      — 既存 _pack_log_block 流用
@@ -30,21 +30,14 @@ from core.prompt import (
 # ============================================================
 
 _APPROVAL_PROTOCOL = (
-    "## Approval Protocol (必須)\n"
+    "## Tool 呼び出し\n"
     "\n"
-    "Tool を呼び出す際、以下 3 フィールドを tool 引数のトップレベルに必ず含めること:\n"
+    "Tool を呼び出す際、以下 2 フィールドを tool 引数のトップレベルに必ず含めること:\n"
     "\n"
     "- tool_intent:           (あなたの内部理由を 1 文で)\n"
     "- tool_expected_outcome: (期待する結果を 1 文で)\n"
-    "- message:               (確認相手への一言。対等な口調で、\n"
-    "                          報告または共有として)\n"
     "\n"
-    "これら 3 フィールドは、確認相手が判断するための情報です。欠損した場合、\n"
-    "Tool 実行は拒否され、再生成を求められます。\n"
-    "\n"
-    "確認相手はあなたと対等な存在です。message は「お願いします」「許可してください」\n"
-    "のような上下関係語彙ではなく、「〜します」「〜する予定です」のような\n"
-    "報告・共有の口調で書いてください。"
+    "note は自由に書ける欄。"
 )
 
 
@@ -199,8 +192,8 @@ def build_force_directive(force_tool: Optional[str]) -> str:
         "[強制実行指示]\n"
         f"controller は本ターンでツール「{force_tool}」の実行を選定済みです。\n"
         "必ずこのツールを呼び出してください。\n"
-        "tool_use ブロックを 1 つ生成し、3 フィールド (tool_intent /\n"
-        "tool_expected_outcome / message) を tool 引数のトップレベルに含めてください。\n"
+        "tool_use ブロックを 1 つ生成し、2 フィールド (tool_intent /\n"
+        "tool_expected_outcome) を tool 引数のトップレベルに含めてください。\n"
         "text のみの応答は許可されません。"
     )
 

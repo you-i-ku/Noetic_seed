@@ -128,12 +128,12 @@ class HookRunner:
 # ============================================================
 # Noetic 固有 handler (Phase 4 追加)
 # ------------------------------------------------------------
-# 承認 3 層 (tool_intent / tool_expected_outcome / message) の欠損
+# 理由・予想と、確認時の note の欠損
 # チェックを PreToolUse hook として登録するための factory。
-# APPROVAL_PROMPT_SPEC.md §5 の仕様を実装する。
+# HUMAN_FRAME_PLAN.md §4-2 の仕様を実装する。
 # ============================================================
 
-_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome", "message")
+_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome")
 _VALID_MISSING_POLICIES = ("deny", "warn", "auto_fill")
 
 
@@ -147,18 +147,21 @@ def _auto_fill_field(tool_name: str, field_name: str) -> str:
         return f"[auto_fill] {tool_name} 実行"
     if field_name == "tool_expected_outcome":
         return f"[auto_fill] {tool_name} の結果取得"
-    if field_name == "message":
+    if field_name == "note":
         return f"[auto_fill] {tool_name} を実行します"
     return "[auto_fill]"
 
 
 def make_pre_tool_use_approval_check(
     missing_field_policy: str = "deny",
+    *,
+    auto_approve_all: bool = False,
+    policy_fn=None,
 ) -> PreHandler:
-    """承認 3 層欠損チェッカーを生成。
+    """理由・予想は常に、note は確認が要る時だけ検査する。
 
-    tool_input が `tool_intent` / `tool_expected_outcome` / `message`
-    を揃えているか検証する PreToolUse hook を返す。
+    auto_approve_all=True なら policy は評価しない。欠損 note を
+    本来の用途の message で補うことはしない。
 
     factory にしている理由: hooks.py を claw-code 準拠の純粋インフラに
     保つため、settings 依存は factory 引数で注入する。main.py 側が
@@ -166,6 +169,9 @@ def make_pre_tool_use_approval_check(
 
     Args:
         missing_field_policy: 欠損時の動作。"deny" / "warn" / "auto_fill"
+        auto_approve_all: True なら理由・予想だけを検査。
+        policy_fn: make_policy_fn の戻り値。evaluate で判定と理由を取得。
+            None は callback と同じく全 tool を確認対象とする。
 
     Raises:
         ValueError: 未知の policy が渡された場合 (設定ミスは起動時に検出)
@@ -177,8 +183,17 @@ def make_pre_tool_use_approval_check(
         )
 
     def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        fields = _APPROVAL_FIELDS
+        reason = ""
+        if not auto_approve_all:
+            needs_approval, reason = (
+                policy_fn.evaluate(tool_name, tool_input)
+                if policy_fn is not None else (True, "default: approve")
+            )
+            if needs_approval:
+                fields += ("note",)
         missing = []
-        for field_name in _APPROVAL_FIELDS:
+        for field_name in fields:
             value = tool_input.get(field_name, "")
             if value is None or not str(value).strip():
                 missing.append(field_name)
@@ -187,10 +202,11 @@ def make_pre_tool_use_approval_check(
             return HookRunResult.allow()
 
         if missing_field_policy == "deny":
+            detail = (f"この操作は確認の対象 ({reason})。note が空。"
+                      if "note" in missing else "")
             return HookRunResult.deny([
                 f"[approval] tool_input 欠損: {', '.join(missing)}。"
-                "tool_intent / tool_expected_outcome / message の 3 層を"
-                "揃えて再生成してください。"
+                f"{detail}不足している欄を添えて再提出してください。"
             ])
 
         if missing_field_policy == "warn":

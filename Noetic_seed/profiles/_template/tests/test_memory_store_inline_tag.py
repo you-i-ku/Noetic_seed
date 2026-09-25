@@ -127,7 +127,7 @@ def test_preview_new_tag_flag(tmp_path: Path):
             "rules": {"beta_plus": False, "bitemporal": False},
             "tool_intent": "仮説を残す",
             "tool_expected_outcome": "仮説登録",
-            "message": "新カテゴリ作るね",
+            "note": "新カテゴリ作るね",
         },
         [],
     )
@@ -149,7 +149,7 @@ def test_preview_registered_tag_no_flag(tmp_path: Path):
             "confidence": "0.8",
             "tool_intent": "意見",
             "tool_expected_outcome": "保存",
-            "message": "意見を残す",
+            "note": "意見を残す",
         },
         [],
     )
@@ -166,7 +166,7 @@ def test_preview_new_tag_without_rules(tmp_path: Path):
             "content": "夢",
             "tool_intent": "想像",
             "tool_expected_outcome": "保存",
-            "message": "",
+            "note": "",
         },
         [],
     )
@@ -182,7 +182,7 @@ def test_preview_other_tool_unaffected(tmp_path: Path):
     preview = _format_preview(
         "write_file",
         {"path": "x.txt", "content": "y", "tool_intent": "a",
-         "tool_expected_outcome": "b", "message": "c"},
+         "tool_expected_outcome": "b", "note": "c"},
         [],
     )
     return _assert("新タグ発明" not in preview, "他ツールは無影響")

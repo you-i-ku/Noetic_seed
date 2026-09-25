@@ -1,4 +1,4 @@
-"""Approval 3 層チェッカー (PreToolUse hook) テスト。
+"""確認対象 (policy 未指定) の理由・予想・note チェッカー (PreToolUse hook) テスト。
 
 APPROVAL_PROMPT_SPEC.md §8.2 のテスト項目を網羅:
   - 3 層全揃い → pass
@@ -35,7 +35,7 @@ def _full_input(**overrides):
     base = {
         "tool_intent": "テスト実行",
         "tool_expected_outcome": "何か起こる",
-        "message": "テストします",
+        "note": "テストします",
         "path": "/tmp/foo.py",
     }
     base.update(overrides)
@@ -80,24 +80,24 @@ def test_deny_missing_expected():
     ])
 
 
-def test_deny_missing_message():
-    print("== deny: message 欠損 → deny ==")
+def test_deny_missing_note():
+    print("== deny: note 欠損 → deny ==")
     check = make_pre_tool_use_approval_check(missing_field_policy="deny")
-    r = check("write_file", _full_input(message=""))
+    r = check("write_file", _full_input(note=""))
     return all([
         _assert(r.denied, "denied=True"),
-        _assert(any("message" in m for m in r.messages),
-                "msg に message 含む"),
+        _assert(any("note" in m for m in r.messages),
+                "msg に note 含む"),
     ])
 
 
 def test_deny_multiple_missing():
     print("== deny: 2 フィールド同時欠損 → deny (全件表示) ==")
     check = make_pre_tool_use_approval_check(missing_field_policy="deny")
-    r = check("write_file", _full_input(tool_intent="", message=""))
+    r = check("write_file", _full_input(tool_intent="", note=""))
     return all([
         _assert(r.denied, "denied=True"),
-        _assert(any("tool_intent" in m and "message" in m for m in r.messages),
+        _assert(any("tool_intent" in m and "note" in m for m in r.messages),
                 "両フィールドとも msg に含む"),
     ])
 
@@ -112,7 +112,7 @@ def test_deny_whitespace_only():
 def test_deny_none_value():
     print("== deny: None 値 → 欠損扱い ==")
     check = make_pre_tool_use_approval_check(missing_field_policy="deny")
-    r = check("write_file", _full_input(message=None))
+    r = check("write_file", _full_input(note=None))
     return _assert(r.denied, "None は欠損")
 
 
@@ -159,14 +159,14 @@ def test_warn_all_present():
 def test_autofill_missing():
     print("== auto_fill: 欠損は補完して allow ==")
     check = make_pre_tool_use_approval_check(missing_field_policy="auto_fill")
-    r = check("write_file", _full_input(tool_intent="", message=""))
+    r = check("write_file", _full_input(tool_intent="", note=""))
     return all([
         _assert(not r.denied, "denied=False"),
         _assert(r.updated_input is not None, "updated_input あり"),
         _assert(r.updated_input["tool_intent"].startswith("[auto_fill]"),
                 "intent 補完"),
-        _assert(r.updated_input["message"].startswith("[auto_fill]"),
-                "message 補完"),
+        _assert(r.updated_input["note"].startswith("[auto_fill]"),
+                "note 補完"),
         _assert(r.updated_input["tool_expected_outcome"] == "何か起こる",
                 "既存値は保持"),
         _assert(r.updated_input["path"] == "/tmp/foo.py",
@@ -225,7 +225,7 @@ def test_hook_runner_integration():
         make_pre_tool_use_approval_check(missing_field_policy="deny")
     )
     r1 = runner.run_pre_tool_use("write_file", _full_input())
-    r2 = runner.run_pre_tool_use("write_file", _full_input(message=""))
+    r2 = runner.run_pre_tool_use("write_file", _full_input(note=""))
     return all([
         _assert(not r1.denied, "全揃い: denied=False"),
         _assert(r2.denied, "欠損: denied=True"),
@@ -271,7 +271,7 @@ def test_hook_runner_deny_stops_chain():
 
     runner.register_pre(_second)
 
-    r = runner.run_pre_tool_use("write_file", _full_input(message=""))
+    r = runner.run_pre_tool_use("write_file", _full_input(note=""))
     return all([
         _assert(r.denied, "denied=True"),
         _assert(called["n"] == 0, "後続 handler 未呼出"),
@@ -355,7 +355,7 @@ if __name__ == "__main__":
         ("deny: 全揃い", test_deny_all_present),
         ("deny: intent 欠損", test_deny_missing_intent),
         ("deny: expected 欠損", test_deny_missing_expected),
-        ("deny: message 欠損", test_deny_missing_message),
+        ("deny: note 欠損", test_deny_missing_note),
         ("deny: 複数欠損", test_deny_multiple_missing),
         ("deny: 空白のみ", test_deny_whitespace_only),
         ("deny: None", test_deny_none_value),
