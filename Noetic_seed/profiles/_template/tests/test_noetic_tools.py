@@ -136,7 +136,6 @@ def test_schema_tool_specific_required():
     cases = [
         ("output_display", {"content"}),
         ("update_self", {"key", "value"}),
-        ("search_memory", {"query"}),
         ("memory_store", {"network", "content"}),
         ("memory_update", {"memory_id"}),
         ("memory_forget", {"memory_id"}),
@@ -152,6 +151,16 @@ def test_schema_tool_specific_required():
         required = set(spec.input_schema.get("required", []))
         ok = must <= required
         results.append(_assert(ok, f"{name}: {must} required"))
+    # M1b: query / id のどちらも無い呼び出しはハンドラ側で拒否する。
+    spec = reg.get("search_memory")
+    required = set(spec.input_schema.get("required", []))
+    props = spec.input_schema.get("properties", {})
+    results.extend([
+        _assert(required == {"tool_intent", "tool_expected_outcome", "message"},
+                "search_memory: required は承認 3 層のみ"),
+        _assert({"query", "id"} <= set(props),
+                "search_memory: query と id が properties にある"),
+    ])
     return all(results)
 
 
