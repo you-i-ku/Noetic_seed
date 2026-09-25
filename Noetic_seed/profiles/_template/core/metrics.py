@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -751,7 +752,7 @@ def build_tool_invocation_events(records: list, *, run_id: str, attempt_id: str,
             "expect": str(ti.get("tool_expected_outcome", "") or ""),
             "note": str(ti.get("note", "") or ""),
             "args": {k: v for k, v in ti.items() if k not in _APPROVAL_FIELDS},
-            "is_error": bool(r.get("is_error")),
+            "is_error": r.get("is_error"),
             "status": build_outward_execution(r["tool"], ti, output,
                                               bool(r.get("is_error")), "")["status"],
             "result": cap_tool_result(output),
@@ -760,12 +761,21 @@ def build_tool_invocation_events(records: list, *, run_id: str, attempt_id: str,
     return events
 
 
+class InvocationAppendError(OSError):
+    """append 失敗。written は再試行せず利用できる保存済みの先頭行数。"""
+
+    def __init__(self, written: int):
+        super().__init__(f"tool_invocation append failed after {written} rows")
+        self.written = written
+
+
 def emit_tool_invocations(events: list) -> int:
     """観察イベントを 1 行ずつ append。state を受け取らない。再試行しない。
 
     append と index 更新の失敗を区別して print する。index だけ失敗した行は
     保存済みなので次の行へ進む (再試行による重複を作らない)。append の失敗は
-    送出する (残りは書かない)。戻り値は append できた行数。
+    InvocationAppendError を送出する (残りは書かない)。その written と正常時の
+    戻り値は append できた先頭行数。index の成否には依存しない。
     """
     from core.config import MEMORY_DIR
     target = MEMORY_DIR / METRICS_FILE_NAME
@@ -775,13 +785,215 @@ def emit_tool_invocations(events: list) -> int:
             _atomic_append_jsonl(target, event)
         except Exception as e:
             print(f"  [invocation] append 失敗 ({written}/{len(events)} 行保存済み): {e}")
-            raise
+            raise InvocationAppendError(written) from e
         written += 1
         try:
             _update_metrics_index(MEMORY_DIR / INDEX_FILE_NAME, target.name, event)
         except Exception as e:
             print(f"  [invocation] index 更新失敗 (行は保存済み): {e}")
     return written
+
+
+# C-2: 観察専用。state / prompt / G へは接続しない。
+ERROR_MODEL_VERSION = "beta_bernoulli_v1"
+_INVOCATION_KEY = ("run_id", "attempt_id", "chain_position", "invocation_position")
+_PREDICTION_REFS = (*_INVOCATION_KEY, "entry_id", "cycle_id", "tool_id", "tool", "time")
+
+
+def beta_error_prediction(alpha: float, beta: float, is_error: bool) -> dict:
+    """事前から一観測の予測・KL[事後||事前]を計算する純粋関数 (nats)。
+
+    正の有限パラメータと本物の bool のみ受理。非有限値・大きな負の KL は
+    例外にし、丸め誤差 (-1e-10 以上) の負値だけ 0 にする。SciPy は遅延 import。
+    """
+    from scipy.special import digamma
+
+    if (type(is_error) is not bool or not math.isfinite(alpha)
+            or not math.isfinite(beta) or alpha <= 0 or beta <= 0):
+        raise ValueError("invalid Beta parameters or observation")
+    total = alpha + beta
+    observed = alpha if is_error else beta
+    p = alpha / total
+    surprise = math.log(total) - math.log(observed)
+    # betaln(a,b)-betaln(a+o,b+1-o) = log(a+b)-log(observed)。
+    # 一観測の共役更新に限定した同じ式で、大きい betaln 同士の桁落ちを避ける。
+    kl = float(surprise + digamma(observed + 1) - digamma(total + 1))
+    brier = (p - int(is_error)) ** 2
+    if not all(math.isfinite(v) for v in (p, surprise, kl, brier)) or kl < -1e-10:
+        raise ValueError("non-finite prediction or negative KL")
+    return {"alpha": alpha, "beta": beta, "p_error": p, "is_error": is_error,
+            "surprise_nats": surprise, "kl_nats": max(0.0, kl), "brier": brier,
+            "posterior_alpha": alpha + int(is_error),
+            "posterior_beta": beta + int(not is_error)}
+
+
+def _invocation_exclusion(event: dict, seen: set) -> Optional[str]:
+    """復元・通常運転共通の検証。無関係な event は呼出側で除く。"""
+    if (any(not isinstance(event.get(k), str) or not event[k].strip()
+            for k in ("run_id", "attempt_id"))
+            or any(type(event.get(k)) is not int or event[k] < 0
+                   for k in ("chain_position", "invocation_position"))):
+        return "invalid_key"
+    if type(event.get("is_error")) is not bool:
+        return "invalid_is_error"
+    if not isinstance(event.get("tool"), str) or not event["tool"].strip():
+        return "invalid_tool"
+    if tuple(event[k] for k in _INVOCATION_KEY) in seen:
+        return "duplicate"
+    return None
+
+
+def _emit_error_observation(event: dict) -> bool:
+    """観察を一度だけ append。index 故障で保存済み行を再試行しない。"""
+    from core.config import MEMORY_DIR
+    target = MEMORY_DIR / METRICS_FILE_NAME
+    try:
+        _atomic_append_jsonl(target, event)
+    except Exception as e:
+        print(f"  [error_prediction] append skip ({event['event_type']}): {e}")
+        return False
+    try:
+        _update_metrics_index(MEMORY_DIR / INDEX_FILE_NAME, target.name, event)
+    except Exception as e:
+        print(f"  [error_prediction] index skip (行は保存済み): {e}")
+    return True
+
+
+class ErrorPredictionObserver:
+    """保存済み invocation だけを数える、main 専用の観察者 (state と独立)。"""
+
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        self.counts = {}
+        self.total = (1, 1)
+        self.seen = set()
+        self.history_reset = False
+
+    def _accept(self, event: dict):
+        reason = _invocation_exclusion(event, self.seen)
+        if reason:
+            return None, reason
+        before = self.counts.get(event["tool"], (1, 1))
+        global_before = self.total
+        error = int(event["is_error"])
+        self.seen.add(tuple(event[k] for k in _INVOCATION_KEY))
+        self.counts[event["tool"]] = (before[0] + error, before[1] + 1 - error)
+        self.total = (self.total[0] + error, self.total[1] + 1 - error)
+        return (before, global_before), None
+
+    def rebuild(self) -> dict:
+        """全 run の履歴を行順で復元。読込障害は今回だけリセットし、印を残す。"""
+        from core.config import MEMORY_DIR
+        self.counts, self.total, self.seen = {}, (1, 1), set()
+        self.history_reset = False
+        excluded = {}
+        failure = None
+        try:
+            try:
+                stream = (MEMORY_DIR / METRICS_FILE_NAME).open("rb")
+            except FileNotFoundError:
+                stream = None
+            if stream is not None:
+                with stream:
+                    for line in stream:
+                        try:
+                            event = json.loads(line)
+                            if not isinstance(event, dict):
+                                raise ValueError("not an object")
+                        except (ValueError, UnicodeError):
+                            excluded["invalid_json"] = excluded.get("invalid_json", 0) + 1
+                            continue
+                        if event.get("event_type") != "tool_invocation":
+                            continue
+                        _, reason = self._accept(event)
+                        if reason:
+                            excluded[reason] = excluded.get(reason, 0) + 1
+        except Exception as e:
+            failure = str(e)
+            self.counts, self.total, self.seen = {}, (1, 1), set()
+            self.history_reset = True
+        report = {"event_type": "error_model_rebuilt", "run_id": self.run_id,
+                  "history_id": self.run_id, "history_reset": self.history_reset,
+                  "history_scope": "since_startup" if self.history_reset else "profile",
+                  "model_version": ERROR_MODEL_VERSION, "prior": {"alpha": 1, "beta": 1},
+                  "baseline_prior": {"alpha": 1, "beta": 1},
+                  "accepted": len(self.seen), "excluded": sum(excluded.values()),
+                  "exclusion_reasons": excluded, "read_error": failure,
+                  "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        _emit_error_observation(report)
+        return report
+
+    def observe(self, events: list) -> None:
+        """保存済み行を順に計数。計算・予測保存の故障でも後続の計数を続ける。"""
+        for event in events:
+            if event.get("event_type") != "tool_invocation":
+                continue
+            priors, reason = self._accept(event)
+            ref = {k: event.get(k) for k in _PREDICTION_REFS}
+            ref.update(model_version=ERROR_MODEL_VERSION, history_id=self.run_id,
+                       history_reset=self.history_reset,
+                       history_scope="since_startup" if self.history_reset else "profile")
+            if reason:
+                _emit_error_observation({**ref, "event_type": "error_prediction_excluded",
+                                         "reason": reason})
+                continue
+            # _accept が先に計数済み。以下の失敗は学習履歴を欠落させない。
+            try:
+                before, global_before = priors
+                prediction = beta_error_prediction(*before, event["is_error"])
+                baseline = beta_error_prediction(*global_before, event["is_error"])
+                row = {**ref, **prediction, "event_type": "error_prediction",
+                       "prior": {"alpha": 1, "beta": 1},
+                       "baseline": {**baseline, "prior": {"alpha": 1, "beta": 1}},
+                       "prediction_timing": "posthoc_from_preceding_invocations"}
+            except Exception as e:
+                _emit_error_observation({**ref, "event_type": "error_prediction_missing",
+                                         "reason": "calculation_failed", "error": str(e)})
+                continue
+            if not _emit_error_observation(row):
+                _emit_error_observation({**ref, "event_type": "error_prediction_missing",
+                                         "reason": "append_failed"})
+
+
+def summarize_error_prediction(events: list, *, run_id: Optional[str] = None) -> dict:
+    """指定行 (任意で run 限定) のみ集計。履歴復元はせず、保存済み baseline と比較。
+
+    tool_invocation と予測を複合キーで重複排除し、未対応の実行は missing として返す。
+    delta はモデル - baseline (負ならモデルの損失が小さい)。
+    """
+    rows, invocations = {}, set()
+    for event in events:
+        if run_id is not None and event.get("run_id") != run_id:
+            continue
+        kind = event.get("event_type")
+        if kind not in ("tool_invocation", "error_prediction"):
+            continue
+        if _invocation_exclusion(event, set()):
+            continue
+        key = tuple(event[k] for k in _INVOCATION_KEY)
+        if kind == "tool_invocation":
+            invocations.add(key)
+        else:
+            rows.setdefault(key, event)
+
+    def aggregate(group):
+        count = len(group)
+        def mean(field, baseline=False):
+            return (sum((r["baseline"] if baseline else r)[field] for r in group) / count
+                    if count else None)
+        loss, baseline_loss = mean("surprise_nats"), mean("surprise_nats", True)
+        brier, baseline_brier = mean("brier"), mean("brier", True)
+        return {"count": count, "mean_surprise_nats": loss, "log_loss": loss,
+                "mean_brier": brier, "baseline_log_loss": baseline_loss,
+                "baseline_brier": baseline_brier,
+                "log_loss_delta": loss - baseline_loss if count else None,
+                "brier_delta": brier - baseline_brier if count else None}
+
+    values = list(rows.values())
+    return {**aggregate(values), "invocations": len(invocations),
+            "missing": len(invocations - rows.keys()),
+            "per_tool": {tool: aggregate([r for r in values if r["tool"] == tool])
+                         for tool in sorted({r["tool"] for r in values})}}
 
 
 def summarize_outward(events: list, k: int = 5) -> dict:

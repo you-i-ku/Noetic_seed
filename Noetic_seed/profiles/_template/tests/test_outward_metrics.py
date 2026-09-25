@@ -240,6 +240,7 @@ def _fire_harness(monkeypatch, tmp_path, source=MAIN_SOURCE, mode="normal", sele
     cycle_emit = Mock(side_effect=lambda s, *a: s.__setitem__(CYCLE_KEY, {"cycle": s["cycle_id"]}))
     monkeypatch.setattr(metrics, "emit_cycle_metrics", cycle_emit)
     env = dict(state=state, copy=copy, json=json, re=re, datetime=FixedDateTime,
+               _error_observer=metrics.ErrorPredictionObserver(state["run_id"]),
                time=SimpleNamespace(sleep=Mock()), BASE_DIR=tmp_path,
                _refresh_state=Mock(), _wm_log=Mock(), broadcast_log=Mock(), broadcast_state=Mock(),
                broadcast_self=Mock(), controller=lambda *a: {"allowed_tools": set(outputs), "tool_rank": {}},

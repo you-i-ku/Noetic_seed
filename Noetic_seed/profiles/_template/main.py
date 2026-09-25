@@ -216,6 +216,14 @@ def main():
     # することで「同 run 内の複数 session」(将来の手動再起動シナリオ等)
     # も表現可能。metrics_events.jsonl に記録、replay arena で run 単位識別。
     state["run_id"] = str(uuid.uuid4())
+    # C-2: プロファイル全体の保存済み実行から復元。iku の state には置かない。
+    _error_observer = None
+    try:
+        from core.metrics import ErrorPredictionObserver
+        _error_observer = ErrorPredictionObserver(state["run_id"])
+        _error_observer.rebuild()
+    except Exception as e:
+        print(f"  [error_prediction] startup skip: {e}")
     # F-005: subjective_entries.jsonl は materialized view (raw_events.jsonl が
     # source of truth)、compaction / retro e2 mutation で mark_view_dirty が発火、
     # 以降の save_state() で atomic rewrite + index.json 同期。
@@ -594,13 +602,21 @@ def main():
                 print(f"  [outward] emit skip: {e}")
             try:
                 if invocations["records"]:
-                    from core.metrics import build_tool_invocation_events, emit_tool_invocations
-                    emit_tool_invocations(build_tool_invocation_events(
+                    from core.metrics import (
+                        build_tool_invocation_events, emit_tool_invocations, InvocationAppendError,
+                    )
+                    invocation_events = build_tool_invocation_events(
                         invocations["records"], run_id=event["run_id"],
                         attempt_id=event["attempt_id"],
                         entry_id=invocations["entry_id"], cycle_id=invocations["cycle_id"],
                         time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    ))
+                    )
+                    try:
+                        written = emit_tool_invocations(invocation_events)
+                    except InvocationAppendError as e:
+                        written = e.written
+                    if _error_observer is not None:
+                        _error_observer.observe(invocation_events[:written])
             except Exception as e:
                 print(f"  [invocation] emit skip: {e}")
 

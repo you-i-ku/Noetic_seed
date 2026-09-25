@@ -255,8 +255,9 @@ def test_append_failure_stops_without_retry(monkeypatch, fixed_io):
 
     append = Mock(side_effect=first_only)
     monkeypatch.setattr(metrics, "_atomic_append_jsonl", append)
-    with pytest.raises(OSError):
+    with pytest.raises(metrics.InvocationAppendError) as failure:
         metrics.emit_tool_invocations(_build([_record(tool_id=t) for t in ("x", "y", "z")]))
+    assert failure.value.written == 1 and isinstance(failure.value.__cause__, OSError)
     assert append.call_count == 2
     assert [e["tool_id"] for e in _invocation_lines(fixed_io)] == ["x"]
 
