@@ -35,21 +35,25 @@ from typing import Optional
 #
 # matches 判定 = 案 (a) 自己相対化:
 #   - bootstrap (history < 5): 全 matches 扱い (初期不安定期の救済)
-#   - 以降: abs(error) < median(history) なら matches
+#   - 以降: abs(error) <= median(history) なら matches (偶数件は上側の中央値)
 #
-# history は直近 100 件 FIFO (PC メモリの現実的制約)。
+# history は軸別・全 tool 共有の直近 100 件 FIFO。今回の誤差を追加する前に判定する。
 
 HISTORY_CAP = 100
 BOOTSTRAP_N = 5
 
 
 def _is_match(error: float, history: list) -> bool:
-    """案 (a) 自己相対化。history 件数 < BOOTSTRAP_N なら全 matches。"""
+    """履歴5件未満は全一致、以降は絶対誤差が履歴の上側中央値以下なら一致。
+
+    history は今回の誤差を追加する前の絶対誤差列。
+    中央値0なら誤差0だけが一致する。絶対的な正確さではなく自己相対化の判定。
+    """
     if len(history) < BOOTSTRAP_N:
         return True
     sorted_h = sorted(history)
     median = sorted_h[len(sorted_h) // 2]
-    return abs(float(error)) < median
+    return abs(float(error)) <= median
 
 
 def _append_history(state: dict, error: float, axis: str = "e2") -> None:

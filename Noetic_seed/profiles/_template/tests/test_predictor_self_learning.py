@@ -6,7 +6,7 @@ STAGE10 PLAN v1 §3-B の要件:
     - matches=False: conf = max(0.0, conf - 0.15)
   - _is_match: 案 (a) 自己相対化
     - bootstrap (history < 5): 全 matches
-    - 以降: abs(error) < median(history) なら matches
+    - 以降: abs(error) <= median(history) なら matches (step 0e)
   - _append_history: FIFO、cap 100
   - state lazy init: predictor_confidence / prediction_error_history_e2/_ec
   - tool 別 confidence 分化 (未 init は 0.7 start)
@@ -52,12 +52,12 @@ def test_is_match_bootstrap():
 
 
 def test_is_match_below_median():
-    print("== _is_match: abs(error) < median → matches ==")
+    print("== _is_match: abs(error) <= median → matches ==")
     history = [10, 20, 30, 40, 50]  # median=30
     return all([
         _assert(_is_match(20, history), "error=20 < median=30 → matches"),
-        _assert(not _is_match(50, history), "error=50 >= median=30 → mismatches"),
-        _assert(not _is_match(30, history), "error=30 == median=30 → mismatches (strict <)"),
+        _assert(not _is_match(50, history), "error=50 > median=30 → mismatches"),
+        _assert(_is_match(30, history), "error=30 == median=30 → matches"),
     ])
 
 
