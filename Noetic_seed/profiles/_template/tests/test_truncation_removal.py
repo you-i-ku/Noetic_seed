@@ -173,7 +173,7 @@ def test_preserved_truncations_intact():
     http_src = inspect.getsource(http_tool)
     elyth_src = inspect.getsource(elyth_tools)
     return all([
-        _assert("str(e)[:200]" in http_src, "http_tool error msg 切り詰め維持"),
+        _assert("redact(str(e))[:200]" in http_src, "http_tool error msg 切り詰め維持"),
         _assert("[:3000]" in elyth_src, "elyth JSON response 切り詰め維持"),
     ])
 

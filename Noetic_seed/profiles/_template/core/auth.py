@@ -9,18 +9,26 @@ _SECRETS_FILE = BASE_DIR / "secrets.json"
 _secrets_cache: dict | None = None
 
 
-def _load_secrets() -> dict:
+def _load_secrets(*, strict=False) -> dict:
     """secrets.json をキャッシュ付きで読む。"""
     global _secrets_cache
-    if _secrets_cache is not None:
+    if _secrets_cache is not None and not strict:
         return _secrets_cache
     if not _SECRETS_FILE.exists():
         _secrets_cache = {}
         return _secrets_cache
     try:
         _secrets_cache = json.loads(_SECRETS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        _secrets_cache = {}
+    except Exception as e:
+        if strict:
+            from core.runtime.registry import ToolError
+            raise ToolError("エラー: secrets.json 読込失敗", detail={"exception_type": type(e).__name__}) from None
+        return {}
+    if strict and (not isinstance(_secrets_cache, dict)
+                   or not isinstance(_secrets_cache.get("auth_profiles", {}), dict)):
+        _secrets_cache = None
+        from core.runtime.registry import ToolError
+        raise ToolError("エラー: secrets.json の形式が不正です")
     return _secrets_cache
 
 
@@ -40,18 +48,22 @@ def get_auth_profile(name: str) -> dict | None:
 _SENSITIVE_FIELDS = {"token", "key", "secret", "password", "private_key"}
 
 
-def get_auth_profile_info(name: str) -> dict | None:
+def get_auth_profile_info(name: str, *, strict=False) -> dict | None:
     """auth profile のメタ情報のみを返す（token/key 等の機密フィールドを除外）。
     iku が自分でサービス固有認証フロー（GitHub App JWT 等）を書く時に使う。"""
-    profile = get_auth_profile(name)
-    if not profile:
+    profile = (_load_secrets(strict=True).get("auth_profiles", {}).get(name)
+               if strict else get_auth_profile(name))
+    if profile is None:
         return None
+    if not isinstance(profile, dict):
+        from core.runtime.registry import ToolError
+        raise ToolError("エラー: auth profile の形式が不正です")
     return {k: v for k, v in profile.items() if k not in _SENSITIVE_FIELDS}
 
 
-def list_auth_profile_names() -> list[str]:
+def list_auth_profile_names(*, strict=False) -> list[str]:
     """利用可能な auth profile 名の一覧を返す。機密情報は含まない。"""
-    secrets = _load_secrets()
+    secrets = _load_secrets(strict=True) if strict else _load_secrets()
     return sorted(secrets.get("auth_profiles", {}).keys())
 
 

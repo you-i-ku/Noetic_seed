@@ -492,13 +492,16 @@ def send_device(action: str, params: dict = None) -> str:
     戻り値: 生成した device request id（必要なら応答追跡に使える）"""
     import time as _time
     dr_id = f"dr_{int(_time.time() * 1000) % 1000000}"
-    broadcast({
+    client_count = broadcast({
         "type": "device_request",
         "id": dr_id,
         "action": action,
         "params": params or {},
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     })
+    if client_count == 0:
+        from core.runtime.registry import ToolError
+        raise ToolError("No client connected", detail={"action": action, "client_count": 0})
     print(f"  [ws] device send (async): {dr_id} ({action})")
     return dr_id
 

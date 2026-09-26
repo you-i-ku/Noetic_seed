@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 from core.providers.base import AssistantMessage
+from core.runtime.registry import tool_result_body
 
 
 _VALID_OBS_FORMATS = (
@@ -41,6 +42,7 @@ class Session:
                 f"{_VALID_OBS_FORMATS}"
             )
         self.messages: list = []
+        self._provider_tool_results: dict[int, tuple[dict, str]] = {}
         self.observation_label_format: str = observation_label_format
         self.observations: list[dict] = []
 
@@ -68,14 +70,20 @@ class Session:
         self.messages.append({"role": "assistant", "content": blocks})
 
     def push_tool_result(self, tool_use_id: str, content: str,
-                         is_error: bool = False) -> None:
+                         is_error: bool = False, *, detail=None, detail_error=None,
+                         provider_content=None) -> None:
         block = {
             "type": "tool_result",
             "tool_use_id": tool_use_id,
             "content": content,
         }
+        if detail is not None or detail_error is not None:
+            block["detail"] = detail
+            block["detail_error"] = detail_error
         if is_error:
             block["is_error"] = True
+        if provider_content is not None:
+            self._provider_tool_results[id(block)] = (block, provider_content)
         self.messages.append({"role": "user", "content": [block]})
 
     def push_observation(
@@ -158,15 +166,35 @@ class Session:
 
     def clear(self) -> None:
         self.messages = []
+        self._provider_tool_results.clear()
         self.observations = []
 
     # ---- シリアライズ ----
 
-    def serialize_for_anthropic(self) -> list:
-        """Anthropic Messages API 形式にそのまま。"""
-        return [dict(m) for m in self.messages]
+    def _tool_result_content(self, block, for_observation=False):
+        private = self._provider_tool_results.get(id(block))
+        # Keep the block itself as identity, even if compaction replaces messages.
+        if not for_observation and private is not None and private[0] is block:
+            return private[1]
+        return block.get("content", "")
 
-    def serialize_for_openai(self) -> list:
+    def serialize_for_anthropic(self, *, for_observation=False) -> list:
+        """Anthropic Messages API 形式にそのまま。"""
+        out = []
+        for message in self.messages:
+            blocks = []
+            for block in message["content"]:
+                provider_content = self._tool_result_content(block, for_observation)
+                block = dict(block)
+                if block.get("type") == "tool_result":
+                    block["content"] = tool_result_body(
+                        provider_content, block.get("is_error", False),
+                        block.pop("detail", None), block.pop("detail_error", None))
+                blocks.append(block)
+            out.append({**message, "content": blocks})
+        return out
+
+    def serialize_for_openai(self, *, for_observation=False) -> list:
         """OpenAI Chat Completions 形式に変換。"""
         out: list = []
         for msg in self.messages:
@@ -181,7 +209,9 @@ class Session:
                         out.append({
                             "role": "tool",
                             "tool_call_id": tr["tool_use_id"],
-                            "content": tr.get("content", ""),
+                            "content": tool_result_body(self._tool_result_content(tr, for_observation),
+                                tr.get("is_error", False), tr.get("detail"),
+                                tr.get("detail_error")),
                         })
                 else:
                     out.append(self._user_blocks_to_openai(content_blocks))

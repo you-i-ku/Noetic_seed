@@ -27,7 +27,7 @@ from core.providers.base import AssistantMessage, BaseProvider, ToolUseBlock
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import HookRunner
 from core.runtime.permissions import PermissionEnforcer, PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tool_schema import ToolSpec
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -116,16 +116,17 @@ def test_chain_tail_and_selection_alignment(fixed_io):
 @pytest.mark.parametrize("output,is_error,status,connected", [
     ("送信キューに登録 (channel=device、受付時の接続 2 件、実際に届いたかは未確認): hi", False, "ok", 2),
     ("tool execution error: output_display: 接続している受け手が 0 件", True, "runtime_error", 0),
-    ("[REJECTED] denied", True, "rejected", None),
-    ("エラー: missing", False, "tool_error", None),
-    ("Error: unavailable", False, "tool_error", None),
+    ("[REJECTED] denied", True, "runtime_error", None),
+    ("エラー: missing", False, "ok", None),
+    ("Error: unavailable", False, "ok", None),
 ])
 def test_execution_status(output, is_error, status, connected):
-    """文字列エラーを成功発話にする、拒否をruntime_errorにする、接続数を到達数扱いする誤実装を検出する。"""
+    """本文による成否の推測と、接続数を到達数扱いする誤実装を検出する。"""
     result = metrics.build_outward_execution("output_display", {"channel": " device "},
                                              output, is_error, "display")
     assert result == {"tool": "output_display", "channel": "device", "status": status,
-                      "connected_at_enqueue": connected, "category": "act"}
+                      "connected_at_enqueue": connected, "category": "act",
+                      "is_error": is_error, "error_kind": None, "detail": None, "detail_error": None}
 
 
 def test_emit_preserves_snapshot_and_counts_all_events(fixed_io):
@@ -203,10 +204,15 @@ def _fire_harness(monkeypatch, tmp_path, source=MAIN_SOURCE, mode="normal", sele
         calls = []
     registry = ToolRegistry()
     outputs = {"reflect": "reflected", "output_display": "送信キューに登録 (channel=device、受付時の接続 2 件、実際に届いたかは未確認): hi",
-               "x_like": "liked", "elyth_post": "エラー: failed"}
+               "x_like": "liked", "elyth_post": ToolError("エラー: failed")}
     for name, output in outputs.items():
-        registry.register(ToolSpec(name, name, {"type": "object"}, PermissionMode.READ_ONLY,
-                                    lambda a, text=output: a.get("echo", text)))
+        def handle(a, text=output):
+            if "echo" in a:
+                return a["echo"]  # A successful string, regardless of its prefix.
+            if isinstance(text, Exception):
+                raise text
+            return text
+        registry.register(ToolSpec(name, name, {"type": "object"}, PermissionMode.READ_ONLY, handle))
     requests = []
     provider = (SeqProvider(copy.deepcopy(stages), requests) if stages is not None
                 else FakeProvider(calls, requests, mode == "runtime_error"))
@@ -242,7 +248,7 @@ def _fire_harness(monkeypatch, tmp_path, source=MAIN_SOURCE, mode="normal", sele
     env = dict(state=state, copy=copy, json=json, re=re, datetime=FixedDateTime,
                _error_observer=metrics.ErrorPredictionObserver(state["run_id"]),
                time=SimpleNamespace(sleep=Mock()), BASE_DIR=tmp_path,
-               _refresh_state=Mock(), _wm_log=Mock(), broadcast_log=Mock(), broadcast_state=Mock(),
+               _wm_log=Mock(), broadcast_log=Mock(), broadcast_state=Mock(),
                broadcast_self=Mock(), controller=lambda *a: {"allowed_tools": set(outputs), "tool_rank": {}},
                TOOLS=tools, LEVEL_TOOLS={}, llm_cfg={}, _rt_registry=registry, _runtime=runtime,
                build_prompt_propose=build_prompt_propose, assemble_system_prompt=assemble_system_prompt,

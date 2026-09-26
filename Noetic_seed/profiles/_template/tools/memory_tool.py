@@ -1,6 +1,8 @@
 """記憶操作ツール — archive検索（v1） + Entity/Opinionネットワーク管理（A-Mem方式）"""
 import json
 import re
+from core.runtime.registry import ToolError, ToolResult, result_redactor
+from core.memory_read import MemoryReadReport, read_memory_jsonl
 from core.config import MEMORY_DIR
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.memory import (
@@ -39,16 +41,21 @@ def _memory_execution_lines(entry, detail=False):
     limit = 200 if detail else 100
     for pt, inv in _memory_executions(entry):
         line = (f"{pt['chain_position']}-{pt['invocation_position']} {inv['tool']} "
-                f"[{inv['status']}] intent={pt.get('intent','')[:limit]}")
+                f"[{inv['status']}] intent={result_redactor()(pt.get('intent',''))[:limit]}")
         if detail:
-            line += (f" expect={pt.get('expect','')[:200]} "
-                     f"args={json.dumps(inv.get('args', {}), ensure_ascii=False)[:200]} "
-                     f"result={invocation_result(entry, inv)[:200]}")
+            line += (f" expect={result_redactor()(pt.get('expect',''))[:200]} "
+                     f"args={result_redactor()(json.dumps(inv.get('args', {}), ensure_ascii=False))[:200]} "
+                     f"result={result_redactor()(invocation_result(entry, inv))[:200]}")
         lines.append(line)
     return "".join("\n" + line for line in lines)
 
 
 def _search_memory(args):
+    report = MemoryReadReport()
+    return report.result(_search_memory_impl(args, report))
+
+
+def _search_memory_impl(args, report):
     """query は archive を各実行の最大点で検索。非空 id は query より優先。
 
     ID は archive完全一致→記憶完全一致→archive部分一致→記憶部分一致。
@@ -64,27 +71,21 @@ def _search_memory(args):
     if search_id:
         archive_match = None
         for f in archive_files:
-            for line in f.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                    if search_id == entry.get("id", ""):
-                        return (f"id={entry.get('id','')} time={entry.get('time','')} "
-                                f"tool={entry.get('tool','')} intent={entry.get('intent','')[:200]} "
-                                f"result={str(entry.get('result',''))[:200]}"
-                                + _memory_execution_lines(entry, detail=True))
-                    if archive_match is None and search_id in entry.get("id", ""):
-                        archive_match = entry
-                except Exception:
-                    pass
-        memories = load_all_memories()
+            for entry in read_memory_jsonl(f, report=report):
+                if search_id == entry.get("id", ""):
+                    return (f"id={entry.get('id','')} time={entry.get('time','')} "
+                            f"tool={entry.get('tool','')} intent={result_redactor()(entry.get('intent',''))[:200]} "
+                            f"result={result_redactor()(str(entry.get('result','')))[:200]}"
+                            + _memory_execution_lines(entry, detail=True))
+                if archive_match is None and search_id in entry.get("id", ""):
+                    archive_match = entry
+        memories = load_all_memories(read_report=report)
         memory_match = next((m for m in memories if m.get("id") == search_id), None)
         if memory_match is None and archive_match is not None:
             entry = archive_match
             return (f"id={entry.get('id','')} time={entry.get('time','')} "
-                    f"tool={entry.get('tool','')} intent={entry.get('intent','')[:200]} "
-                    f"result={str(entry.get('result',''))[:200]}"
+                    f"tool={entry.get('tool','')} intent={result_redactor()(entry.get('intent',''))[:200]} "
+                    f"result={result_redactor()(str(entry.get('result','')))[:200]}"
                     + _memory_execution_lines(entry, detail=True))
         if memory_match is None:
             memory_match = next((m for m in memories if search_id in m.get("id", "")), None)
@@ -98,22 +99,14 @@ def _search_memory(args):
         return f"ID '{search_id}' に一致するエントリなし"
 
     if not query:
-        return "エラー: queryまたはidを指定してください"
+        raise ToolError("エラー: queryまたはidを指定してください")
 
     if not archive_files:
         return "記憶ファイルがまだありません"
 
     all_entries = []
     for f in archive_files:
-        try:
-            for line in f.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                all_entries.append(json.loads(line))
-                if len(all_entries) >= 1000:
-                    break
-        except Exception:
-            pass
+        all_entries.extend(read_memory_jsonl(f, report=report, limit=1000-len(all_entries)))
         if len(all_entries) >= 1000:
             break
 
@@ -139,10 +132,12 @@ def _search_memory(args):
                 )[:n]
                 return "\n".join(
                     f"[{round(s*100)}%] id={e.get('id','')} time={e.get('time','')} "
-                    f"tool={e.get('tool','')} intent={e.get('intent','')[:100]}"
+                    f"tool={e.get('tool','')} intent={result_redactor()(e.get('intent',''))[:100]}"
                     + _memory_execution_lines(e)
                     for s, _, e in scored
                 )
+        except ToolError:
+            raise
         except Exception:
             pass
 
@@ -159,7 +154,7 @@ def _search_memory(args):
         return f"'{query}' に一致するエントリなし"
     return "\n".join(
         f"[{round(s*100)}%] id={e.get('id','')} time={e.get('time','')} "
-        f"tool={e.get('tool','')} intent={e.get('intent','')[:100]}"
+        f"tool={e.get('tool','')} intent={result_redactor()(e.get('intent',''))[:100]}"
         + _memory_execution_lines(e)
         for s, _, e in scored[:n]
     )
@@ -176,7 +171,7 @@ def _tool_memory_store(args):
     network = args.get("network", "").strip()
     content = args.get("content", "").strip()
     if not content:
-        return "エラー: contentを指定してください"
+        raise ToolError("エラー: contentを指定してください")
     # 段階11-D Phase 1: network 空 → untagged として保存
     if not network:
         network = None
@@ -206,7 +201,7 @@ def _tool_memory_store(args):
                     intent=args.get("tool_intent"),
                 )
             except ValueError as e:
-                return f"エラー: タグ登録失敗 ({e})"
+                raise ToolError(f"エラー: タグ登録失敗 ({e})")
 
     metadata = {}
     if network == "opinion":
@@ -231,14 +226,24 @@ def _tool_memory_store(args):
     # 正しく動作、LLM 手動 memory_store tool だけ link 生成が発動しない非対称状態。
     # smoke3 で memory_links.jsonl 未生成の一因と特定 (2026-04-24 γ 調査)。
     state = load_state()
-    entry = memory_store(network, content, metadata,
-                         origin="tool:memory_store", source_context="deliberate",
-                         _state=state)
+    post_save_failures = []
+    try:
+        entry = memory_store(network, content, metadata,
+                             origin="tool:memory_store", source_context="deliberate",
+                             _state=state, _post_save_failures=post_save_failures)
+    except ToolError:
+        raise
+    except (OSError, ValueError) as e:
+        raise ToolError(str(e), detail={"exception_type": type(e).__name__}) from e
     # 段階10 Step 4 付帯 D: Fix 5 精神で content truncation 撤去。
     # iku が保存した記憶内容を「60 字で切れた」と次 cycle で誤認するリスク回避。
     # 段階11-D Phase 1: entry["network"] (UNTAGGED_NETWORK 含む) で表示し、
     # network=None でも `[_untagged]` 表示が崩れない。
-    return f"記憶保存完了: [{entry['network']}] {content} (id={entry['id']})"
+    message = f"記憶保存完了: [{entry['network']}] {content} (id={entry['id']})"
+    if post_save_failures:
+        return ToolResult(message, detail={"saved": True, "memory_id": entry["id"],
+                                          "post_save_failures": post_save_failures})
+    return message
 
 
 def _tool_memory_update(args):
@@ -246,7 +251,7 @@ def _tool_memory_update(args):
     memory_id = args.get("memory_id", "") or args.get("id", "")
     content = args.get("content", "")
     if not memory_id:
-        return "エラー: memory_idを指定してください"
+        raise ToolError("エラー: memory_idを指定してください")
     metadata = {}
     confidence = args.get("confidence", "")
     if confidence:
@@ -254,22 +259,37 @@ def _tool_memory_update(args):
             metadata["confidence"] = float(confidence)
         except ValueError:
             pass
-    return memory_update(memory_id, content or None, metadata or None)
+    report = MemoryReadReport()
+    try:
+        message = memory_update(memory_id, content or None, metadata or None, read_report=report)
+    except OSError as e:
+        raise ToolError(str(e), detail={"exception_type": type(e).__name__}) from e
+    return report.result(message)
 
 
 def _tool_memory_forget(args):
     """記憶を削除する。"""
     memory_id = args.get("memory_id", "") or args.get("id", "")
     if not memory_id:
-        return "エラー: memory_idを指定してください"
-    return memory_forget(memory_id)
+        raise ToolError("エラー: memory_idを指定してください")
+    report = MemoryReadReport()
+    try:
+        message = memory_forget(memory_id, read_report=report)
+    except OSError as e:
+        raise ToolError(str(e), detail={"exception_type": type(e).__name__}) from e
+    return report.result(message)
 
 
 def _tool_search_memory(args):
+    report = MemoryReadReport()
+    return report.result(_tool_search_memory_impl(args, report))
+
+
+def _tool_search_memory_impl(args, report):
     """記憶を検索する。全ネットワーク横断。"""
     query = args.get("query", "")
     if not query:
-        return "エラー: queryを指定してください"
+        raise ToolError("エラー: queryを指定してください")
     networks = None
     net_str = args.get("networks", "")
     if net_str:
@@ -278,7 +298,7 @@ def _tool_search_memory(args):
                     if is_tag_registered(n.strip()) or n.strip() == UNTAGGED_NETWORK]
     limit = min(int(args.get("max_results", "") or "5"), 20)
 
-    results = memory_network_search(query, networks=networks, limit=limit)
+    results = memory_network_search(query, networks=networks, limit=limit, read_report=report)
     if not results:
         return f"'{query}' に一致する記憶なし"
 
@@ -287,7 +307,7 @@ def _tool_search_memory(args):
     for r in results:
         score = round(r.get("score", 0) * 100)
         network = r.get("network", "?")
-        content = r.get("content", "")[:150]
+        content = result_redactor()(r.get("content", ""))[:150]
         mid = r.get("id", "")
         meta = r.get("metadata", {})
         rules = get_tag_rules(network)

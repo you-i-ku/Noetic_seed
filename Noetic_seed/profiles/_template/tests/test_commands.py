@@ -315,15 +315,17 @@ def test_plugin_placeholder():
 # ============================================================
 
 def test_branch():
-    print("== /branch (git 環境依存) ==")
-    if not shutil.which("git"):
-        print("  [SKIP] git not in PATH")
-        return True
-    # TMPDIR は git init されてないので error が出てもそれで良い
-    d = _dispatcher()
-    r = d.dispatch("/branch", _ctx())
-    # output 文字列は環境依存、エラーでも落ちなければ OK
-    return _assert(isinstance(r.text, str), "文字列返却")
+    """No git process: verify the slash adapter preserves failure facts."""
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    with patch("core.runtime.commands.builtin.subprocess.run", return_value=SimpleNamespace(
+        returncode=128, stdout="", stderr="not a repository")) as run:
+        result = _dispatcher().dispatch("/branch", _ctx())
+    assert result.is_error
+    assert result.text == "[git status -b --short rc=128]\nnot a repository\n"
+    assert result.detail["returncode"] == 128
+    assert run.call_args.args[0] == ["git", "status", "-b", "--short"]
+    return True
 
 
 def test_commit_usage():
@@ -404,3 +406,73 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+import pytest
+from unittest.mock import Mock
+from types import SimpleNamespace
+from core.runtime.registry import ToolError, ToolResult
+from core.runtime.commands import builtin as commands
+
+
+@pytest.fixture(autouse=True)
+def command_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "TMPDIR", tmp_path)
+    (tmp_path / "settings.json").write_text(json.dumps({"provider": "anthropic", "model": "claude-sonnet-4-6"}), encoding="utf-8")
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "skills" / "hello.md").write_text("Hello body.", encoding="utf-8")
+
+
+@pytest.mark.parametrize("line", ["/branch", "/commit -m test", "/diff", "/pr view"])
+@pytest.mark.parametrize("rc", [0, 1])
+def test_command_process_exit_status(monkeypatch, line, rc):
+    run = Mock(return_value=SimpleNamespace(returncode=rc, stdout="Error is normal content", stderr="stderr"))
+    monkeypatch.setattr(commands.subprocess, "run", run)
+    result = _dispatcher().dispatch(line, _ctx())
+    assert result.is_error is (rc != 0)
+    assert "Error is normal content" in result.text
+    if rc:
+        assert result.detail["returncode"] == rc
+        assert result.detail["command"] == run.call_args.args[0]
+    else:
+        assert result.detail is None
+    assert run.call_count == 1
+
+
+@pytest.mark.parametrize("line", ["/mcp auth missing", "/skill show missing"])
+def test_command_direct_tool_failure_has_original_text(monkeypatch, line):
+    from core.runtime.tools import mcp
+    monkeypatch.setitem(mcp._bridge, "auth", None)
+    result = _dispatcher().dispatch(line, _ctx())
+    assert result.is_error
+    assert "Command /" not in result.text
+    assert "pending" in result.text if line.startswith("/mcp") else result.text == "Error: skill 'missing' not found"
+
+
+def test_command_direct_tool_detail_preserved(monkeypatch):
+    from core.runtime.tools import mcp
+    monkeypatch.setattr(mcp, "mcp_auth", Mock(side_effect=ToolError("exact", {"status": 401})))
+    result = commands._cmd_mcp(["auth", "s"], {})
+    assert result.text == "exact" and result.is_error
+    assert result.detail == {"status": 401}
+    monkeypatch.setattr(mcp, "mcp_auth", lambda args: ToolResult("partial", {"count": 2}))
+    result = commands._cmd_mcp(["auth", "s"], {})
+    assert result.text == "partial" and not result.is_error
+    assert result.detail == {"count": 2}
+
+
+@pytest.mark.parametrize("args", [["key"], ["key", "new"]])
+def test_command_corrupt_settings_not_overwritten(tmp_path, args):
+    path = tmp_path / "settings.json"
+    path.write_text("{bad", encoding="utf-8")
+    result = commands._cmd_config(args, {"settings_path": path})
+    assert result.is_error and result.text.startswith("Parse error:")
+    assert path.read_text(encoding="utf-8") == "{bad"
+
+
+def test_dispatcher_catches_toolerror_without_prefix():
+    from core.runtime.commands.dispatcher import CommandSpec
+    dispatcher = CommandDispatcher()
+    dispatcher.register(CommandSpec("probe", "", Mock(side_effect=ToolError("exact", {"fact": 1}))))
+    result = dispatcher.dispatch("/probe")
+    assert result.is_error and result.text == "exact" and result.detail == {"fact": 1}

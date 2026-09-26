@@ -84,7 +84,7 @@ def test_record_every_execution_and_round_trip(monkeypatch, fixed_io):
     assert [p["tool_id"] for p in invs] == ["duplicate"] * 3 + ["", "duplicate"]
     assert [p["intent"] for p in pts] == ["理由A", "理由B", "理由C", "", "理由E"]
     assert [p["expect"] for p in pts] == ["予想A", "予想B", "予想C", "", "予想E"]
-    assert [p["status"] for p in invs] == ["ok", "rejected", "ok", "tool_error", "ok"]
+    assert [p["status"] for p in invs] == ["ok", "ok", "ok", "ok", "ok"]
     assert [p["in_cycle_result"] for p in invs] == [False, False, True, False, False]
     expected = ["結果A", "[REJECTED] 拒否B", "結果C", "エラー: 失敗D", "結果E"]
     assert [memory.invocation_result(loaded, p) for p in invs] == expected

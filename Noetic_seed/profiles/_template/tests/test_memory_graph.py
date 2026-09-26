@@ -290,26 +290,17 @@ def test_memory_graph_default_view():
 
 
 def test_memory_graph_invalid_view_error():
-    print("== _memory_graph: 不正 view 値で error response (ego/global/both 以外) ==")
-    for v in ["invalid", "ezo", "world"]:
-        result = _memory_graph({"view": v})
+    from core.runtime.registry import ToolError
+    for view in ["invalid", "ezo", "world"]:
         try:
-            data = json.loads(result)
-        except Exception:
-            return _assert(False, f"view={v} で JSON parse 失敗")
-        if "error" not in data:
-            return _assert(False, f"view={v} で error key なし")
-        if "supported_views" not in data:
-            return _assert(False, f"view={v} で supported_views なし")
-    result_invalid = json.loads(_memory_graph({"view": "invalid"}))
-    return all([
-        _assert("ego" in result_invalid.get("supported_views", []),
-                "supported_views に ego 含む"),
-        _assert("global" in result_invalid.get("supported_views", []),
-                "supported_views に global 含む (軽減 2 配線済)"),
-        _assert("both" in result_invalid.get("supported_views", []),
-                "supported_views に both 含む (軽減 2 配線済)"),
-    ])
+            _memory_graph({"view": view})
+        except ToolError as exc:
+            data = json.loads(str(exc))
+            assert data["error"] == f"view={view} は未対応"
+            assert data["supported_views"] == ["ego", "global", "both"]
+        else:
+            raise AssertionError("expected ToolError")
+    return True
 
 
 def test_memory_graph_global_view_shape():

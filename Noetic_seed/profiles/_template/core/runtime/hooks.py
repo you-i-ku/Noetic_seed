@@ -510,6 +510,9 @@ def make_file_access_guard(
         # (workspace 外 / disallowed char / resolve error → None)
         rel = path_resolve_for_policy(path_arg, root)
 
+        if rel == "memory/state_generations" or (rel and rel.startswith("memory/state_generations/")):
+            return HookRunResult.deny(["[file_guard] state generations are reserved for recovery"])
+
         # workspace 外 path
         if rel is None:
             if is_write:

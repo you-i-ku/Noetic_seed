@@ -11,6 +11,8 @@ claw-code 参照: rust/crates/runtime/src/mcp_stdio.rs (lifecycle)
   - request/response id 管理
   - timeout / 切断時の graceful degradation
 """
+
+from core.runtime.registry import ToolError
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
@@ -63,6 +65,7 @@ class McpServerManager:
         self.transport = transport
         self.status = ConnectionStatus.DISCONNECTED
         self.tools: list = []       # [McpToolInfo, ...]
+        self.resources_error = None
         self.resources: list = []   # [McpResourceInfo, ...]
         self.server_info: Optional[dict] = None
         self.last_error: Optional[str] = None
@@ -85,6 +88,8 @@ class McpServerManager:
         self.status = ConnectionStatus.CONNECTING
         try:
             self.transport.start()
+        except ToolError:
+            raise
         except Exception as e:
             self.status = ConnectionStatus.ERROR
             self.last_error = f"transport start failed: {e}"
@@ -124,6 +129,8 @@ class McpServerManager:
                 params={},
                 id=None,
             ))
+        except ToolError:
+            raise
         except Exception:
             pass
 
@@ -169,7 +176,9 @@ class McpServerManager:
             timeout=timeout,
         )
         if response is None or "error" in response:
+            self.resources_error = response.get("error") if response is not None else {"message": "timeout"}
             return []
+        self.resources_error = None
         result = response.get("result") or {}
         raw_res = result.get("resources") or []
         self.resources = [
@@ -239,6 +248,8 @@ class McpServerManager:
         import time
         try:
             self.transport.send(request)
+        except ToolError:
+            raise
         except Exception as e:
             self.last_error = f"send failed: {e}"
             return None

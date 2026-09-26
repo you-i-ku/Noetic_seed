@@ -63,6 +63,8 @@ def _check_memory_jsons(profile_root: Path) -> None:
     if not memory_dir.exists():
         return  # 初回起動相当、問題なし
     for json_file in memory_dir.rglob("*.json"):
+        if json_file.is_relative_to(memory_dir / "state_generations"):
+            continue
         try:
             json.loads(json_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
@@ -99,39 +101,39 @@ def _enumerate_runtime_modules() -> list:
 
 
 def _check_imports() -> None:
-    """起動 path モジュールが import 可能か (構文エラー・import 例外検出)。
+    """Check fresh imports in a disposable interpreter, never reload live modules.
 
-    既に import 済 (smoke で main.py から走る場合) は reload で再評価、
-    未 import (test 環境) は新規 import_module。書換え後の構文エラーや
-    import 時に raise する例外を本検査で捕捉する。
-
-    検査対象 (Issue 5 fix 2026-05-02 で範囲拡張):
-      - 既存 hardcode (起動時必ず通る fixed path):
-          core.controller / tools
-      - 動的列挙 (書換え可能 + 起動時必ず通る path):
-          core.runtime.* (pkgutil.iter_modules で `core/runtime/` 配下を walk)
-
-    `core/` 直下の memory.py / embedding.py / world_model.py 等は **lazy
-    import 設計** (LM Studio 接続 / bge-m3 model load 等の副作用) のため
-    本検査の対象外。PEP 810 lazy import (Python 2026) トレンドとも整合。
+    Keep the original import coverage and import-time exception detection. The
+    child uses this profile and interpreter; -B prevents cache writes. A failed
+    or timed-out check follows the existing SanityCheckError/revert path.
     """
-    fixed_modules = ("core.controller", "tools")
-    runtime_modules = _enumerate_runtime_modules()
-    for mod_name in (*fixed_modules, *runtime_modules):
-        try:
-            if mod_name in sys.modules:
-                importlib.reload(sys.modules[mod_name])
-            else:
-                importlib.import_module(mod_name)
-        except Exception as e:
-            raise SanityCheckError(
-                f"{mod_name} の import 失敗: {type(e).__name__}: {e}"
-            )
+    script = (
+        "import importlib\n"
+        "from core.sanity_check import _enumerate_runtime_modules\n"
+        "for name in ('core.controller', 'tools', *_enumerate_runtime_modules()):\n"
+        "    importlib.import_module(name)\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SanityCheckError(
+            f"import check process failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "no diagnostic output")[-4000:]
+        raise SanityCheckError(f"import check failed (exit={result.returncode}): {detail}")
 
 
-def _run_all_checks(profile_root: Path) -> None:
+
+def _run_all_checks(profile_root: Path, *, recover_state=False) -> None:
     """全 sanity check を実行、失敗時は SanityCheckError を伝播。"""
-    _check_state_json(profile_root)
+    if not recover_state:
+        _check_state_json(profile_root)
     _check_memory_jsons(profile_root)
     _check_imports()
 
@@ -188,6 +190,7 @@ def enforce_sanity_check(
     profile_name: str,
     *,
     auto_revert: bool = True,
+    recover_state: bool = False,
 ) -> None:
     """段階12 Step 6 (PLAN §10): 起動時 sanity check + 自動 revert ガード。
 
@@ -195,12 +198,14 @@ def enforce_sanity_check(
         profile_root: プロファイル workspace root
         profile_name: プロファイル名 (stash filter 用)
         auto_revert: True で失敗時に最新 iku-auto stash で自動 revert を 1 回試行
+        recover_state: main 起動時のみ True。state の診断を世代復旧に任せる。
 
     Raises:
         SystemExit(1): revert しても失敗、または auto_revert=False で失敗時。
     """
+    check_options = {"recover_state": True} if recover_state else {}
     try:
-        _run_all_checks(profile_root)
+        _run_all_checks(profile_root, **check_options)
         return  # 全 OK
     except SanityCheckError as e:
         print()
@@ -220,7 +225,7 @@ def enforce_sanity_check(
         sys.exit(1)
 
     try:
-        _run_all_checks(profile_root)
+        _run_all_checks(profile_root, **check_options)
         print(
             f"[sanity_check] revert 成功、起動続行 "
             f"(前回の改変は revert されました)"

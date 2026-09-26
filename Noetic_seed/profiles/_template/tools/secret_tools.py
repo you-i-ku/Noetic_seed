@@ -2,6 +2,7 @@
 read_file / write_file からは sandbox/secrets/ を touch できない（builtin 側でガード）。
 secret_write は承認必須（新しい秘密の書き込みは人間の合意を取る）。
 secret_read は承認不要（書き込まれた秘密を iku が使うための通常操作）。"""
+from core.runtime.registry import ToolError
 import re
 from pathlib import Path
 from core.config import SANDBOX_DIR
@@ -34,23 +35,25 @@ def secret_read(args: dict) -> str:
     name = str(args.get("name", "")).strip()
     err = _validate_name(name)
     if err:
-        return f"エラー: {err}"
+        raise ToolError(f"エラー: {err}")
 
-    path = _secret_path(name)
-    if not path.exists():
+    path = _SECRETS_DIR / name
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         # ファイル名風（拡張子付き）なら混同の可能性が高い → 明示的なヒント
         if "." in name:
-            return (
+            raise ToolError(
                 f"該当なし: sandbox/secrets/{name}\n"
                 f"※ secret_read は sandbox/secrets/ 配下の iku 固有の秘密情報用です。\n"
                 f"※ プロファイル直下の secrets.json（auth_profiles / llm_providers）は別物で、"
                 f"auth_profile_info ツールで型情報のみ参照できます。"
             )
-        return f"該当なし: sandbox/secrets/{name}"
-    try:
-        content = path.read_text(encoding="utf-8")
+        raise ToolError(f"該当なし: sandbox/secrets/{name}")
     except Exception as e:
-        return f"エラー: 読込失敗 {type(e).__name__}: {str(e)[:100]}"
+        # Even ToolError may carry file contents; expose only the exception type.
+        raise ToolError(f"エラー: 読込失敗 {type(e).__name__}: [REDACTED]",
+                        detail={"exception_type": type(e).__name__}) from None
 
     return f"[secret_read] {name}\n{content}"
 
@@ -64,16 +67,16 @@ def secret_write(args: dict) -> str:
 
     err = _validate_name(name)
     if err:
-        return f"エラー: {err}"
+        raise ToolError(f"エラー: {err}")
 
     if len(content.encode("utf-8")) > _MAX_SIZE_BYTES:
-        return f"エラー: content が上限 {_MAX_SIZE_BYTES} bytes を超過"
+        raise ToolError(f"エラー: content が上限 {_MAX_SIZE_BYTES} bytes を超過")
 
     intent = str(args.get("intent", ""))
     message = str(args.get("message", ""))
     preview_lines = [
         f"[secret_write] name={name}",
-        f"content 先頭: {content[:100]}",
+        "content: [REDACTED]",
         f"長さ: {len(content)}字",
     ]
     if intent:
@@ -83,13 +86,21 @@ def secret_write(args: dict) -> str:
     preview_lines.append("承認しますか？")
     preview = "\n".join(preview_lines)
 
-    if not request_approval("secret_write", preview, timeout_sec=120):
-        return f"キャンセル: secret '{name}' の書き込みは承認されませんでした"
-
-    path = _secret_path(name)
     try:
+        approved = request_approval("secret_write", preview, timeout_sec=120)
+    except Exception as e:
+        # Do not propagate callback exception text or arbitrary ToolError detail:
+        # the approval callback has seen the secret being written.
+        raise ToolError("エラー: 書き込み承認の取得失敗", detail={"exception_type": type(e).__name__}) from None
+    if not approved:
+        raise ToolError(f"キャンセル: secret '{name}' の書き込みは承認されませんでした")
+
+    try:
+        path = _secret_path(name)
         path.write_text(content, encoding="utf-8")
     except Exception as e:
-        return f"エラー: 書き込み失敗 {type(e).__name__}: {str(e)[:100]}"
+        # Even ToolError may carry file contents; expose only the exception type.
+        raise ToolError(f"エラー: 書き込み失敗 {type(e).__name__}: [REDACTED]",
+                        detail={"exception_type": type(e).__name__}) from None
 
     return f"[secret_write] {name} 書き込み完了 ({len(content)}字)"

@@ -6,6 +6,8 @@ _HIDDEN_ALWAYS / _is_hidden / _find_similar_files / _format_not_found は
 view_image/listen_audio の "file not found" 時のサジェスト機能で利用される。
 """
 import time
+import math
+from core.runtime.registry import ToolError, ToolResult, result_redactor
 from core.config import BASE_DIR, SANDBOX_DIR
 from core.state import load_state, save_state
 
@@ -51,12 +53,18 @@ def _find_similar_files(query_path: str, max_results: int = 3, min_ratio: float 
                         # Windows でも / 区切りで返す（プロンプトで統一表示）
                         rel = f.relative_to(BASE_DIR).as_posix()
                         scored.append((ratio, rel))
+                    except ToolError:
+                        raise
                     except Exception:
                         pass
+            except ToolError:
+                raise
             except Exception:
                 continue
         scored.sort(key=lambda x: (-x[0], len(x[1])))
         return scored[:max_results]
+    except ToolError:
+        raise
     except Exception:
         return []
 
@@ -87,7 +95,7 @@ def _view_image(args: dict) -> str:
 
     path = args.get("path", "").strip()
     if not path:
-        return "該当なし: path= が指定されていません。対象のパスまたは URL を指定してください"
+        raise ToolError("該当なし: path= が指定されていません。対象のパスまたは URL を指定してください")
 
     fetched_meta = None
     if is_url(path):
@@ -96,17 +104,19 @@ def _view_image(args: dict) -> str:
             cache_dir = SANDBOX_DIR / "captures" / "url_cache"
             saved, fetched_meta = fetch_to_file(path, cache_dir, kind="image")
             target = saved.resolve()
+        except ToolError:
+            raise
         except Exception as e:
-            return f"エラー: URL取得失敗: {type(e).__name__}: {e}"
+            raise ToolError(f"エラー: URL取得失敗: {type(e).__name__}: {e}")
     else:
         target = (BASE_DIR / path).resolve()
-        if not str(target).startswith(str(BASE_DIR.resolve())):
-            return "エラー: プロファイル外のファイルは対象外です"
+        if not target.is_relative_to(BASE_DIR.resolve()):
+            raise ToolError("エラー: プロファイル外のファイルは対象外です")
         if not target.exists():
             similar = _find_similar_files(path)
-            return _format_not_found(path, similar)
+            raise ToolError(_format_not_found(path, similar), detail={"path": path})
         if target.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
-            return "エラー: JPG/PNG/WebP のみ対応"
+            raise ToolError("エラー: JPG/PNG/WebP のみ対応")
 
     # 同期で LLM を呼んで画像を描写させる
     intent = args.get("intent", "").strip()
@@ -127,16 +137,22 @@ def _view_image(args: dict) -> str:
             image_paths=[str(target)],
         )
         description = description.strip()
+    except ToolError:
+        raise
     except Exception as e:
-        return f"エラー: 画像認識失敗: {e}"
+        raise ToolError(f"エラー: 画像認識失敗: {e}")
 
     if fetched_meta:
-        return (
+        message = (
             f"画像で見えたもの ({path}, {fetched_meta['bytes']} bytes, {fetched_meta['content_type']}):\n"
             f"{description}"
         )
-    rel_path = str(target.relative_to(BASE_DIR)).replace("\\", "/")
-    return f"画像で見えたもの ({rel_path}):\n{description}"
+    else:
+        rel_path = str(target.relative_to(BASE_DIR)).replace("\\", "/")
+        message = f"画像で見えたもの ({rel_path}):\n{description}"
+    if not description:
+        raise ToolError(message, detail={"path": path, "description_length": 0})
+    return message
 
 
 def _listen_audio(args: dict) -> str:
@@ -153,7 +169,7 @@ def _listen_audio(args: dict) -> str:
 
     path = args.get("path", "").strip()
     if not path:
-        return "該当なし: path= が指定されていません。対象のパスまたは URL を指定してください"
+        raise ToolError("該当なし: path= が指定されていません。対象のパスまたは URL を指定してください")
     language = (args.get("language", "") or "").strip() or None
 
     fetched_meta = None
@@ -162,23 +178,27 @@ def _listen_audio(args: dict) -> str:
             cache_dir = SANDBOX_DIR / "audio" / "url_cache"
             saved, fetched_meta = fetch_to_file(path, cache_dir, kind="audio")
             target = saved.resolve()
+        except ToolError:
+            raise
         except Exception as e:
-            return f"エラー: URL取得失敗: {type(e).__name__}: {e}"
+            raise ToolError(f"エラー: URL取得失敗: {type(e).__name__}: {e}")
     else:
         target = (BASE_DIR / path).resolve()
-        if not str(target).startswith(str(BASE_DIR.resolve())):
-            return "エラー: プロファイル外のファイルは対象外です"
+        if not target.is_relative_to(BASE_DIR.resolve()):
+            raise ToolError("エラー: プロファイル外のファイルは対象外です")
         if not target.exists():
             similar = _find_similar_files(path)
-            return _format_not_found(path, similar)
+            raise ToolError(_format_not_found(path, similar), detail={"path": path})
         if target.suffix.lower() not in (".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm"):
-            return "エラー: 対応形式は WAV/MP3/M4A/OGG/FLAC/AAC/WEBM のみ"
+            raise ToolError("エラー: 対応形式は WAV/MP3/M4A/OGG/FLAC/AAC/WEBM のみ")
 
     try:
         from core.audio import analyze_audio, format_audio_result
         result = analyze_audio(str(target), language=language)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"エラー: 音声解析失敗: {type(e).__name__}: {e}"
+        raise ToolError(f"エラー: 音声解析失敗: {type(e).__name__}: {e}")
 
     # ファイルの長さを av で取得（メタ表示用）
     try:
@@ -186,14 +206,25 @@ def _listen_audio(args: dict) -> str:
         with av.open(str(target)) as container:
             stream = container.streams.audio[0]
             duration_sec = float(stream.duration * stream.time_base) if stream.duration else 0.0
+    except ToolError:
+        raise
     except Exception:
         duration_sec = 0.0
 
     formatted = format_audio_result(result, duration_sec)
     if fetched_meta:
-        return f"{formatted}\nソース: {path} ({fetched_meta['bytes']} bytes, {fetched_meta['content_type']})"
-    rel = str(target.relative_to(BASE_DIR)).replace("\\", "/")
-    return f"{formatted}\nソース: {rel}"
+        message = f"{formatted}\nソース: {path} ({fetched_meta['bytes']} bytes, {fetched_meta['content_type']})"
+    else:
+        rel = str(target.relative_to(BASE_DIR)).replace("\\", "/")
+        message = f"{formatted}\nソース: {rel}"
+    succeeded = {side: result.get(side) is not None for side in ("speech", "ambient")}
+    if not all(succeeded.values()):
+        detail = {"speech_succeeded": succeeded["speech"],
+                  "ambient_succeeded": succeeded["ambient"], "errors": result.get("errors", [])}
+        if not any(succeeded.values()):
+            raise ToolError(message, detail=detail)
+        return ToolResult(message, detail=detail)
+    return message
 
 
 def _update_self(key: str, value: str, confidence=None) -> str:
@@ -213,19 +244,27 @@ def _update_self(key: str, value: str, confidence=None) -> str:
     (NAME_KEY は _efe_self_confidence に含めない、_efe_C source からも自動除外)。
     """
     if not key:
-        return "エラー: keyが空です"
+        raise ToolError("エラー: keyが空です")
     state = load_state()
     if key == "name":
         current = str(state["self"].get("name", "")).strip()
         if current:
-            return f"エラー: nameは既に「{current}」として確定しています。変更できません"
+            raise ToolError(f"エラー: nameは既に「{current}」として確定しています。変更できません")
         if not value.strip():
-            return "エラー: 空のnameは設定できません"
+            raise ToolError("エラー: 空のnameは設定できません")
         # 段階11-C sub-B: identity name guard (LLM 役割語ブロック、cycle 1 汚染防止)
         from core.identity_guard import validate_identity_name
         ok, msg = validate_identity_name(value)
         if not ok:
-            return msg
+            raise ToolError(msg)
+    from core.preference_distribution import DEFAULT_CONFIDENCE, NAME_KEY
+    if key != NAME_KEY:
+        try:
+            conf_val = DEFAULT_CONFIDENCE if confidence is None else float(confidence)
+        except (TypeError, ValueError) as e:
+            raise ToolError(str(e), detail={"key": key, "confidence": confidence}) from e
+        if not math.isfinite(conf_val) or not 0.0 <= conf_val <= 1.0:
+            raise ToolError("confidence must be between 0.0 and 1.0", detail={"key": key, "confidence": confidence})
     state["self"][key] = value
     ds = state.setdefault("drives_state", {})
     ds["last_self_update"] = time.time()
@@ -238,7 +277,6 @@ def _update_self(key: str, value: str, confidence=None) -> str:
     from core.preference_distribution import DEFAULT_CONFIDENCE, NAME_KEY
     if key != NAME_KEY:
         state.setdefault("_efe_self_confidence", {})
-        conf_val = DEFAULT_CONFIDENCE if confidence is None else float(confidence)
         state["_efe_self_confidence"][key] = conf_val
     # NAME_KEY の場合: confidence 引数は無視 (silently ignore、ToolSpec docstring 記載済)
 
@@ -279,7 +317,8 @@ def _wait_or_dismiss(args: dict) -> str:
                 dismiss_id = target[0]["id"]  # 正規 id に置換 (後続 log 用)
 
     if not target:
-        return f"[dismiss] id={dismiss_id} は未対応リストにありません"
+        raise ToolError(f"[dismiss] id={dismiss_id} は未対応リストにありません",
+                        detail={"dismiss_id": dismiss_id, "pending_count": len(pending)})
     state["pending"] = [p for p in pending if p.get("id") != dismiss_id]
     # 外部由来 pending の場合: カウンター減算 (圧力は余韻として残す)
     # UPS v2: type='pending' + source_action='living_presence' + channel='device'
@@ -299,4 +338,4 @@ def _wait_or_dismiss(args: dict) -> str:
     # 段階10.5 Fix 2 漏れ補完: PendingEntry スキーマ変更後 (content → content_intent)
     # の表示反映。旧 content フィールドは新形式では空なので content_intent fallback。
     _display = _t.get("content_intent") or _t.get("content", "")
-    return f"[dismiss] {_t.get('type','?')}: {_display[:50]} を却下しました"
+    return f"[dismiss] {_t.get('type','?')}: {result_redactor()(_display)[:50]} を却下しました"

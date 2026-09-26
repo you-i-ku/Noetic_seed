@@ -3,13 +3,13 @@
 検査項目:
   - _check_state_json: 正常 / JSON 破損 / 必須キー欠落 / 不存在 (初回起動)
   - _check_memory_jsons: 正常 / 破損 JSON あり / memory/ 不存在 (初回起動)
-  - _check_imports: 実 module を mock (importlib + sys.modules)
+  - _check_imports: 別プロセスの実 import、構文・実行時例外、起動失敗・timeout
   - _enumerate_runtime_modules: 実 walk + package broken 検出 (Issue 5 fix)
   - enforce_sanity_check: 成功経路 / 失敗 + revert 成功 / 失敗 + stash なし /
     auto_revert=False 失敗
 
-実 module の import / 実 git 操作はせず、_run_all_checks や
-_try_auto_revert_from_stash を mock してフロー検証する。
+一時 profile で検査し、実 git 操作はしない。
+_try_auto_revert_from_stash を mock して復元後の再検査も検証する。
 
 使い方:
   cd Noetic_seed/profiles/_template
@@ -17,10 +17,12 @@ _try_auto_revert_from_stash を mock してフロー検証する。
 """
 import importlib
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -189,17 +191,8 @@ def test_check_imports_runtime_module_failure_detected():
     """
     print("== _check_imports: core.runtime.* の import 失敗を検出 ==")
 
-    def fake_import(name):
-        if name == "core.runtime.fake_broken":
-            raise SyntaxError("simulate broken core.runtime.* file")
-        return None  # core.controller / tools / 他は success simulate
-
-    with patch.object(sanity_check, "_enumerate_runtime_modules",
-                      return_value=["core.runtime.fake_broken"]), \
-         patch.object(sanity_check.importlib, "import_module",
-                      side_effect=fake_import), \
-         patch.object(sanity_check.importlib, "reload",
-                      return_value=None):
+    result = subprocess.CompletedProcess([], 1, "", "SyntaxError: core.runtime.fake_broken")
+    with patch.object(sanity_check.subprocess, "run", return_value=result):
         try:
             _check_imports()
             return _assert(False, "raise されるべき")
@@ -208,6 +201,51 @@ def test_check_imports_runtime_module_failure_detected():
                 "core.runtime.fake_broken" in str(e),
                 f"reason に 'core.runtime.fake_broken' 含む (実測: {e})",
             )
+
+
+@pytest.mark.parametrize("source,diagnostic", [
+    ("def invalid(:\n", "SyntaxError"),
+    ("raise RuntimeError('import-time failure')\n", "import-time failure"),
+])
+def test_fresh_child_detects_disk_errors_and_revert_rechecks(tmp_path, monkeypatch, source, diagnostic):
+    # A miniature profile runs the real subprocess path, without external APIs.
+    for relative in ("core/__init__.py", "core/controller.py", "core/runtime/__init__.py", "tools/__init__.py"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    target = tmp_path / "core/runtime/broken.py"
+    target.write_text(source, encoding="utf-8")
+    checker = tmp_path / "core/sanity_check.py"
+    checker.write_text(Path(sanity_check.__file__).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(sanity_check, "__file__", str(checker))
+    with pytest.raises(SanityCheckError, match=diagnostic):
+        sanity_check._check_imports()
+    def revert(*args):
+        target.write_text("answer = 42\n", encoding="utf-8")
+        return True
+    with patch.object(sanity_check, "_try_auto_revert_from_stash", side_effect=revert) as restore:
+        sanity_check.enforce_sanity_check(tmp_path, "test")
+        restore.assert_called_once()
+    assert not list(tmp_path.rglob("*.pyc"))
+
+
+@pytest.mark.parametrize("error", [OSError("cannot launch"), subprocess.TimeoutExpired("python", 60)])
+def test_import_probe_launch_failure_and_timeout(error):
+    with patch.object(sanity_check.subprocess, "run", side_effect=error):
+        with pytest.raises(SanityCheckError, match=type(error).__name__):
+            sanity_check._check_imports()
+
+
+def test_import_probe_uses_profile_interpreter_and_no_parent_reload():
+    result = subprocess.CompletedProcess([], 0, "", "")
+    with patch.object(sanity_check.subprocess, "run", return_value=result) as run, \
+         patch.object(sanity_check.importlib, "reload", side_effect=AssertionError("live reload")):
+        sanity_check._check_imports()
+    args, kwargs = run.call_args
+    assert args[0][:3] == [sys.executable, "-B", "-c"]
+    assert "_enumerate_runtime_modules" in args[0][3]
+    assert kwargs["cwd"] == Path(sanity_check.__file__).resolve().parents[1]
+    assert kwargs["timeout"] == 60
 
 
 def test_enforce_success_returns_none():

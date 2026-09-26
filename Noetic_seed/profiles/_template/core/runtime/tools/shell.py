@@ -49,7 +49,7 @@ def _find_bash_executable() -> Optional[str]:
     return None
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError, result_redactor
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -64,7 +64,7 @@ _bg_tasks: dict = {}
 def bash(inp: dict) -> str:
     command = (inp.get("command") or "").strip()
     if not command:
-        return "Error: command is required"
+        raise ToolError("Error: command is required")
 
     timeout = int(inp.get("timeout", 120))
     timeout = max(1, min(timeout, 600))
@@ -72,11 +72,11 @@ def bash(inp: dict) -> str:
 
     bash_path = _find_bash_executable()
     if not bash_path:
-        return (
+        raise ToolError((
             "Error: bash not found. "
             "Windows の場合は Git for Windows (https://git-scm.com/) を "
             "インストールしてください (C:\\Program Files\\Git\\bin\\bash.exe 等を自動検出)。"
-        )
+        ))
 
     if run_bg:
         return _spawn_background([bash_path, "-c", command])
@@ -88,12 +88,19 @@ def bash(inp: dict) -> str:
             encoding="utf-8", errors="replace",
             timeout=timeout,
         )
-    except subprocess.TimeoutExpired:
-        return f"Error: timeout after {timeout}s"
+    except subprocess.TimeoutExpired as e:
+        raise ToolError(f"Error: timeout after {timeout}s",
+                        detail=_process_detail(command, None, e.stdout, e.stderr, timeout)) from e
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: {type(e).__name__}: {e}"
+        raise ToolError(f"Error: {type(e).__name__}: {e}")
 
-    return _format_result(result.stdout, result.stderr, result.returncode)
+    message = _format_result(result.stdout, result.stderr, result.returncode)
+    if result.returncode != 0:
+        raise ToolError(message, detail=_process_detail(command, result.returncode,
+                                                       result.stdout, result.stderr))
+    return message
 
 
 # ============================================================
@@ -103,7 +110,7 @@ def bash(inp: dict) -> str:
 def powershell(inp: dict) -> str:
     command = (inp.get("command") or "").strip()
     if not command:
-        return "Error: command is required"
+        raise ToolError("Error: command is required")
 
     timeout = int(inp.get("timeout", 120))
     timeout = max(1, min(timeout, 600))
@@ -111,7 +118,7 @@ def powershell(inp: dict) -> str:
 
     pwsh_path = shutil.which("pwsh") or shutil.which("powershell")
     if not pwsh_path:
-        return "Error: powershell not found in PATH"
+        raise ToolError("Error: powershell not found in PATH")
 
     args = [pwsh_path, "-NoProfile", "-Command", command]
     if run_bg:
@@ -125,9 +132,11 @@ def powershell(inp: dict) -> str:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return f"Error: timeout after {timeout}s"
+        raise ToolError(f"Error: timeout after {timeout}s")
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: {type(e).__name__}: {e}"
+        raise ToolError(f"Error: {type(e).__name__}: {e}")
 
     return _format_result(result.stdout, result.stderr, result.returncode)
 
@@ -157,14 +166,14 @@ def repl(inp: dict) -> str:
     timeout = max(1, timeout_ms // 1000)
 
     if not code:
-        return "Error: code is required"
+        raise ToolError("Error: code is required")
     if not language:
-        return "Error: language is required"
+        raise ToolError("Error: language is required")
 
     interp_options = _REPL_INTERPRETERS.get(language)
     if not interp_options:
-        return (f"Error: unsupported language '{language}'. "
-                f"Supported: {list(_REPL_INTERPRETERS.keys())}")
+        raise ToolError((f"Error: unsupported language '{language}'. "
+                f"Supported: {list(_REPL_INTERPRETERS.keys())}"))
 
     interp = None
     for option in interp_options:
@@ -172,7 +181,7 @@ def repl(inp: dict) -> str:
             interp = option
             break
     if interp is None:
-        return f"Error: no interpreter found for '{language}'"
+        raise ToolError(f"Error: no interpreter found for '{language}'")
 
     try:
         result = subprocess.run(
@@ -182,9 +191,11 @@ def repl(inp: dict) -> str:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return f"Error: timeout after {timeout}s"
+        raise ToolError(f"Error: timeout after {timeout}s")
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: {type(e).__name__}: {e}"
+        raise ToolError(f"Error: {type(e).__name__}: {e}")
 
     return _format_result(result.stdout, result.stderr, result.returncode)
 
@@ -192,6 +203,22 @@ def repl(inp: dict) -> str:
 # ============================================================
 # 共通
 # ============================================================
+
+
+def _process_detail(command, returncode, stdout, stderr, timeout=None):
+    """Facts only; redact before retaining output tails."""
+    redact = result_redactor()
+    detail = {"command": command, "returncode": returncode}
+    for key, value in (("stdout", stdout), ("stderr", stderr)):
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        text = redact(value or "")
+        detail[key] = text[-2048:]
+        if len(text) > 2048:
+            detail["_truncated"] = True
+    if timeout is not None:
+        detail["timeout"] = timeout
+    return detail
 
 def _spawn_background(args: list) -> str:
     task_id = f"bg_{uuid.uuid4().hex[:8]}"
@@ -201,8 +228,10 @@ def _spawn_background(args: list) -> str:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             encoding="utf-8", errors="replace",
         )
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: spawn failed: {e}"
+        raise ToolError(f"Error: spawn failed: {e}")
     _bg_tasks[task_id] = {"proc": proc, "args": args}
     return f"Started in background: backgroundTaskId={task_id} pid={proc.pid}"
 

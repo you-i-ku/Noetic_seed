@@ -5,6 +5,7 @@ claw-code の rust/crates/runtime/src/conversation.rs:126-189 の Python port。
 厳密 claw-code 準拠。Noetic 固有 (E値評価, 承認3層, pressure駆動) は
 hook handler / approval_callback として外部から注入する形で接続する想定。
 """
+from core.state import state_locked
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -15,7 +16,8 @@ from core.runtime.permissions import (
     PermissionEnforcer,
     PermissionMode,
 )
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import (ToolRegistry, ToolError, ToolResult, result_redactor,
+                                   normalize_detail, exception_detail)
 from core.runtime.session import Session
 
 
@@ -29,9 +31,14 @@ class ToolInvocationRecord:
     tool_input: dict
     output: str = ""
     is_error: bool = False
+    error_kind: Optional[str] = None
+    detail: object = None
+    detail_error: Optional[str] = None
     permission_decision: Optional[str] = None
     pre_hook_messages: list = field(default_factory=list)
     post_hook_messages: list = field(default_factory=list)
+    # Only successful secret_read has a separate, unmodified provider body.
+    provider_output: Optional[str] = field(default=None, repr=False)
 
 
 @dataclass
@@ -118,11 +125,17 @@ class ConversationRuntime:
                         tool_name=inv["tool_name"],
                         tool_input=inv["tool_input"],
                         output=inv["output"],
+                        provider_output=inv.pop("provider_output", None),
                         is_error=inv["is_error"],
+                        error_kind=inv.get("error_kind"),
+                        detail=inv.get("detail"),
+                        detail_error=inv.get("detail_error"),
                     )
                     summary.tool_invocations.append(rec)
                     self.session.push_tool_result(
                         rec.tool_id, rec.output, is_error=rec.is_error,
+                        provider_content=rec.provider_output,
+                        detail=rec.detail, detail_error=rec.detail_error,
                     )
                 summary.finish_reason = "completed_in_provider"
                 break
@@ -218,11 +231,17 @@ class ConversationRuntime:
                         tool_name=inv["tool_name"],
                         tool_input=inv["tool_input"],
                         output=inv["output"],
+                        provider_output=inv.pop("provider_output", None),
                         is_error=inv["is_error"],
+                        error_kind=inv.get("error_kind"),
+                        detail=inv.get("detail"),
+                        detail_error=inv.get("detail_error"),
                     )
                     summary.tool_invocations.append(rec)
                     self.session.push_tool_result(
                         rec.tool_id, rec.output, is_error=rec.is_error,
+                        provider_content=rec.provider_output,
+                        detail=rec.detail, detail_error=rec.detail_error,
                     )
                 summary.finish_reason = "completed_in_provider"
                 break
@@ -274,6 +293,7 @@ class ConversationRuntime:
         req = ApiRequest(
             system_prompt=system_prompt_override or self.system_prompt,
             messages=messages,
+            observation_messages=self._serialize_messages(for_observation=True),
             tools=tool_specs,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
@@ -282,13 +302,13 @@ class ConversationRuntime:
         )
         return self.provider.stream(req)
 
-    def _serialize_messages(self) -> list:
+    def _serialize_messages(self, *, for_observation=False) -> list:
         name = getattr(self.provider, "name", "")
         # claude_code は stream-json input 経路で Anthropic native content block を
         # 受け付ける (実機確認済み 2026-04-27) ので anthropic と同じ serializer。
         if name in ("anthropic", "claude_code"):
-            return self.session.serialize_for_anthropic()
-        return self.session.serialize_for_openai()
+            return self.session.serialize_for_anthropic(for_observation=for_observation)
+        return self.session.serialize_for_openai(for_observation=for_observation)
 
     def _build_tool_specs_for_provider(
         self, filter_names: Optional[set] = None,
@@ -303,6 +323,7 @@ class ConversationRuntime:
             return [s.to_anthropic_format() for s in specs]
         return [s.to_openai_format() for s in specs]
 
+    @state_locked
     def _execute_tool_use(self, tool_id: str, tool_name: str,
                           tool_input: dict,
                           push_session: bool = True) -> ToolInvocationRecord:
@@ -319,18 +340,21 @@ class ConversationRuntime:
             tool_id=tool_id, tool_name=tool_name, tool_input=tool_input,
         )
 
+        redact = result_redactor()
         pre = self.hook_runner.run_pre_tool_use(tool_name, tool_input)
-        rec.pre_hook_messages = list(pre.messages)
+        rec.pre_hook_messages = [redact(m) for m in pre.messages]
         current_input = pre.updated_input or tool_input
 
         if pre.denied:
-            detail = _format_pre_hook_detail(pre.messages)
+            detail = _format_pre_hook_detail(rec.pre_hook_messages)
             self._finalize(rec, f"[REJECTED] denied by pre hook{detail}",
-                           is_error=True, push_session=push_session)
+                           is_error=True, push_session=push_session,
+                           error_kind="rejected", redact=redact)
             return rec
         if pre.failed:
             self._finalize(rec, "[REJECTED] pre hook failed",
-                           is_error=True, push_session=push_session)
+                           is_error=True, push_session=push_session,
+                           error_kind="rejected", redact=redact)
             return rec
 
         decision = self.permission_enforcer.check(tool_name, current_input)
@@ -338,7 +362,8 @@ class ConversationRuntime:
 
         if decision == PermissionDecision.DENY:
             self._finalize(rec, "[REJECTED] permission denied",
-                           is_error=True, push_session=push_session)
+                           is_error=True, push_session=push_session,
+                           error_kind="rejected", redact=redact)
             return rec
 
         if decision == PermissionDecision.ASK:
@@ -346,34 +371,51 @@ class ConversationRuntime:
                                           rec.pre_hook_messages)
             if not approved:
                 self._finalize(rec, "[REJECTED] approval denied",
-                               is_error=True, push_session=push_session)
+                               is_error=True, push_session=push_session,
+                               error_kind="rejected", redact=redact)
                 return rec
 
         try:
+            rec.tool_input = current_input
             output = self.tool_registry.execute(tool_name, current_input)
         except Exception as e:
-            err = f"tool execution error: {e}"
-            self.hook_runner.run_post_tool_use_failure(
-                tool_name, current_input, err
+            expected = isinstance(e, ToolError)
+            detail = e.detail if expected else exception_detail(e)
+            if not expected:
+                for name in ("stdout", "stderr", "output"):
+                    if isinstance(detail.get(name), str):
+                        text = redact(detail[name])
+                        detail[name] = text[-2048:]
+                        if len(text) > 2048:
+                            detail["_truncated"] = True
+            self._finalize(
+                rec, str(e) if expected else f"tool execution error: {e}",
+                is_error=True, push_session=push_session,
+                error_kind="tool_failure" if expected else "exception",
+                detail=detail, redact=redact,
             )
-            self._finalize(rec, err, is_error=True, push_session=push_session)
+            post = self.hook_runner.run_post_tool_use_failure(
+                tool_name, current_input, rec.output
+            )
+            rec.post_hook_messages = [redact(m) for m in post.messages]
             return rec
 
+        detail = output.detail if isinstance(output, ToolResult) else None
+        message = output.message if isinstance(output, ToolResult) else output
+        self._finalize(rec, message, is_error=False, push_session=push_session,
+                       detail=detail, redact=redact)
         post = self.hook_runner.run_post_tool_use(
-            tool_name, current_input, output, tool_id=tool_id
+            tool_name, current_input, rec.output, tool_id=tool_id
         )
-        rec.post_hook_messages = list(post.messages)
-
+        rec.post_hook_messages = [redact(m) for m in post.messages]
         rec.tool_input = current_input
-        self._finalize(rec, output, is_error=False,
-                       push_session=push_session)
         return rec
 
     def _make_tool_executor(self):
         """claude_code provider 用の tool 実行 callback を生成。
 
         ApiRequest.tool_executor として provider に渡される。in-process MCP の
-        handler 内から `(tool_id, tool_name, tool_input) -> (output, is_error)`
+        handler 内から `(tool_id, tool_name, tool_input) -> ToolInvocationRecord`
         の形で呼ばれて、ConversationRuntime の hook + permission + approval
         ロジックを完全経由する (= Anthropic / OpenAI 経路と同じ確認手順)。
 
@@ -384,17 +426,26 @@ class ConversationRuntime:
             rec = self._execute_tool_use(
                 tool_id, tool_name, tool_input, push_session=False,
             )
-            return rec.output, rec.is_error
+            return rec
         return executor
 
     def _finalize(self, rec: ToolInvocationRecord,
                   output: str, is_error: bool,
-                  push_session: bool = True) -> None:
-        rec.output = output
+                  push_session: bool = True, *, error_kind=None, detail=None,
+                  redact=None) -> None:
+        redact = redact or result_redactor()
+        rec.output = redact(output)
+        rec.provider_output = str(output) if rec.tool_name == "secret_read" and not is_error else None
+        if rec.provider_output is not None:
+            rec.output = redact(f"[secret_read] {rec.tool_input.get('name', '')}\n[REDACTED]")
         rec.is_error = is_error
+        rec.error_kind = error_kind
+        rec.detail, rec.detail_error = normalize_detail(detail, redact)
         if push_session:
-            self.session.push_tool_result(rec.tool_id, output,
-                                           is_error=is_error)
+            self.session.push_tool_result(rec.tool_id, rec.output,
+                                          is_error=is_error, provider_content=rec.provider_output,
+                                          detail=rec.detail,
+                                          detail_error=rec.detail_error)
 
     def _ask_approval(self, tool_name: str, tool_input: dict,
                       pre_messages: list) -> bool:

@@ -21,9 +21,11 @@ API: world_fact_view(args)
 feedback_llm_as_brain 整合)。
 """
 import json
+from core.runtime.registry import ToolError
+from core.memory_read import MemoryReadReport, read_memory_jsonl
 from typing import Optional
 
-from core.state import load_state
+from core.config import MEMORY_DIR
 
 
 DEFAULT_LIMIT = 20
@@ -75,14 +77,14 @@ def _summarize_event(entry: dict, result_cap: int = 200) -> dict:
 def _world_fact_view(args: dict) -> str:
     """world_fact_view tool 本体。raw_events.jsonl の view を返す。
 
-    LLM が呼ぶ entry point。state は load_state で fresh 取得。
+    JSONL を直接読み、live の view を置き換えずに読み込み診断を返す。
     """
     mode = str(args.get("mode", "recent")).strip() or "recent"
     if mode not in ("recent", "by_tool", "by_channel"):
-        return json.dumps({
+        raise ToolError(json.dumps({
             "error": f"unknown mode: {mode}",
             "valid_modes": ["recent", "by_tool", "by_channel"],
-        }, ensure_ascii=False)
+        }, ensure_ascii=False))
 
     filter_tool = args.get("filter_tool")
     if filter_tool is not None:
@@ -92,18 +94,18 @@ def _world_fact_view(args: dict) -> str:
         filter_channel = str(filter_channel).strip() or None
 
     if mode == "by_tool" and not filter_tool:
-        return json.dumps({
+        raise ToolError(json.dumps({
             "error": "mode=by_tool requires filter_tool",
-        }, ensure_ascii=False)
+        }, ensure_ascii=False))
     if mode == "by_channel" and not filter_channel:
-        return json.dumps({
+        raise ToolError(json.dumps({
             "error": "mode=by_channel requires filter_channel",
-        }, ensure_ascii=False)
+        }, ensure_ascii=False))
 
     limit = _coerce_limit(args.get("limit"))
 
-    state = load_state()
-    raw_events = state.get("raw_events", [])
+    report = MemoryReadReport()
+    raw_events = read_memory_jsonl(MEMORY_DIR / "raw_events.jsonl", report=report)
     total = len(raw_events)
 
     filtered = _filter_events(raw_events, mode, filter_tool, filter_channel)
@@ -113,7 +115,7 @@ def _world_fact_view(args: dict) -> str:
     # 表示は時系列降順 (新しい→古い、LLM が直近を最初に見やすい)
     selected_view = [_summarize_event(e) for e in reversed(selected)]
 
-    return json.dumps({
+    return report.result(json.dumps({
         "mode": mode,
         "filter_tool": filter_tool,
         "filter_channel": filter_channel,
@@ -122,4 +124,4 @@ def _world_fact_view(args: dict) -> str:
         "matched": matched,
         "returned": len(selected_view),
         "events": selected_view,
-    }, ensure_ascii=False, indent=2)
+    }, ensure_ascii=False, indent=2))

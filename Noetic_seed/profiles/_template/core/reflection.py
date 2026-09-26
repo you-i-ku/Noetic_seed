@@ -17,7 +17,9 @@ NOTES (raw 気づき) と Disposition を更新。
 段階11-A Step 4 で導入された経路 (G3 log 分離 / G1 reflect_section) のうち、
 G3 (perspective ベース log 分離) は維持、G1 は Phase 5 で撤去。
 """
+from core.state import state_locked
 from datetime import datetime, timezone
+from core.runtime.registry import ToolError
 
 from core.cluster_estimation import estimate_clusters
 from core.memory import load_all_memories, memory_store
@@ -207,7 +209,7 @@ def _gather_dispositions_for_prompt(state: dict) -> tuple:
     return self_disp_values, attr_disps
 
 
-def reflect(state: dict, call_llm_fn) -> dict:
+def reflect(state: dict, call_llm_fn, *, strict=False) -> dict:
     """内省サイクル実行。LLM に直近の行動 + memory cluster 整理を振り返らせる。
 
     段階11-D Phase 5 Step 5.2: 入力に cluster 推定 (memory list 全体の
@@ -239,12 +241,25 @@ def reflect(state: dict, call_llm_fn) -> dict:
     # 段階11-D Phase 5 Step 5.2: cluster 推定 (posterior、永続化しない)
     memories = load_all_memories()
     memory_index = {m.get("id", ""): m for m in memories if m.get("id")}
+    cluster_failures = []
+    def cluster_llm(*args, **kwargs):
+        try:
+            return call_llm_fn(*args, **kwargs)
+        except Exception as e:
+            cluster_failures.append(e)
+            raise
     clusters = estimate_clusters(
         memories,
         method="hybrid",
         n_clusters=None,
-        llm_call_fn=call_llm_fn,
+        llm_call_fn=cluster_llm if strict else call_llm_fn,
     )
+    if strict and cluster_failures:
+        error = cluster_failures[0]
+        if isinstance(error, ToolError):
+            raise error
+        raise ToolError(f"エラー: {error}", detail={"phase": "cluster_llm",
+                        "exception_type": type(error).__name__, "message": str(error)}) from error
     cluster_sections = _build_cluster_sections(clusters, memory_index)
 
     # 段階11-D Phase 6 Step 6.2: cluster MI 計算 (観察のみ、log_cycle_metrics 経由 jsonl 永続化)
@@ -317,16 +332,25 @@ ATTRIBUTED_DISPOSITION:
 
 短く、具体的に。各 NOTE / DISPOSITION は独立に。"""
 
+    phase = "llm"
     try:
         text = call_llm_fn(prompt, max_tokens=1000, temperature=0.3)
         append_debug_log("Reflection", text)
-        parsed = _parse_reflection(text, state)
+        phase = "parse"
+        if strict:
+            _validate_reflection_response(text)
+        parsed = _parse_reflection(text, state, strict=True) if strict else _parse_reflection(text, state)
         # 段階11-D Phase 6 Step 6.2: 戻り値に MI 観察値を含める (新キー追加のみ、既存 test 影響なし)
         parsed.setdefault("cluster_mi", mi_metrics["cluster_mi"])
         parsed.setdefault("cluster_inter_ratio", mi_metrics["cluster_inter_ratio"])
         parsed.setdefault("cluster_link_pairs", mi_metrics["cluster_link_pairs"])
         return parsed
     except Exception as e:
+        if strict:
+            if isinstance(e, ToolError):
+                raise
+            raise ToolError(f"エラー: {e}", detail={"phase": phase,
+                            "exception_type": type(e).__name__, "message": str(e)}) from e
         print(f"  [reflection] エラー: {e}")
         return {
             "notes": [],
@@ -337,11 +361,13 @@ ATTRIBUTED_DISPOSITION:
         }
 
 
+@state_locked
 def reflect_and_persist(
     state: dict,
     call_llm_fn,
     save_state_fn=None,
     reflect_fn=None,
+    *, strict=False,
 ) -> dict:
     """reflect 実行 + reflection_cycle リセット + 永続化を 1 経路に集約。
 
@@ -378,13 +404,62 @@ def reflect_and_persist(
         save_state_fn = _default_save
     if reflect_fn is None:
         reflect_fn = reflect
-    result = reflect_fn(state, call_llm_fn)
+    result = reflect_fn(state, call_llm_fn, strict=True) if strict else reflect_fn(state, call_llm_fn)
     state["reflection_cycle"] = 0
     save_state_fn(state)
     return result
 
 
-def _parse_reflection(text: str, state: dict) -> dict:
+def _validate_reflection_response(text):
+    """Manual reflect only: validate the whole response before parsing writes notes.
+
+    Empty declared sections are valid zero results. Automatic reflection keeps
+    its historical permissive parser and fallback.
+    """
+    import re
+    import math
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("empty reflection response")
+    section = None
+    seen = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        upper = stripped.strip("#* :").upper()
+        for name in ("SELF_DISPOSITION", "ATTRIBUTED_DISPOSITION", "NOTES"):
+            if name == upper:
+                section = name
+                seen = True
+                break
+        else:
+            if not stripped or stripped.startswith("```"):
+                continue
+            if section is None or not stripped.startswith("-"):
+                raise ValueError("unparsed reflection line")
+            body = stripped.lstrip("- ").strip()
+            if not body:
+                raise ValueError("empty reflection item")
+            if section == "NOTES":
+                if "confidence:" in body.lower():
+                    match = re.search(r'confidence:\s*([-+\d.eE]+)', body, re.I)
+                    if not match or not math.isfinite(float(match.group(1))):
+                        raise ValueError("invalid note confidence")
+            elif section == "SELF_DISPOSITION":
+                match = re.search(r'(\w+)_delta:\s*([-+]?[\d.]+)', body)
+                if not match or not math.isfinite(float(match.group(2))):
+                    raise ValueError("invalid self disposition")
+            else:
+                match = re.search(r'viewer:\s*([^,]+?),\s*key:\s*([^,]+?),\s*delta:\s*([-+]?[\d.]+)(?:,\s*confidence:\s*([\d.]+))?', body)
+                if not match or not math.isfinite(float(match.group(3))):
+                    raise ValueError("invalid attributed disposition")
+                if "confidence:" in body and not match.group(4):
+                    raise ValueError("invalid attributed confidence")
+                if match.group(4) and not math.isfinite(float(match.group(4))):
+                    raise ValueError("invalid attributed confidence")
+    if not seen:
+        raise ValueError("reflection sections not found")
+
+
+def _parse_reflection(text: str, state: dict, *, strict=False) -> dict:
     """内省結果をパースして記憶・dispositionに反映。
 
     段階11-D Phase 5 Step 5.2: NOTES 単一枠 (raw 気づき自由形式) で memory_store
@@ -407,16 +482,16 @@ def _parse_reflection(text: str, state: dict) -> dict:
     for line in text.splitlines():
         stripped = line.strip()
         # ヘッダ判定 (大文字化で順序問題なく)
-        upper = stripped.upper()
-        if "SELF_DISPOSITION" in upper:
+        upper = stripped.strip("#* :").upper() if strict else stripped.upper()
+        if (upper == "SELF_DISPOSITION" if strict else "SELF_DISPOSITION" in upper):
             in_notes = False
             in_self_disp, in_attr_disp = True, False
             continue
-        elif "ATTRIBUTED_DISPOSITION" in upper:
+        elif (upper == "ATTRIBUTED_DISPOSITION" if strict else "ATTRIBUTED_DISPOSITION" in upper):
             in_notes = False
             in_self_disp, in_attr_disp = False, True
             continue
-        elif "NOTES" in upper:
+        elif (upper == "NOTES" if strict else "NOTES" in upper):
             in_notes = True
             in_self_disp, in_attr_disp = False, False
             continue

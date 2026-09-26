@@ -13,9 +13,17 @@ import json
 import httpx
 
 from core import auth as _auth_mod
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tools import web
 
+
+
+def _expect_tool_error(fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+    except ToolError as exc:
+        return str(exc)
+    raise AssertionError("expected ToolError, not a successful string")
 
 def _assert(cond, label):
     status = "OK " if cond else "FAIL"
@@ -125,14 +133,14 @@ def test_webfetch_html():
 
 def test_webfetch_non_http():
     print("== WebFetch: scheme check ==")
-    out = _reg().execute("WebFetch", {"url": "file:///etc/passwd",
+    out = _expect_tool_error(_reg().execute, "WebFetch", {"url": "file:///etc/passwd",
                                        "prompt": "x"})
     return _assert("http://" in out or "https://" in out, "拒否メッセージ")
 
 
 def test_webfetch_empty():
     print("== WebFetch: required ==")
-    out = _reg().execute("WebFetch", {"url": "", "prompt": "x"})
+    out = _expect_tool_error(_reg().execute, "WebFetch", {"url": "", "prompt": "x"})
     return _assert("required" in out.lower(), "url required")
 
 
@@ -226,7 +234,7 @@ def test_websearch_no_api_key():
     auth_orig = _patch_auth(ok=False)
     orig = _patch_httpx(get_resp=_brave_resp([]))
     try:
-        out = _reg().execute("WebSearch", {"query": "x"})
+        out = _expect_tool_error(_reg().execute, "WebSearch", {"query": "x"})
     finally:
         _restore(orig)
         _restore_auth(auth_orig)
@@ -239,7 +247,7 @@ def test_websearch_no_api_key():
 
 def test_websearch_empty():
     print("== WebSearch: empty query ==")
-    out = _reg().execute("WebSearch", {"query": ""})
+    out = _expect_tool_error(_reg().execute, "WebSearch", {"query": ""})
     return _assert("required" in out.lower(), "required")
 
 
@@ -277,7 +285,7 @@ def test_remote_post():
 
 def test_remote_invalid_method():
     print("== RemoteTrigger: invalid method ==")
-    out = _reg().execute("RemoteTrigger", {
+    out = _expect_tool_error(_reg().execute, "RemoteTrigger", {
         "url": "https://x/", "method": "OPTIONS",
     })
     return _assert("OPTIONS" in out, "拒否")
@@ -285,7 +293,7 @@ def test_remote_invalid_method():
 
 def test_remote_non_http():
     print("== RemoteTrigger: scheme check ==")
-    out = _reg().execute("RemoteTrigger", {"url": "ftp://x/"})
+    out = _expect_tool_error(_reg().execute, "RemoteTrigger", {"url": "ftp://x/"})
     return _assert("http://" in out or "https://" in out, "拒否")
 
 

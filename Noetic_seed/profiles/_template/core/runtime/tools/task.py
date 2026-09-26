@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError, result_redactor
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -87,7 +87,7 @@ def get_task_registry() -> _TaskRegistry:
 def task_create(inp: dict) -> str:
     description = (inp.get("description") or "").strip()
     if not description:
-        return "Error: description is required"
+        raise ToolError("Error: description is required")
     rec = _registry.create(description)
     # 段階10 Step 4 付帯 D: Fix 5 精神で task description truncation 撤去
     return f"Task created: id={rec.id} description={rec.description}"
@@ -96,10 +96,10 @@ def task_create(inp: dict) -> str:
 def task_get(inp: dict) -> str:
     tid = (inp.get("task_id") or "").strip()
     if not tid:
-        return "Error: task_id is required"
+        raise ToolError("Error: task_id is required")
     rec = _registry.get(tid)
     if not rec:
-        return f"Error: task '{tid}' not found"
+        raise ToolError(f"Error: task '{tid}' not found")
     return (f"Task {rec.id}\n"
             f"  description: {rec.description}\n"
             f"  status: {rec.status}\n"
@@ -113,16 +113,16 @@ def task_list(inp: dict) -> str:
         return "No tasks."
     lines = [f"Tasks ({len(tasks)}):"]
     for t in tasks:
-        lines.append(f"  {t.id}  [{t.status}]  {t.description[:80]}")
+        lines.append(f"  {t.id}  [{t.status}]  {result_redactor()(t.description)[:80]}")
     return "\n".join(lines)
 
 
 def task_stop(inp: dict) -> str:
     tid = (inp.get("task_id") or "").strip()
     if not tid:
-        return "Error: task_id is required"
+        raise ToolError("Error: task_id is required")
     if not _registry.stop(tid):
-        return f"Error: task '{tid}' not found"
+        raise ToolError(f"Error: task '{tid}' not found")
     return f"Task {tid} stopped"
 
 
@@ -130,21 +130,21 @@ def task_update(inp: dict) -> str:
     tid = (inp.get("task_id") or "").strip()
     message = inp.get("message") or ""
     if not tid:
-        return "Error: task_id is required"
+        raise ToolError("Error: task_id is required")
     if not message:
-        return "Error: message is required"
+        raise ToolError("Error: message is required")
     if not _registry.update(tid, message):
-        return f"Error: task '{tid}' not found"
+        raise ToolError(f"Error: task '{tid}' not found")
     return f"Sent message to task {tid}"
 
 
 def task_output(inp: dict) -> str:
     tid = (inp.get("task_id") or "").strip()
     if not tid:
-        return "Error: task_id is required"
+        raise ToolError("Error: task_id is required")
     rec = _registry.get(tid)
     if not rec:
-        return f"Error: task '{tid}' not found"
+        raise ToolError(f"Error: task '{tid}' not found")
     if not rec.output:
         return f"Task {tid}: (no output yet)"
     return f"Task {tid} output:\n" + "\n".join(rec.output[-100:])

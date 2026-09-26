@@ -9,12 +9,12 @@ Phase 3 で MCP protocol 本体 (core/runtime/mcp/) が完成したので、
 
 - attach_real_bridge(bridge): 実 McpToolBridge を使う
 - set_mcp_bridge(...): callable ベースの bridge を注入 (古い API、互換維持)
-- どちらも未設定なら "pending" 応答を返す
+- どちらも未設定なら従来の "pending" 文面で ToolError を送る
 """
 from typing import Callable, Optional
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -63,8 +63,8 @@ def _format_call_result(result: dict) -> str:
     import json as _json
     if "error" in result:
         err = result["error"]
-        return (f"[MCP error {err.get('code','?')}] "
-                f"{err.get('message','unknown')}")
+        raise ToolError(f"[MCP error {err.get('code','?')}] "
+                f"{err.get('message','unknown')}", detail={"error": err})
     body = result.get("result") or {}
     content = body.get("content")
     if isinstance(content, list):
@@ -79,8 +79,12 @@ def _format_call_result(result: dict) -> str:
                                  f"{c.get('resource', {}).get('uri', '')}]")
                 else:
                     parts.append(_json.dumps(c, ensure_ascii=False))
-        return "\n".join(parts) if parts else "(empty response)"
-    return _json.dumps(body, ensure_ascii=False)
+        message = "\n".join(parts) if parts else "(empty response)"
+    else:
+        message = _json.dumps(body, ensure_ascii=False)
+    if body.get("isError") is True:
+        raise ToolError(message, detail={"isError": True})
+    return message
 
 
 # ============================================================
@@ -92,28 +96,32 @@ def mcp_call(inp: dict) -> str:
     tool = (inp.get("tool") or "").strip()
     arguments = inp.get("arguments") or {}
     if not server:
-        return "Error: server is required"
+        raise ToolError("Error: server is required")
     if not tool:
-        return "Error: tool is required"
+        raise ToolError("Error: tool is required")
 
     # 優先順: real bridge > callable bridge > pending stub
     real = _real_bridge.get("ref")
     if real is not None:
         try:
             return _format_call_result(real.call(server, tool, arguments))
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: MCP call failed: {e}"
+            raise ToolError(f"Error: MCP call failed: {e}")
 
     fn = _bridge.get("call_tool")
     if fn is None:
-        return (f"[MCP pending — bridge not configured]\n"
+        raise ToolError(f"[MCP pending — bridge not configured]\n"
                 f"server: {server}\n"
                 f"tool: {tool}\n"
                 f"arguments: {arguments}")
     try:
         return fn(server, tool, arguments)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: MCP call failed: {e}"
+        raise ToolError(f"Error: MCP call failed: {e}")
 
 
 # ============================================================
@@ -123,14 +131,16 @@ def mcp_call(inp: dict) -> str:
 def list_mcp_resources(inp: dict) -> str:
     server = (inp.get("server") or "").strip()
     if not server:
-        return "Error: server is required"
+        raise ToolError("Error: server is required")
 
     real = _real_bridge.get("ref")
     if real is not None:
         try:
             resources = real.list_resources(server)
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: list_resources failed: {e}"
+            raise ToolError(f"Error: list_resources failed: {e}")
         if not resources:
             return f"No resources on server '{server}'"
         lines = [f"Resources on '{server}' ({len(resources)}):"]
@@ -143,12 +153,14 @@ def list_mcp_resources(inp: dict) -> str:
 
     fn = _bridge.get("list_resources")
     if fn is None:
-        return (f"[ListMcpResources pending — bridge not configured]\n"
+        raise ToolError(f"[ListMcpResources pending — bridge not configured]\n"
                 f"server: {server}")
     try:
         resources = fn(server)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: list_resources failed: {e}"
+        raise ToolError(f"Error: list_resources failed: {e}")
     if not resources:
         return f"No resources on server '{server}'"
     lines = [f"Resources on '{server}' ({len(resources)}):"]
@@ -167,25 +179,29 @@ def read_mcp_resource(inp: dict) -> str:
     server = (inp.get("server") or "").strip()
     uri = (inp.get("uri") or "").strip()
     if not server:
-        return "Error: server is required"
+        raise ToolError("Error: server is required")
     if not uri:
-        return "Error: uri is required"
+        raise ToolError("Error: uri is required")
 
     real = _real_bridge.get("ref")
     if real is not None:
         try:
             return _format_call_result(real.read_resource(server, uri))
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: read_resource failed: {e}"
+            raise ToolError(f"Error: read_resource failed: {e}")
 
     fn = _bridge.get("read_resource")
     if fn is None:
-        return (f"[ReadMcpResource pending — bridge not configured]\n"
+        raise ToolError(f"[ReadMcpResource pending — bridge not configured]\n"
                 f"server: {server}\nuri: {uri}")
     try:
         return fn(server, uri)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: read_resource failed: {e}"
+        raise ToolError(f"Error: read_resource failed: {e}")
 
 
 # ============================================================
@@ -195,15 +211,17 @@ def read_mcp_resource(inp: dict) -> str:
 def mcp_auth(inp: dict) -> str:
     server = (inp.get("server") or "").strip()
     if not server:
-        return "Error: server is required"
+        raise ToolError("Error: server is required")
 
     fn = _bridge.get("auth")
     if fn is None:
-        return f"[McpAuth pending — bridge not configured]\nserver: {server}"
+        raise ToolError(f"[McpAuth pending — bridge not configured]\nserver: {server}")
     try:
         return fn(server)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: auth failed: {e}"
+        raise ToolError(f"Error: auth failed: {e}")
 
 
 # ============================================================

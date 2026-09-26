@@ -15,11 +15,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tools import (
     plan, util, ui, skill, task, worker, team_cron, lsp, mcp,
 )
 from core.runtime.tools import register_all
+
+
+def _expect_tool_error(call):
+    try:
+        call()
+    except ToolError as exc:
+        return str(exc)
+    raise AssertionError("expected ToolError")
 
 
 def _assert(cond, label):
@@ -97,7 +105,7 @@ def test_util_sleep_too_large():
     print("== util: Sleep too large ==")
     reg = ToolRegistry()
     util.register(reg, TMPDIR)
-    return _assert("too large" in reg.execute("Sleep", {"duration_ms": 999999}),
+    return _assert("too large" in _expect_tool_error(lambda: reg.execute("Sleep", {"duration_ms": 999999})),
                    "拒否")
 
 
@@ -163,10 +171,10 @@ def test_util_run_task_packet():
     print("== util: RunTaskPacket ==")
     reg = ToolRegistry()
     util.register(reg, TMPDIR)
-    out = reg.execute("RunTaskPacket", {"packet": {
+    out = _expect_tool_error(lambda: reg.execute("RunTaskPacket", {"packet": {
         "objective": "test", "scope": "unit",
         "acceptance_tests": ["t1", "t2"],
-    }})
+    }}))
     return all([
         _assert("objective: test" in out, "objective"),
         _assert("2 items" in out, "test count"),
@@ -193,7 +201,7 @@ def test_ui_ask_user_no_bridge():
     print("== ui: AskUserQuestion (bridge 未設定) ==")
     reg = ToolRegistry()
     ui.register(reg, TMPDIR / "settings.json")
-    out = reg.execute("AskUserQuestion", {"question": "どう?"})
+    out = _expect_tool_error(lambda: reg.execute("AskUserQuestion", {"question": "どう?"}))
     return _assert("pending" in out, "pending 返却")
 
 
@@ -240,7 +248,7 @@ def test_skill_not_found():
     print("== skill: not found ==")
     reg = ToolRegistry()
     skill.register(reg, [str(TMPDIR / "skills")])
-    out = reg.execute("Skill", {"name": "nonexistent"})
+    out = _expect_tool_error(lambda: reg.execute("Skill", {"name": "nonexistent"}))
     return _assert("not found" in out, "エラー")
 
 
@@ -262,7 +270,7 @@ def test_skill_agent_no_dispatcher():
     print("== skill: Agent (dispatcher 未設定) ==")
     reg = ToolRegistry()
     skill.register(reg, [str(TMPDIR / "skills")])
-    out = reg.execute("Agent", {"agent_type": "dev", "task": "x"})
+    out = _expect_tool_error(lambda: reg.execute("Agent", {"agent_type": "dev", "task": "x"}))
     return _assert("pending" in out, "pending")
 
 
@@ -299,7 +307,7 @@ def test_task_not_found():
     print("== task: not found ==")
     reg = ToolRegistry()
     task.register(reg)
-    return _assert("not found" in reg.execute("TaskGet", {"task_id": "missing"}),
+    return _assert("not found" in _expect_tool_error(lambda: reg.execute("TaskGet", {"task_id": "missing"})),
                    "error")
 
 
@@ -356,7 +364,7 @@ def test_worker_restart_terminate():
     wid = re.search(r"id=(worker_\w+)", r_c).group(1)
     r_r = reg.execute("WorkerRestart", {"worker_id": wid})
     r_t = reg.execute("WorkerTerminate", {"worker_id": wid})
-    r_nf = reg.execute("WorkerGet", {"worker_id": wid})
+    r_nf = _expect_tool_error(lambda: reg.execute("WorkerGet", {"worker_id": wid}))
     return all([
         _assert("restarted" in r_r, "restart"),
         _assert("terminated" in r_t, "terminate"),
@@ -387,7 +395,7 @@ def test_team_requires_members():
     print("== team: members required ==")
     reg = ToolRegistry()
     team_cron.register(reg)
-    out = reg.execute("TeamCreate", {"name": "x", "members": []})
+    out = _expect_tool_error(lambda: reg.execute("TeamCreate", {"name": "x", "members": []}))
     return _assert("required" in out, "members 必須")
 
 
@@ -412,8 +420,8 @@ def test_cron_invalid_schedule():
     print("== cron: invalid schedule ==")
     reg = ToolRegistry()
     team_cron.register(reg)
-    out = reg.execute("CronCreate", {"schedule": "not cron",
-                                     "prompt": "x"})
+    out = _expect_tool_error(lambda: reg.execute("CronCreate", {"schedule": "not cron",
+                                     "prompt": "x"}))
     return _assert("invalid cron" in out, "拒否")
 
 
@@ -425,7 +433,7 @@ def test_lsp_no_backend():
     print("== lsp: backend 未設定 ==")
     reg = ToolRegistry()
     lsp.register(reg)
-    out = reg.execute("LSP", {"action": "symbols", "path": "a.py"})
+    out = _expect_tool_error(lambda: reg.execute("LSP", {"action": "symbols", "path": "a.py"}))
     return _assert("pending" in out, "pending")
 
 
@@ -433,7 +441,7 @@ def test_lsp_invalid_action():
     print("== lsp: invalid action ==")
     reg = ToolRegistry()
     lsp.register(reg)
-    out = reg.execute("LSP", {"action": "eval"})
+    out = _expect_tool_error(lambda: reg.execute("LSP", {"action": "eval"}))
     return _assert("unknown action" in out, "拒否")
 
 
@@ -455,8 +463,8 @@ def test_mcp_no_bridge():
     print("== mcp: bridge 未設定 ==")
     reg = ToolRegistry()
     mcp.register(reg)
-    out = reg.execute("MCP", {"server": "slack", "tool": "post",
-                              "arguments": {"text": "hi"}})
+    out = _expect_tool_error(lambda: reg.execute("MCP", {"server": "slack", "tool": "post",
+                              "arguments": {"text": "hi"}}))
     return _assert("pending" in out, "pending")
 
 
@@ -579,3 +587,208 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# C-2b: isolated pytest contract cases (the legacy standalone runner remains above).
+import pytest
+from unittest.mock import Mock
+from types import SimpleNamespace
+from core.runtime.registry import ToolResult
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime_tools(monkeypatch, tmp_path):
+    global TMPDIR
+    TMPDIR = tmp_path
+    (tmp_path / "settings.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "skills" / "hello.md").write_text("---\nname: hello\n---\nBody of hello skill.", encoding="utf-8")
+    (tmp_path / "nb.ipynb").write_text(json.dumps({"cells": [{"source": ["x=1"]}, {"source": ["# title"]}]}), encoding="utf-8")
+    monkeypatch.setattr(worker, "_registry", worker._WorkerRegistry())
+    monkeypatch.setattr(task, "_registry", task._TaskRegistry())
+    monkeypatch.setattr(team_cron, "_team_registry", team_cron._TeamRegistry())
+    monkeypatch.setattr(team_cron, "_cron_registry", team_cron._CronRegistry())
+    monkeypatch.setattr(ui, "_ui_bridge", {"ask_user": None, "send_user": None})
+    monkeypatch.setattr(skill, "_agent_bridge", {"dispatch": None})
+    monkeypatch.setattr(lsp, "_backend", {"client": None})
+    monkeypatch.setattr(mcp, "_real_bridge", {"ref": None})
+    monkeypatch.setattr(mcp, "_bridge", dict.fromkeys(mcp._bridge))
+
+
+@pytest.mark.parametrize("handler,args,expected", [
+    (worker.worker_create, {}, "Error: cwd is required"),
+    (worker.worker_get, {"worker_id": "absent"}, "Error: worker 'absent' not found"),
+    (worker.worker_resolve_trust, {"worker_id": "x", "decision": "bad"}, "Error: decision must be 'trust' or 'deny'"),
+    (worker.worker_observe_completion, {"worker_id": "x", "finish_reason": "bad"}, "Error: finish_reason must be 'Finished' or 'Failed'"),
+    (task.task_create, {}, "Error: description is required"),
+    (task.task_get, {"task_id": "absent"}, "Error: task 'absent' not found"),
+    (task.task_stop, {"task_id": "absent"}, "Error: task 'absent' not found"),
+    (task.task_update, {"task_id": "absent", "message": "go"}, "Error: task 'absent' not found"),
+    (task.task_output, {"task_id": "absent"}, "Error: task 'absent' not found"),
+    (team_cron.team_delete, {"team_id": "absent"}, "Error: team 'absent' not found"),
+    (team_cron.cron_delete, {"cron_id": "absent"}, "Error: cron 'absent' not found"),
+    (util.todo_write, {"todos": "wrong"}, "Error: todos must be a list"),
+    (util.run_task_packet, {}, "Error: packet must be an object"),
+    (ui.ask_user_question, {}, "Error: question is required"),
+    (ui.send_user_message, {"message": "x", "status": "bad"}, "Error: invalid status 'bad'"),
+    (mcp.mcp_call, {"server": "s"}, "Error: tool is required"),
+    (mcp.read_mcp_resource, {"server": "s"}, "Error: uri is required"),
+    (lsp.lsp_dispatch, {}, "Error: action is required"),
+])
+def test_contract_known_failures(handler, args, expected):
+    with pytest.raises(ToolError) as caught:
+        handler(args)
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("handler,args,prefix", [
+    (mcp.mcp_call, {"server": "s", "tool": "t"}, "[MCP pending"),
+    (mcp.list_mcp_resources, {"server": "s"}, "[ListMcpResources pending"),
+    (mcp.read_mcp_resource, {"server": "s", "uri": "u"}, "[ReadMcpResource pending"),
+    (mcp.mcp_auth, {"server": "s"}, "[McpAuth pending"),
+    (ui.ask_user_question, {"question": "q"}, "[AskUserQuestion pending"),
+    (ui.send_user_message, {"message": "m"}, "[SendUserMessage pending"),
+    (skill.agent, {"agent_type": "dev", "task": "t"}, "[Agent pending"),
+    (lsp.lsp_dispatch, {"action": "hover"}, "[LSP pending"),
+])
+def test_contract_disconnected_is_failure(handler, args, prefix):
+    with pytest.raises(ToolError) as caught:
+        handler(args)
+    assert str(caught.value).startswith(prefix)
+
+
+@pytest.mark.parametrize("route", ["ask", "send", "agent", "lsp", "call", "resources", "read", "auth"])
+def test_contract_callback_toolerror_identity(route):
+    sentinel = ToolError("exact", {"status": 401})
+    fn = Mock(side_effect=sentinel)
+    calls = {
+        "ask": (ui._ui_bridge, "ask_user", ui.ask_user_question, {"question": "q"}),
+        "send": (ui._ui_bridge, "send_user", ui.send_user_message, {"message": "m"}),
+        "agent": (skill._agent_bridge, "dispatch", skill.agent, {"agent_type": "a", "task": "t"}),
+        "lsp": (lsp._backend, "client", lsp.lsp_dispatch, {"action": "hover"}),
+        "call": (mcp._bridge, "call_tool", mcp.mcp_call, {"server": "s", "tool": "t"}),
+        "resources": (mcp._bridge, "list_resources", mcp.list_mcp_resources, {"server": "s"}),
+        "read": (mcp._bridge, "read_resource", mcp.read_mcp_resource, {"server": "s", "uri": "u"}),
+        "auth": (mcp._bridge, "auth", mcp.mcp_auth, {"server": "s"}),
+    }
+    bridge, key, handler, args = calls[route]
+    bridge[key] = fn
+    with pytest.raises(ToolError) as caught:
+        handler(args)
+    assert caught.value is sentinel
+
+
+def test_contract_empty_and_failed_state_observation_success():
+    assert task.task_list({}) == "No tasks."
+    assert team_cron.cron_list({}) == "No cron jobs."
+    record = task._registry.create("Error in successful content")
+    record.status = "failed"
+    assert "failed" in task.task_get({"task_id": record.id})
+    assert "no output yet" in task.task_output({"task_id": record.id})
+    wid = worker._registry.create("workspace", []).id
+    assert "not yet ready" in worker.worker_await_ready({"worker_id": wid})
+    assert "denied" in worker.worker_resolve_trust({"worker_id": wid, "decision": "deny"})
+    assert "Failed" in worker.worker_observe_completion({"worker_id": wid, "finish_reason": "Failed"})
+    assert "failed" in worker.worker_get({"worker_id": wid})
+    assert skill._make_tool_search(ToolRegistry())({"query": "nothing"}) == "No tools match: nothing"
+    mcp._bridge["list_resources"] = lambda server: []
+    assert mcp.list_mcp_resources({"server": "s"}) == "No resources on server 's'"
+
+
+@pytest.mark.parametrize("result,failed,message", [
+    ({"error": {"code": -1, "message": "offline"}}, True, "[MCP error -1] offline"),
+    ({"result": {"isError": True, "content": [{"type": "text", "text": "unchanged"}]}}, True, "unchanged"),
+    ({"result": {"content": []}}, False, "(empty response)"),
+    ({"result": {"isError": False, "content": [{"type": "text", "text": "Error is ordinary content"}]}}, False, "Error is ordinary content"),
+])
+@pytest.mark.parametrize("route", ["generic", "registered", "resource"])
+def test_contract_mcp_error_routes(result, failed, message, route):
+    from core.runtime.mcp.bridge import McpToolBridge
+    bridge = McpToolBridge(ToolRegistry())
+    bridge.call = Mock(return_value=result)
+    bridge.read_resource = Mock(return_value=result)
+    mcp.attach_real_bridge(bridge)
+    if route == "registered":
+        call = lambda: bridge._make_handler("s", "t")({})
+    elif route == "resource":
+        call = lambda: mcp.read_mcp_resource({"server": "s", "uri": "u"})
+    else:
+        call = lambda: mcp.mcp_call({"server": "s", "tool": "t"})
+    if failed:
+        with pytest.raises(ToolError) as caught:
+            call()
+        assert str(caught.value) == message
+        assert caught.value.detail is not None
+    else:
+        assert call() == message
+
+
+def test_contract_resource_discovery_failure_is_not_empty():
+    from core.runtime.mcp.bridge import McpToolBridge
+    from core.runtime.mcp.manager import McpServerManager
+    manager = McpServerManager("s", Mock())
+    manager._send_and_wait = Mock(return_value={"error": {"code": -1, "message": "offline"}})
+    assert manager.discover_resources() == []
+    bridge = McpToolBridge(ToolRegistry())
+    bridge._managers["s"] = manager
+    with pytest.raises(ToolError) as caught:
+        bridge.list_resources("s")
+    assert caught.value.detail["error"]["message"] == "offline"
+    manager._send_and_wait = Mock(return_value={"result": {"resources": []}})
+    manager.discover_resources()
+    assert bridge.list_resources("s") == []
+    with pytest.raises(ToolError):
+        bridge.list_resources("missing")
+
+
+def test_contract_skill_read_failure_and_empty(tmp_path, monkeypatch):
+    path = tmp_path / "empty.md"
+    path.write_text("", encoding="utf-8")
+    loader = skill._make_skill([str(tmp_path)])
+    assert loader({"name": "empty"}) == "[Skill: empty]\n\n\n"
+    monkeypatch.setattr(Path, "read_text", Mock(side_effect=PermissionError("denied")))
+    with pytest.raises(ToolError) as caught:
+        loader({"name": "empty"})
+    assert str(caught.value) == "denied"
+    assert caught.value.detail["exception_type"] == "PermissionError"
+
+
+def test_contract_notebook_failures_leave_bytes_unchanged(tmp_path):
+    path = tmp_path / "nb.ipynb"
+    before = path.read_bytes()
+    edit = util._make_notebook_edit(tmp_path)
+    for args in ({"action": "bad", "cell_index": 0}, {"action": "delete", "cell_index": 99}):
+        with pytest.raises(ToolError):
+            edit({"path": "nb.ipynb", **args})
+        assert path.read_bytes() == before
+    path.write_text("{bad", encoding="utf-8")
+    with pytest.raises(ToolError, match="invalid notebook JSON"):
+        edit({"path": "nb.ipynb", "cell_index": 0})
+    assert path.read_text(encoding="utf-8") == "{bad"
+
+
+def test_contract_packet_does_not_execute():
+    with pytest.raises(ToolError) as caught:
+        util.run_task_packet({"packet": {"objective": "work"}})
+    assert str(caught.value).startswith("TaskPacket accepted:\n")
+    assert caught.value.detail == {"execution_started": False}
+
+
+@pytest.mark.parametrize("group", ["worker", "task", "mcp", "util", "ui", "team_cron", "skill", "lsp"])
+def test_contract_failures_reach_runtime_failure_hook(group, monkeypatch):
+    from test_failure_contract_foundation import runtime
+    from core.runtime.hooks import HookRunner, HookRunResult
+    monkeypatch.setattr("core.auth._load_secrets", lambda: {})
+    handlers = {"worker": worker.worker_get, "task": task.task_get,
+                "mcp": mcp.mcp_call, "util": util.run_task_packet,
+                "ui": ui.ask_user_question, "team_cron": team_cron.cron_delete,
+                "skill": skill.agent, "lsp": lsp.lsp_dispatch}
+    hooks = HookRunner()
+    success, failure = Mock(return_value=HookRunResult.allow()), Mock(return_value=HookRunResult.allow())
+    hooks.register_post(success)
+    hooks.register_failure(failure)
+    record = runtime(handlers[group], hooks=hooks)._execute_tool_use("id", "probe", {})
+    assert record.is_error and record.error_kind == "tool_failure"
+    assert not record.output.startswith("tool execution error:")
+    success.assert_not_called()
+    assert failure.call_count == 1

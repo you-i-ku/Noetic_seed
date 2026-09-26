@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError, ToolResult
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -32,6 +32,8 @@ def _resolve_and_check(workspace_root: Path, path_str: str) -> Optional[Path]:
         target.relative_to(root)
     except ValueError:
         return None
+    if target.is_relative_to((root / "memory" / "state_generations").resolve()):
+        return None
     return target
 
 
@@ -48,36 +50,45 @@ def _make_read_file(workspace_root: Path) -> Callable:
     def read_file(inp: dict) -> str:
         path = (inp.get("path") or "").strip()
         if not path:
-            return "Error: path is required"
+            raise ToolError("Error: path is required")
 
-        offset = int(inp.get("offset", 0))
-        limit = inp.get("limit")
-        if limit is not None:
-            limit = int(limit)
+        try:
+            offset = int(inp.get("offset", 0))
+            limit = inp.get("limit")
+            if limit is not None:
+                limit = int(limit)
+        except (TypeError, ValueError) as e:
+            raise ToolError(f"Error: invalid offset/limit: {e}") from e
+        if offset < 0 or (limit is not None and limit < 1):
+            raise ToolError("Error: offset must be non-negative and limit must be positive")
 
         target = _resolve_and_check(workspace_root, path)
         if target is None:
-            return f"Error: path '{path}' is outside workspace"
+            raise ToolError(f"Error: path '{path}' is outside workspace")
         if not target.exists():
-            return f"Error: file not found: {path}"
+            raise ToolError(f"Error: file not found: {path}")
         if not target.is_file():
-            return f"Error: not a file: {path}"
+            raise ToolError(f"Error: not a file: {path}")
 
         try:
             size = target.stat().st_size
             if size > MAX_FILE_SIZE:
-                return f"Error: file too large ({size} bytes, max {MAX_FILE_SIZE})"
+                raise ToolError(f"Error: file too large ({size} bytes, max {MAX_FILE_SIZE})")
             raw = target.read_bytes()
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: read failed: {e}"
+            raise ToolError(f"Error: read failed: {e}")
 
         if _is_binary(raw):
-            return f"Error: binary file not supported: {path}"
+            raise ToolError(f"Error: binary file not supported: {path}")
 
         try:
             text = raw.decode("utf-8", errors="replace")
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: decode failed: {e}"
+            raise ToolError(f"Error: decode failed: {e}")
 
         lines = text.splitlines()
         total = len(lines)
@@ -97,23 +108,25 @@ def _make_write_file(workspace_root: Path) -> Callable:
         path = (inp.get("path") or "").strip()
         content = inp.get("content", "")
         if not path:
-            return "Error: path is required"
+            raise ToolError("Error: path is required")
         if not isinstance(content, str):
-            return "Error: content must be a string"
+            raise ToolError("Error: content must be a string")
 
         target = _resolve_and_check(workspace_root, path)
         if target is None:
-            return f"Error: path '{path}' is outside workspace"
+            raise ToolError(f"Error: path '{path}' is outside workspace")
 
         if len(content.encode("utf-8")) > MAX_FILE_SIZE:
-            return f"Error: content too large (max {MAX_FILE_SIZE} bytes)"
+            raise ToolError(f"Error: content too large (max {MAX_FILE_SIZE} bytes)")
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             return f"Wrote {target.relative_to(workspace_root).as_posix()} ({len(content)} chars)"
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: write failed: {e}"
+            raise ToolError(f"Error: write failed: {e}")
 
     return write_file
 
@@ -130,27 +143,31 @@ def _make_edit_file(workspace_root: Path) -> Callable:
         replace_all = bool(inp.get("replace_all", False))
 
         if not path:
-            return "Error: path is required"
+            raise ToolError("Error: path is required")
         if old_string == "":
-            return "Error: old_string is required"
+            raise ToolError("Error: old_string is required")
+        if not isinstance(old_string, str) or not isinstance(new_string, str):
+            raise ToolError("Error: old_string and new_string must be strings")
 
         target = _resolve_and_check(workspace_root, path)
         if target is None:
-            return f"Error: path '{path}' is outside workspace"
+            raise ToolError(f"Error: path '{path}' is outside workspace")
         if not target.exists():
-            return f"Error: file not found: {path}"
+            raise ToolError(f"Error: file not found: {path}")
 
         try:
             original = target.read_text(encoding="utf-8")
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: read failed: {e}"
+            raise ToolError(f"Error: read failed: {e}")
 
         count = original.count(old_string)
         if count == 0:
-            return f"Error: old_string not found in {path}"
+            raise ToolError(f"Error: old_string not found in {path}")
         if count > 1 and not replace_all:
-            return (f"Error: old_string matches {count} times. "
-                    f"Use replace_all=true or make old_string more specific.")
+            raise ToolError((f"Error: old_string matches {count} times. "
+                    f"Use replace_all=true or make old_string more specific."))
 
         new_content = (original.replace(old_string, new_string)
                        if replace_all
@@ -161,8 +178,10 @@ def _make_edit_file(workspace_root: Path) -> Callable:
             delta = len(new_content) - len(original)
             return (f"Edited {target.relative_to(workspace_root).as_posix()} "
                     f"({count} replacement(s), {delta:+d} chars)")
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: write failed: {e}"
+            raise ToolError(f"Error: write failed: {e}")
 
     return edit_file
 
@@ -175,26 +194,32 @@ def _make_glob_search(workspace_root: Path) -> Callable:
     def glob_search(inp: dict) -> str:
         pattern = (inp.get("pattern") or "").strip()
         if not pattern:
-            return "Error: pattern is required"
+            raise ToolError("Error: pattern is required")
 
         start_raw = inp.get("path") or ""
         if start_raw:
             start = _resolve_and_check(workspace_root, start_raw)
             if start is None:
-                return f"Error: path '{start_raw}' is outside workspace"
+                raise ToolError(f"Error: path '{start_raw}' is outside workspace")
         else:
             start = workspace_root.resolve()
 
         if not start.exists():
-            return f"Error: path not found: {start_raw}"
+            raise ToolError(f"Error: path not found: {start_raw}")
+        if not start.is_dir():
+            raise ToolError(f"Error: not a directory: {start_raw}")
 
         try:
             matches = sorted(start.glob(pattern))
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: glob failed: {e}"
+            raise ToolError(f"Error: glob failed: {e}")
 
         results: list = []
         for f in matches:
+            if _resolve_and_check(workspace_root, str(f)) is None:
+                continue
             if not f.is_file():
                 continue
             try:
@@ -225,7 +250,7 @@ def _make_grep_search(workspace_root: Path) -> Callable:
     def grep_search(inp: dict) -> str:
         pattern = inp.get("pattern") or ""
         if not pattern:
-            return "Error: pattern is required"
+            raise ToolError("Error: pattern is required")
 
         flags = re.MULTILINE
         if inp.get("-i") or inp.get("ignore_case"):
@@ -236,9 +261,12 @@ def _make_grep_search(workspace_root: Path) -> Callable:
         try:
             regex = re.compile(pattern, flags)
         except re.error as e:
-            return f"Error: invalid regex: {e}"
+            raise ToolError(f"Error: invalid regex: {e}")
 
-        head_limit = int(inp.get("head_limit", 100))
+        try:
+            head_limit = int(inp.get("head_limit", 100))
+        except (TypeError, ValueError) as e:
+            raise ToolError(f"Error: invalid head_limit: {e}") from e
         if head_limit < 1:
             head_limit = 100
 
@@ -248,23 +276,30 @@ def _make_grep_search(workspace_root: Path) -> Callable:
         if start_raw:
             start = _resolve_and_check(workspace_root, start_raw)
             if start is None:
-                return f"Error: path '{start_raw}' is outside workspace"
+                raise ToolError(f"Error: path '{start_raw}' is outside workspace")
         else:
             start = workspace_root.resolve()
 
         if not start.exists():
-            return f"Error: path not found: {start_raw}"
+            raise ToolError(f"Error: path not found: {start_raw}")
+        if not start.is_dir():
+            raise ToolError(f"Error: not a directory: {start_raw}")
 
         results: list = []
         total = 0
+        readable = unreadable = 0
         try:
             candidates = sorted(start.glob(glob_pat))
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: glob failed: {e}"
+            raise ToolError(f"Error: glob failed: {e}")
 
         for f in candidates:
             if total >= head_limit:
                 break
+            if _resolve_and_check(workspace_root, str(f)) is None:
+                continue
             if not f.is_file():
                 continue
             try:
@@ -274,8 +309,12 @@ def _make_grep_search(workspace_root: Path) -> Callable:
                 if _is_binary(raw):
                     continue
                 text = raw.decode("utf-8", errors="replace")
+            except ToolError:
+                raise
             except Exception:
+                unreadable += 1
                 continue
+            readable += 1
             try:
                 rel = f.relative_to(workspace_root).as_posix()
             except ValueError:
@@ -287,9 +326,14 @@ def _make_grep_search(workspace_root: Path) -> Callable:
                     if total >= head_limit:
                         break
 
-        if not results:
-            return f"No matches for pattern: {pattern}"
-        return f"Found {total} match(es) for '{pattern}':\n" + "\n".join(results)
+        message = (f"Found {total} match(es) for '{pattern}':\n" + "\n".join(results)
+                   if results else f"No matches for pattern: {pattern}")
+        if unreadable:
+            detail = {"unreadable_files": unreadable, "readable_files": readable}
+            if not readable:
+                raise ToolError(message, detail=detail)
+            return ToolResult(message, detail=detail)
+        return message
 
     return grep_search
 

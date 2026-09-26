@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.runtime.mcp.bridge import McpToolBridge
 from core.runtime.mcp.stdio_transport import StdioTransport
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tools import mcp as mcp_tool
 
 
@@ -32,7 +32,12 @@ def test_tool_pending_without_bridge():
         mcp_tool._bridge[k] = None
     reg = ToolRegistry()
     mcp_tool.register(reg)
-    out = reg.execute("MCP", {"server": "x", "tool": "y", "arguments": {}})
+    try:
+        reg.execute("MCP", {"server": "x", "tool": "y", "arguments": {}})
+    except ToolError as exc:
+        out = str(exc)
+    else:
+        raise AssertionError("expected ToolError")
     return _assert("pending" in out, "pending")
 
 

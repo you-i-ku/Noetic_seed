@@ -4,12 +4,14 @@ claw-code の rust/crates/api/src/client.rs ApiClient trait の Python port。
 厳密 claw-code 準拠 (+ claude_code provider 対応の最小拡張)。
 """
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Union, TYPE_CHECKING
 
 
 # claude_code provider 専用の tool 実行 callback 型。
-# (tool_id, tool_name, tool_input) -> (output_str, is_error)
-ToolExecutor = Callable[[str, str, dict], Tuple[str, bool]]
+# (tool_id, tool_name, tool_input) -> structured runtime record
+if TYPE_CHECKING:
+    from core.runtime.conversation import ToolInvocationRecord as RuntimeRecord
+ToolExecutor = Callable[[str, str, dict], "RuntimeRecord"]
 
 
 @dataclass
@@ -28,6 +30,9 @@ class ToolInvocationRecord:
     tool_input: dict
     output: str = ""
     is_error: bool = False
+    error_kind: Optional[str] = None
+    detail: object = None
+    detail_error: Optional[str] = None
 
 
 @dataclass
@@ -50,6 +55,9 @@ class ApiRequest:
     # claude_code provider 専用: in-process MCP handler 内から呼ばれて
     # ConversationRuntime の hook + permission + approval を経由した tool 実行を委譲する。
     # anthropic / openai_compat provider は無視 (使わない)。
+
+    # Optional redacted copy for local prompt tracing; providers use messages.
+    observation_messages: Optional[list] = None
 
 
 @dataclass

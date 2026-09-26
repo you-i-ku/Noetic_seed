@@ -35,6 +35,8 @@ channel 永続化廃止論点は reserved memo に温存。
 出力: 中立 JSON 構造化 text (自然言語ゼロ、feedback_llm_as_brain 整合)。
 """
 import json
+from core.runtime.registry import ToolError
+from core.memory_read import MemoryReadReport
 from typing import Optional
 
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
@@ -88,14 +90,12 @@ def _build_self_node(state: dict, virtual_entries: list) -> dict:
     }
 
 
-def _list_all_memory_entries(limit_per_tag: int = ALL_MEMORY_LIMIT_PER_TAG) -> list:
+def _list_all_memory_entries(limit_per_tag: int = ALL_MEMORY_LIMIT_PER_TAG, *, read_report=None) -> list:
     """全登録 tag + untagged の memory entry を集約取得 (新しい順)."""
     out = []
     for tag in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
-        try:
-            recs = list_records(tag, limit=limit_per_tag)
-        except Exception:
-            continue
+        recs = list_records(tag, limit=limit_per_tag,
+                            **({"read_report": read_report} if read_report is not None else {}))
         out.extend(recs)
     return out
 
@@ -117,6 +117,8 @@ def _compute_self_to_memory_edges(virtual_entries: list, all_memory: list,
 
     try:
         all_vecs = _embed_sync(self_texts + mem_texts)
+    except ToolError:
+        raise
     except Exception:
         return edges
     if not all_vecs or len(all_vecs) != len(self_texts) + len(mem_texts):
@@ -130,6 +132,8 @@ def _compute_self_to_memory_edges(virtual_entries: list, all_memory: list,
         for j, mem in enumerate(all_memory):
             try:
                 sim = float(cosine_similarity(self_vecs[i], mem_vecs[j]))
+            except ToolError:
+                raise
             except Exception:
                 continue
             if sim < threshold:
@@ -145,7 +149,7 @@ def _compute_self_to_memory_edges(virtual_entries: list, all_memory: list,
     return edges
 
 
-def _compute_memory_edges(current_cycle: Optional[int] = None) -> list:
+def _compute_memory_edges(current_cycle: Optional[int] = None, *, read_report=None) -> list:
     """memory ↔ memory edges を memory_links.jsonl から取得 (永続 link).
 
     Step 0.2 MVP: 全 link を flatten して返す。depth/top_n 制御は Phase 1+ で
@@ -161,7 +165,7 @@ def _compute_memory_edges(current_cycle: Optional[int] = None) -> list:
     memory_links._link_strength を get_link_current_strength 経由で集約)。
     """
     edges = []
-    for l in list_links(limit=LINK_SCAN_LIMIT):
+    for l in list_links(limit=LINK_SCAN_LIMIT, **({"read_report": read_report} if read_report is not None else {})):
         lt = l.get("link_type", "none")
         if lt == "none":
             continue
@@ -260,16 +264,17 @@ def _memory_graph(args: dict) -> str:
     args.get("frontier_count")
 
     if view not in ("ego", "global", "both"):
-        return json.dumps({
+        raise ToolError(json.dumps({
             "error": f"view={view} は未対応",
             "supported_views": ["ego", "global", "both"],
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False, indent=2))
 
+    report = MemoryReadReport()
     state = load_state()
-    all_memory = _list_all_memory_entries()
+    all_memory = _list_all_memory_entries(read_report=report)
     # v0.5 Phase 5 Slice 4 F-003: state.cycle_id を渡して decayed_strength を計算可能にする
     current_cycle = state.get("cycle_id") if isinstance(state, dict) else None
-    memory_edges = _compute_memory_edges(current_cycle=current_cycle)
+    memory_edges = _compute_memory_edges(current_cycle=current_cycle, read_report=report)
     trace = _compute_trace(all_memory, memory_edges)
 
     output: dict = {"view": view, "depth": depth}
@@ -299,4 +304,4 @@ def _memory_graph(args: dict) -> str:
         output["frontier_node_count"] = _frontier_count(state)
 
     output["trace_recent"] = trace
-    return json.dumps(output, ensure_ascii=False, indent=2)
+    return report.result(json.dumps(output, ensure_ascii=False, indent=2))

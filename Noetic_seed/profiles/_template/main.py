@@ -84,7 +84,7 @@ sys.stdout = DualLogger(RAW_LOG_FILE)
 
 from core.profile_repo import ensure_profile_repo
 from core.sanity_check import enforce_sanity_check
-from core.state import load_state, save_state, load_pref, save_pref, append_debug_log
+from core.state import STATE_LOCK, load_startup_state, bind_live_state, record_startup_recovery, save_state, load_pref, save_pref, append_debug_log
 from core.llm import call_llm, _get_active_provider_config
 from core.embedding import _init_vector, _compare_expect_result
 from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_change_bonus,
@@ -98,7 +98,7 @@ from core.pending_unified import pending_prune, pending_add_response_intent
 from core.providers.openai_compat import OpenAIProvider
 from core.providers.anthropic import AnthropicProvider
 from core.providers.claude_code import ClaudeCodeProvider
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import (
     HookRunner,
@@ -131,8 +131,7 @@ from core.prompt import build_prompt_propose
 from core.controller import controller, controller_select, _intent_conditioned_scores
 
 from tools import TOOLS, LEVEL_TOOLS
-from tools.x_tools import X_SESSION_PATH, _x_do_login, _x_get_notifications
-from tools.elyth_tools import _elyth_info as _elyth_get_info
+from tools.x_tools import X_SESSION_PATH, _x_do_login
 from core.ws_server import start_ws_server, broadcast_log, broadcast_state, broadcast_self, broadcast_e_values, get_pending_chats, is_paused, set_profile_running
 
 
@@ -189,11 +188,12 @@ def main():
     # 探すため、この後の身体改変 stash は profile 内 repo 上で行われる。
     ensure_profile_repo(BASE_DIR)
     # 段階12 Step 6 (PLAN §10): sanity check + 自動 revert。state load より前。
-    # state.json / memory JSON / core.controller + tools の import を検査、
+    # memory JSON / core.controller + tools の import を検査、
     # 失敗時は最新 iku-auto stash から git stash apply で復元、再検査して
     # 成功なら続行 / 失敗なら sys.exit(1)。「起動できない身体 = 存在できない」
     # の構造化 (PLAN §10-3、§1-5 介入レベル「物理的存在の前提」枠)。
-    enforce_sanity_check(profile_root=BASE_DIR, profile_name=BASE_DIR.name)
+    # state と世代の診断・復旧は load_startup_state が担当する。
+    enforce_sanity_check(profile_root=BASE_DIR, profile_name=BASE_DIR.name, recover_state=True)
     _p, _base, _k, _model = _get_active_provider_config()
     print(f"LLM: {_model or llm_cfg.get('model','?')} @ {_base} [{_p}]")
     print(f"state: {STATE_FILE}")
@@ -210,12 +210,14 @@ def main():
     # PLAN §5 Step 5.3 の手順準拠)。
     print()
 
-    state = load_state()
+    state = load_startup_state()
+    bind_live_state(state)
     state["session_id"] = str(uuid.uuid4())[:8]
     # Slice 2: run_id (full uuid) を起動毎生成。session_id (8 char) と階層化
     # することで「同 run 内の複数 session」(将来の手動再起動シナリオ等)
     # も表現可能。metrics_events.jsonl に記録、replay arena で run 単位識別。
     state["run_id"] = str(uuid.uuid4())
+    record_startup_recovery(state)
     # C-2: プロファイル全体の保存済み実行から復元。iku の state には置かない。
     _error_observer = None
     try:
@@ -279,10 +281,14 @@ def main():
     # 読んで mutate → save_state していたため、main scope の `state` には
     # `reflection_cycle = 0` が反映されず、cycle 末 should_reflect(state) が
     # 再 trigger → 自動 reflect 経路が同 cycle で二重発火していた。
-    # `reflect_and_persist` 経由で main scope の `state` を closure で直接 in-place
-    # mutate する (`_refresh_state` 規約と整合、main.py:305-307 参照)。
+    # `reflect_and_persist` 経由で main の live を直接更新・保存する。
     def _tool_reflect(args):
-        result = reflect_and_persist(state, call_llm)
+        try:
+            result = reflect_and_persist(state, call_llm, strict=True)
+        except ToolError:
+            raise
+        except Exception as e:
+            raise ToolError(f"エラー: {e}", detail={"exception_type": type(e).__name__, "message": str(e)}) from e
         notes = result.get("notes", [])
         return f"内省完了: {len(notes)}件の気づき"
     TOOLS["reflect"]["func"] = _tool_reflect
@@ -324,13 +330,6 @@ def main():
     # ======================================================================
     # 重要: 以下の hook / approval_callback / runtime は main() の `state`
     # local 変数を closure で参照する。state は rebind せず **in-place mutate**
-    # で扱うこと (load_state() の戻り値を直接代入せず _refresh_state() で更新)。
-
-    def _refresh_state():
-        """state を in-place で disk から再読込 (rebind せず mutate)。"""
-        fresh = load_state()
-        state.clear()
-        state.update(fresh)
 
     # Provider 選択
     _provider_name_raw = (llm_cfg.get("provider") or "").lower()
@@ -452,14 +451,7 @@ def main():
         ],
     )
 
-    def _post_hook_with_sync(tool_name, tool_input, output, tool_id=None):
-        """tool 実行直後: disk から fresh state を in-place 取込 →
-        base_post_hook で mutation → save_state で永続化。
-        tool handler が内部で save_state した変更と hook の E 値等の
-        mutation を正しくマージする。採点完了後の E を runtime の tool_id と
-        保存する。各 runtime 呼出しで記録をリセットし、ID が欠落・重複して
-        一意に対応しない実行は欠測とする。"""
-        _refresh_state()
+    def _post_hook(tool_name, tool_input, output, tool_id=None):
         result = _base_post_hook(tool_name, tool_input, output)
         save_state(state)
         if (not result.failed and not result.denied
@@ -469,7 +461,7 @@ def main():
             )
         return result
 
-    _hook_runner.register_post(_post_hook_with_sync, with_tool_id=True)
+    _hook_runner.register_post(_post_hook, with_tool_id=True)
     # 段階12 Step 5 (PLAN §9): 身体改変反映待ち pending 自動追加。
     # write_file / edit_file が core/* / tools/* / main.py / .mcp.json を
     # 成功書換えしたら「reboot で反映を完了する」内発的 intent を pending 化。
@@ -478,10 +470,12 @@ def main():
         state_getter=lambda: state,
         get_cycle_id=lambda: state.get("cycle_id", 0),
     ))
-    _hook_runner.register_failure(make_post_tool_use_failure_logger(
+    _base_failure_hook = make_post_tool_use_failure_logger(
         state=state,
         get_cycle_id=lambda: state.get("cycle_id", 0),
-    ))
+    )
+
+    _hook_runner.register_failure(_base_failure_hook)
 
     _approval_cb = make_approval_callback(
         pause_on_await=_approval_cfg.get("pause_on_await", True),
@@ -547,6 +541,8 @@ def main():
                     observed = build_outward_execution(
                         rec.tool_name, rec.tool_input or {}, rec.output,
                         rec.is_error, _get_channel(rec.tool_name),
+                        error_kind=rec.error_kind, detail=rec.detail,
+                        detail_error=rec.detail_error,
                     )
                     event["exec"].append(observed)
                     if observed["status"] == "ok" and rec.tool_name in OUTWARD_UTTERANCE_TOOLS:
@@ -636,7 +632,6 @@ def main():
                   "cid": int, "llm1_error": bool} または None (tool 未実行)。
         """
         nonlocal pressure
-        _refresh_state()
         # サイクル先頭で LLM 設定と secrets を再読み込み（次サイクルからのプロバイダ切替を反映）
         from core.llm import _reload_active_config
         from core.auth import reload_secrets
@@ -984,6 +979,9 @@ def main():
                             "mode": "forced" if chain_idx == 0 else "free",
                             "tool_input": copy.deepcopy(_r.tool_input or {}),
                             "output": str(_r.output), "is_error": _r.is_error,
+                            "error_kind": _r.error_kind,
+                            "detail": copy.deepcopy(_r.detail),
+                            "detail_error": _r.detail_error,
                             "in_cycle_result": False,
                         }
                         _invocation_buf["records"].append(_inv_last)
@@ -1028,7 +1026,7 @@ def main():
                     "chain_position": chain_idx, "invocation_position": invocation_idx,
                     "args": copy.deepcopy({k: v for k, v in _input.items()
                                            if k not in ("tool_intent", "tool_expected_outcome", "note")}),
-                    "status": tool_execution_status(str(invocation.output), invocation.is_error),
+                    "status": tool_execution_status(str(invocation.output), invocation.is_error, invocation.error_kind),
                     "in_cycle_result": False,
                     "result": cap_tool_result(str(invocation.output)),
                 })
@@ -1037,8 +1035,7 @@ def main():
                 _unique_id = (bool(invocation.tool_id) and
                               sum(r.tool_id == invocation.tool_id
                                   for r in summary.tool_invocations) == 1)
-                _ok = (not invocation.is_error and
-                       not str(invocation.output).startswith("[REJECTED]"))
+                _ok = not invocation.is_error
                 _tool_ev = _matches[0] if _ok and _unique_id and len(_matches) == 1 else None
                 pt_entry = {
                     "tool": invocation.tool_name,
@@ -1123,17 +1120,16 @@ def main():
             # master L678-692 の files_read/written tracking を ConversationRuntime
             # 経由へ移植 (Step E-2d での移植漏れ)。controller.py:65 の tool_level
             # 遷移 (lv 0→1 は read_file 1 回成功) を機能させるために必須。
-            _out_str = str(rec.output)
             if rec.tool_name == "read_file":
                 _p = ti.get("path", "")
-                if _p and not _out_str.startswith(("Error", "エラー", "該当なし")):
+                if _p and not rec.is_error:
                     fr = state.setdefault("files_read", [])
                     if _p not in fr:
                         fr.append(_p)
                     save_state(state)
             elif rec.tool_name == "write_file":
                 _p = ti.get("path", "")
-                if _p and not _out_str.startswith(("Error", "エラー")):
+                if _p and not rec.is_error:
                     fw = state.setdefault("files_written", [])
                     if _p not in fw:
                         fw.append(_p)
@@ -1142,7 +1138,7 @@ def main():
             # 自発 memory_store ≥ 1 経験で memory_graph candidate 解除 (controller.py で gate)
             # 失敗 memory_store は count しない (Z2 確定、森のたとえ整合性)
             elif rec.tool_name == "memory_store":
-                if not _out_str.startswith(("Error", "エラー")):
+                if not rec.is_error:
                     state["voluntary_memory_store_count"] = (
                         state.get("voluntary_memory_store_count", 0) + 1
                     )
@@ -1409,7 +1405,6 @@ def main():
             # 外部入力チェック（chatキューからstate.logに注入 + pressure加算 + archive）
             # WM 段階6-C v3: channel spec を channel_registry から引き、spec["tools_in"][0] を tool tag に
             for chat_text in get_pending_chats():
-                _refresh_state()
                 from core.channel_registry import channel_from_device_input
                 from core.world_model import ensure_channel, observe_channel_activity
                 _spec = channel_from_device_input()
@@ -1470,7 +1465,6 @@ def main():
                     for _line in _lines:
                         if not _line.strip():
                             continue
-                        _refresh_state()
                         _rec = _json.loads(_line)
                         # channel_spec 決定 (server 判定優先、なければ registry で生成)
                         from core.channel_registry import channel_from_mcp_client
@@ -1546,13 +1540,13 @@ def main():
                 print(_tline)
                 broadcast_log(_tline)
                 try:
-                    _tres = TOOLS[_tn]["func"](_ta)
+                    with STATE_LOCK:
+                        _tres = TOOLS[_tn]["func"](_ta)
                     _rline = f"  [test] → {str(_tres)[:200]}"
                     print(_rline)
                     broadcast_log(_rline)
                     # テストタブ経由でも結果を state.log に積む（AI のコンテキストに入れる）
                     # type="test" でマーク、intent には [test] プレフィックスを付けて出処を明示
-                    _refresh_state()
                     _test_id = f"{state.get('session_id','?')}_test{int(time.time()*1000)%100000}"
                     _test_intent = _ta.get("intent", "").strip()
                     _test_entry = {
@@ -1719,15 +1713,7 @@ def main():
 
             # === Reflection (cycle 境界で 1 回) ===
             state["reflection_cycle"] = state.get("reflection_cycle", 0) + 1
-            # 段階11-C hotfix (2026-04-24): 段階11-C smoke 3 段目 baseline で
-            # reflect 自動発火ゼロを観察、root cause は「incremented 値が disk
-            # に書かれず、次 tool 実行の _refresh_state() で memory 上の +1
-            # が毎回消えて reflection_cycle が永遠に 1 止まり」だった。
-            # reflect 発火時のみ save (L1274 reset 時) に依存していた race 条件
-            # (LLM が reflect tool chain を選ぶ偶発起動が初回書込契機として必要)。
-            # 累積値を increment 直後に永続化、reflect tool chain 選択の運に
-            # 独立して自動発火経路が機能するようにする。副作用: disk I/O が
-            # cycle あたり 1 回増える (同 state object で実害なし)。
+            # 再起動後も自動 reflect の累積回数を引き継ぐ。
             save_state(state)
             _refl_interval = load_pref().get("reflection_interval", 10)
             if should_reflect(state, _refl_interval):

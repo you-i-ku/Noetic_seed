@@ -19,7 +19,7 @@ from test_tool_invocation_observation import STAGES, PROPOSAL, _build, _record
 
 
 def invocation(number=0, tool="A", error=False, run="old", **changes):
-    row = {"event_type": "tool_invocation", "run_id": run, "attempt_id": "fire",
+    row = {"event_type": "tool_invocation", "failure_contract": 2, "run_id": run, "attempt_id": "fire",
            "chain_position": 0, "invocation_position": number, "tool_id": "reused",
            "tool": tool, "is_error": error, "entry_id": None, "cycle_id": None, "time": "T"}
     return {**row, **changes}

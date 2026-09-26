@@ -142,7 +142,8 @@ class TracingProvider:
                     "sdk_internal_inputs": "unobserved" if self.name == "claude_code" else "not_applicable",
                     **{key: getattr(request, key) for key in (
                         "system_prompt", "messages", "tools", "tool_choice",
-                        "max_tokens", "temperature", "image_paths")}}
+                        "max_tokens", "temperature", "image_paths")},
+                    "messages": request.observation_messages if request.observation_messages is not None else request.messages}
 
         def response_payload(response):
             return {"tool_uses": [{"id": t.id, "name": t.name} for t in response.tool_uses],

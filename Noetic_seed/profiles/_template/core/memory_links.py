@@ -17,6 +17,8 @@ link 生成タイミング: memory_store 同期 + top-K=5 近傍のみ LLM judge
 3 field 追加 (Phase 3 Physarum update の前準備、§-1 v1「initial strength =
 confidence」自然 migration)。
 """
+from core.runtime.registry import result_redactor
+
 import json
 import re
 import uuid
@@ -153,7 +155,7 @@ def _build_link_prompt(entry_a: dict, entry_b: dict) -> str:
     )
 
 
-def _parse_link_response(response: str) -> dict:
+def _parse_link_response(response: str, *, strict=False) -> dict:
     """LLM 応答から {link_type, confidence, reason} を抽出 (robust)。
 
     失敗時 / none 時 / 閾値未満は link 作らない扱い (link_type="none")。
@@ -162,10 +164,14 @@ def _parse_link_response(response: str) -> dict:
     try:
         m = re.search(r'\{.*\}', response, re.DOTALL)
         if not m:
+            if strict:
+                raise ValueError("link response contains no JSON object")
             return default
         data = json.loads(m.group(0))
         lt = str(data.get("link_type", "none")).strip().lower()
-        if lt not in LINK_TYPES:
+        if lt not in LINK_TYPES and lt != "none":
+            if strict:
+                raise ValueError(f"unknown link_type: {lt}")
             lt = "none"
         conf = float(data.get("confidence", 0.0))
         conf = max(0.0, min(1.0, conf))
@@ -175,11 +181,13 @@ def _parse_link_response(response: str) -> dict:
             "reason": str(data.get("reason", ""))[:200],
         }
     except Exception:
+        if strict:
+            raise
         return default
 
 
 def _llm_judge_link(entry_a: dict, entry_b: dict,
-                    llm_call_fn: Optional[Callable] = None) -> dict:
+                    llm_call_fn: Optional[Callable] = None, *, failures=None) -> dict:
     """2 entry 間の link 判定 (LLM mock 可能、error で graceful fallback)。"""
     if llm_call_fn is None:
         from core.llm import call_llm
@@ -187,9 +195,11 @@ def _llm_judge_link(entry_a: dict, entry_b: dict,
     prompt = _build_link_prompt(entry_a, entry_b)
     try:
         response = llm_call_fn(prompt, max_tokens=200, temperature=0.2)
-        return _parse_link_response(response)
+        return _parse_link_response(response, strict=failures is not None)
     except Exception as e:
-        print(f"  [memory_links] judge skip (error: {e})")
+        if failures is not None:
+            failures.append({"phase": "link_judge", "exception_type": type(e).__name__, "message": str(e)})
+        print(f"  [memory_links] judge skip (error: {result_redactor()(str(e))})")
         return {"link_type": "none", "confidence": 0.0, "reason": ""}
 
 
@@ -406,26 +416,10 @@ def prune_weak_links(current_cycle: int) -> int:
     return removed
 
 
-def list_links(limit: int = 200) -> list:
+def list_links(limit: int = 200, *, read_report=None) -> list:
     """memory_links.jsonl から新しい順に limit 件読む。"""
-    fpath = _link_file()
-    if not fpath.exists():
-        return []
-    try:
-        lines = fpath.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return []
-    out = []
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            continue
-        if len(out) >= limit:
-            break
-    return out
+    from core.memory_read import read_memory_jsonl
+    return read_memory_jsonl(_link_file(), report=read_report, reverse=True, limit=limit)
 
 
 def generate_links_for(new_entry: dict, *,
@@ -434,7 +428,7 @@ def generate_links_for(new_entry: dict, *,
                        cosine_fn: Optional[Callable] = None,
                        llm_call_fn: Optional[Callable] = None,
                        confidence_threshold: float = LINK_CONFIDENCE_THRESHOLD,
-                       candidate_limit: int = 50) -> list:
+                       candidate_limit: int = 50, failures=None) -> list:
     """新 memory entry の近傍 top-K に対して link 生成 (memory_store 同期呼出想定)。
 
     PLAN §5 Phase 4 Step 4.3: memory_store 同期呼出で embedding 近傍 top-K を
@@ -462,7 +456,11 @@ def generate_links_for(new_entry: dict, *,
     if embed_fn is None or cosine_fn is None:
         return []
 
-    all_records = list_records(network, limit=candidate_limit)
+    from core.memory_read import MemoryReadReport
+    report = MemoryReadReport()
+    all_records = list_records(network, limit=candidate_limit, **({"read_report": report} if failures is not None else {}))
+    if failures is not None and (report.rows_unreadable or report.files_unreadable):
+        failures.append({"phase": "link_candidates", **vars(report)})
     candidates = [r for r in all_records if r.get("id") != new_id]
     if not candidates:
         return []
@@ -474,9 +472,13 @@ def generate_links_for(new_entry: dict, *,
     # embedding で近傍 top-K 取得
     try:
         vecs = embed_fn([new_content] + [c.get("content", "") for c in candidates])
-    except Exception:
+    except Exception as e:
+        if failures is not None:
+            failures.append({"phase": "link_embedding", "exception_type": type(e).__name__, "message": str(e)})
         return []
     if not vecs or len(vecs) != 1 + len(candidates):
+        if failures is not None:
+            failures.append({"phase": "link_embedding", "expected_vectors": 1 + len(candidates), "returned_vectors": len(vecs) if vecs is not None else 0})
         return []
 
     query_vec = vecs[0]
@@ -484,7 +486,9 @@ def generate_links_for(new_entry: dict, *,
     for i, c in enumerate(candidates):
         try:
             sim = float(cosine_fn(query_vec, vecs[i + 1]))
-        except Exception:
+        except Exception as e:
+            if failures is not None:
+                failures.append({"phase": "link_similarity", "exception_type": type(e).__name__, "message": str(e)})
             continue
         sims.append((c, sim))
     sims.sort(key=lambda x: x[1], reverse=True)
@@ -493,7 +497,7 @@ def generate_links_for(new_entry: dict, *,
     # 各近傍に対して LLM judge
     created = []
     for cand, _sim in near:
-        verdict = _llm_judge_link(new_entry, cand, llm_call_fn=llm_call_fn)
+        verdict = _llm_judge_link(new_entry, cand, llm_call_fn=llm_call_fn, **({"failures": failures} if failures is not None else {}))
         if verdict.get("link_type", "none") == "none":
             continue
         if verdict.get("confidence", 0.0) < confidence_threshold:

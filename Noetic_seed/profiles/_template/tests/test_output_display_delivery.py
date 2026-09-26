@@ -1,5 +1,6 @@
 """step 0a-1: 送信受付と到達確認を区別し、未接続は失敗経路に流す。"""
 import json
+import os
 import queue
 import sys
 from copy import deepcopy
@@ -14,7 +15,7 @@ from core.providers.base import AssistantMessage, BaseProvider, ToolUseBlock
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import HookRunner, HookRunResult, make_post_tool_use_evaluation
 from core.runtime.permissions import PermissionEnforcer, PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tool_schema import ToolSpec
 from tools.ui_tools import _output_display
 
@@ -30,13 +31,13 @@ def test_no_clients_raises():
             patch.object(ws_server, "_send_queue", queue.Queue()) as outgoing:
         try:
             _output_display({"channel": "device", "content": "こんにちは"})
-        except RuntimeError as exc:
+        except ToolError as exc:
             return all([
                 _assert("0 件" in str(exc) and "channel=device" in str(exc),
                         "未接続の理由と channel が例外に含まれる"),
                 _assert(outgoing.empty(), "未接続ではキューに積まない"),
             ])
-    return _assert(False, "接続 0 は RuntimeError")
+    return _assert(False, "接続 0 は ToolError")
 
 
 def test_two_clients_queued():
@@ -84,8 +85,14 @@ def test_empty_arguments():
     ]
     with patch("tools.ui_tools.broadcast") as send, \
             patch("tools.ui_tools.broadcast_log") as log:
-        results = [_assert(_output_display(args) == expected, repr(args))
-                   for args, expected in cases]
+        results = []
+        for args, expected in cases:
+            try:
+                _output_display(args)
+            except ToolError as exc:
+                results.append(_assert(str(exc) == expected, repr(args)))
+            else:
+                results.append(_assert(False, "expected ToolError"))
         results.append(_assert(not send.called and not log.called, "入力エラー時は送信なし"))
     return all(results)
 
@@ -134,6 +141,7 @@ def test_runtime_failure_preserves_pending():
         with patch.object(ws_server, "_ws_clients", {object() for _ in range(count)}), \
                 patch.object(ws_server, "_send_queue", queue.Queue()), \
                 patch("tools.ui_tools.broadcast_log"), \
+                patch("core.config.RESOLUTION_LOG", os.devnull), \
                 patch("core.eval.eval_with_llm", return_value={"e3": 1.0}), \
                 patch("core.eval.calc_effective_change", return_value=0.5), \
                 patch("core.eval.update_unresolved_intents"), \

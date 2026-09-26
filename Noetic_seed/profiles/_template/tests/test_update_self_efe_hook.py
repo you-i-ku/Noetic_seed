@@ -185,16 +185,16 @@ def test_update_self_name_excluded_from_efe_c_source(mock_state_and_bge_m3):
     assert "name" not in mock_state["_efe_C"]["source_keys"]
 
 
-def test_update_self_confidence_clamped_to_unit_interval(mock_state_and_bge_m3):
-    """case H: confidence は compute_C_from_self 側で [0.0, 1.0] clamp、変な値でも安全。"""
-    mock_state = mock_state_and_bge_m3
-    _update_self("identity", "X", confidence=1.5)  # over
-    _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
-
-    # _efe_self_confidence には float(1.5) 入る (clamp は compute_C_from_self 側)
-    assert mock_state["_efe_self_confidence"]["identity"] == 1.5
-    # _efe_C 側で clamp 適用、per_key_confidence は 1.0
-    assert mock_state["_efe_C"]["per_key_confidence"]["identity"] == 1.0
+def test_update_self_invalid_confidence_does_not_mutate(mock_state_and_bge_m3):
+    """C-2b rejects invalid tool input before any self/confidence mutation."""
+    import copy
+    import pytest
+    from core.runtime.registry import ToolError
+    state = mock_state_and_bge_m3
+    before = copy.deepcopy(state)
+    with pytest.raises(ToolError):
+        _update_self("identity", "X", confidence=1.5)
+    assert state == before
 
 
 def test_update_self_higher_confidence_sharper_C(mock_state_and_bge_m3):

@@ -116,8 +116,8 @@ def test_old_new_observation_records_are_read_without_migration(monkeypatch, fix
 
 
 @pytest.mark.parametrize("output,is_error,status", [
-    ("[REJECTED] no", False, "rejected"), ("boom", True, "runtime_error"),
-    ("エラー: x", False, "tool_error"), ("Error: x", False, "tool_error"), ("fine", False, "ok")])
+    ("[REJECTED] no", False, "ok"), ("boom", True, "runtime_error"),
+    ("エラー: x", False, "ok"), ("Error: x", False, "ok"), ("fine", False, "ok")])
 def test_build_status_matches_0b(output, is_error, status):
     """0b と違う status 判定 (例: is_error を tool_error と呼ぶ) を検出する。"""
     event = _build([_record(output=output, is_error=is_error)])[0]
@@ -159,7 +159,7 @@ def test_all_invocations_recorded_with_own_reason(monkeypatch, fixed_io):
         {"payload": "引数A", "echo": "結果A"}, {"payload": "引数B", "echo": "[REJECTED] 拒否B"},
         {"path": "p", "echo": "結果C"}, {"payload": "引数D", "echo": "エラー: 失敗D"},
         {"path": "p", "echo": "結果E"}]
-    assert [e["status"] for e in events] == ["ok", "rejected", "ok", "tool_error", "ok"]
+    assert [e["status"] for e in events] == ["ok", "ok", "ok", "ok", "ok"]
     # 結果リストに入ったのは 1 段目の末尾だけ (2 段目の末尾は重複スキップ)
     assert [e["in_cycle_result"] for e in events] == [False, False, True, False, False]
     entry = state["raw_events"][-1]

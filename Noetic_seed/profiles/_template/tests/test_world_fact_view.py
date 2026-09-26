@@ -20,6 +20,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.world_fact_view_tool import _world_fact_view
+from core.runtime.registry import ToolError
 
 
 def _assert(cond, label):
@@ -46,11 +47,19 @@ def _events_basic() -> list:
     ]
 
 
-def _run_tool(args: dict, events: list) -> dict:
-    """load_state を patch して tool を実行、JSON parse して返す。"""
-    with patch("tools.world_fact_view_tool.load_state",
-               return_value=_fake_state(events)):
-        out = _world_fact_view(args)
+def _run_tool(args: dict, events: list, *, expect_error=False) -> dict:
+    """JSONL reader を patch して tool を実行、JSON parse して返す。"""
+    with patch("tools.world_fact_view_tool.read_memory_jsonl",
+               return_value=events):
+        if expect_error:
+            try:
+                _world_fact_view(args)
+            except ToolError as exc:
+                out = str(exc)
+            else:
+                raise AssertionError("expected ToolError")
+        else:
+            out = _world_fact_view(args)
     return json.loads(out)
 
 
@@ -228,7 +237,7 @@ def test_limit_truncation():
 
 def test_unknown_mode_error():
     print("== unknown mode → error JSON ==")
-    res = _run_tool({"mode": "weird"}, _events_basic())
+    res = _run_tool({"mode": "weird"}, _events_basic(), expect_error=True)
     return all([
         _assert("error" in res, "error key 存在"),
         _assert("weird" in res["error"], "error msg に mode 名"),
@@ -237,13 +246,13 @@ def test_unknown_mode_error():
 
 def test_by_tool_missing_filter_error():
     print("== mode=by_tool で filter_tool 未指定 → error ==")
-    res = _run_tool({"mode": "by_tool"}, _events_basic())
+    res = _run_tool({"mode": "by_tool"}, _events_basic(), expect_error=True)
     return _assert("error" in res, "error key 存在")
 
 
 def test_by_channel_missing_filter_error():
     print("== mode=by_channel で filter_channel 未指定 → error ==")
-    res = _run_tool({"mode": "by_channel"}, _events_basic())
+    res = _run_tool({"mode": "by_channel"}, _events_basic(), expect_error=True)
     return _assert("error" in res, "error key 存在")
 
 

@@ -37,6 +37,7 @@ from claude_agent_sdk import ResultMessage as SDKResultMessage
 from claude_agent_sdk import TextBlock as SDKTextBlock
 
 from core.providers._image import load_image_base64
+from core.runtime.registry import tool_result_body
 from core.providers.base import ApiRequest, AssistantMessage, BaseProvider
 
 
@@ -230,7 +231,7 @@ class ClaudeCodeProvider(BaseProvider):
 
         Args:
             tool_def: {"name": ..., "description": ..., "input_schema": ...}
-            tool_executor: (tool_id, name, input) -> (output_str, is_error)
+            tool_executor: (tool_id, name, input) -> ToolInvocationRecord
                 ConversationRuntime._make_tool_executor で生成された callable。
             captured: ClaudeCodeProvider._stream_async 内の list、handler 内で
                 実行した invocation を append する (AssistantMessage.tool_invocations
@@ -248,19 +249,26 @@ class ClaudeCodeProvider(BaseProvider):
             tool_id = f"call_{uuid.uuid4().hex[:8]}"
             # tool_executor は同期 (Noetic ToolRegistry.execute も同期)
             # → asyncio.to_thread で event loop を blocking しないよう非同期化
-            output, is_error = await asyncio.to_thread(
+            rec = await asyncio.to_thread(
                 tool_executor, tool_id, _name, args,
             )
             captured.append({
                 "tool_id": tool_id,
                 "tool_name": _name,
-                "tool_input": args,
-                "output": output,
-                "is_error": is_error,
+                "tool_input": rec.tool_input,
+                "output": rec.output,
+                "provider_output": rec.provider_output,
+                "is_error": rec.is_error,
+                "error_kind": rec.error_kind,
+                "detail": rec.detail,
+                "detail_error": rec.detail_error,
             })
             return {
-                "content": [{"type": "text", "text": output}],
-                "is_error": is_error,
+                "content": [{"type": "text", "text": tool_result_body(
+                    rec.provider_output if rec.provider_output is not None else rec.output,
+                    rec.is_error, rec.detail, rec.detail_error)}],
+                # SDK 0.1.68 __init__.py maps this to MCP CallToolResult.isError.
+                "is_error": rec.is_error,
             }
 
         return handler

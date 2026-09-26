@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -93,7 +93,7 @@ def worker_create(inp: dict) -> str:
     cwd = (inp.get("cwd") or "").strip()
     trusted_roots = inp.get("trusted_roots") or []
     if not cwd:
-        return "Error: cwd is required"
+        raise ToolError("Error: cwd is required")
     rec = _registry.create(cwd, trusted_roots)
     return f"Worker created: id={rec.id} state={rec.state} cwd={rec.cwd}"
 
@@ -101,10 +101,10 @@ def worker_create(inp: dict) -> str:
 def worker_get(inp: dict) -> str:
     wid = (inp.get("worker_id") or "").strip()
     if not wid:
-        return "Error: worker_id is required"
+        raise ToolError("Error: worker_id is required")
     rec = _registry.get(wid)
     if not rec:
-        return f"Error: worker '{wid}' not found"
+        raise ToolError(f"Error: worker '{wid}' not found")
     return (f"Worker {rec.id}\n"
             f"  state: {rec.state}\n"
             f"  cwd: {rec.cwd}\n"
@@ -117,10 +117,10 @@ def worker_observe(inp: dict) -> str:
     wid = (inp.get("worker_id") or "").strip()
     snapshot = inp.get("snapshot") or ""
     if not wid:
-        return "Error: worker_id is required"
+        raise ToolError("Error: worker_id is required")
     rec = _registry.get(wid)
     if not rec:
-        return f"Error: worker '{wid}' not found"
+        raise ToolError(f"Error: worker '{wid}' not found")
     rec.last_snapshot = str(snapshot)
     rec.updated_at = time.time()
     # 単純なヒューリスティック: snapshot に "ready" 含めば awaiting_ready 扱い
@@ -134,14 +134,14 @@ def worker_resolve_trust(inp: dict) -> str:
     wid = (inp.get("worker_id") or "").strip()
     decision = (inp.get("decision") or "").strip().lower()
     if not wid:
-        return "Error: worker_id is required"
+        raise ToolError("Error: worker_id is required")
     if decision not in ("trust", "deny"):
-        return "Error: decision must be 'trust' or 'deny'"
+        raise ToolError("Error: decision must be 'trust' or 'deny'")
     rec = _registry.get(wid)
     if not rec:
-        return f"Error: worker '{wid}' not found"
+        raise ToolError(f"Error: worker '{wid}' not found")
     if rec.state != S_TRUST_GATE:
-        return f"Error: worker not in trust_gate state (current: {rec.state})"
+        raise ToolError(f"Error: worker not in trust_gate state (current: {rec.state})")
     if decision == "trust":
         rec.state = S_TRUSTED
         return f"Worker {wid} trusted"
@@ -153,10 +153,10 @@ def worker_resolve_trust(inp: dict) -> str:
 def worker_await_ready(inp: dict) -> str:
     wid = (inp.get("worker_id") or "").strip()
     if not wid:
-        return "Error: worker_id is required"
+        raise ToolError("Error: worker_id is required")
     rec = _registry.get(wid)
     if not rec:
-        return f"Error: worker '{wid}' not found"
+        raise ToolError(f"Error: worker '{wid}' not found")
     if rec.state in (S_AWAITING_READY, S_READY):
         rec.state = S_READY
         return f"Worker {wid} is ready"
@@ -167,14 +167,14 @@ def worker_send_prompt(inp: dict) -> str:
     wid = (inp.get("worker_id") or "").strip()
     prompt = inp.get("prompt") or ""
     if not wid:
-        return "Error: worker_id is required"
+        raise ToolError("Error: worker_id is required")
     if not prompt:
-        return "Error: prompt is required"
+        raise ToolError("Error: prompt is required")
     rec = _registry.get(wid)
     if not rec:
-        return f"Error: worker '{wid}' not found"
+        raise ToolError(f"Error: worker '{wid}' not found")
     if rec.state != S_READY:
-        return f"Error: worker not ready (state={rec.state})"
+        raise ToolError(f"Error: worker not ready (state={rec.state})")
     rec.prompt = prompt
     rec.state = S_PROMPT_SENT
     return f"Prompt sent to {wid} ({len(prompt)} chars)"
@@ -183,10 +183,10 @@ def worker_send_prompt(inp: dict) -> str:
 def worker_restart(inp: dict) -> str:
     wid = (inp.get("worker_id") or "").strip()
     if not wid:
-        return "Error: worker_id is required"
+        raise ToolError("Error: worker_id is required")
     rec = _registry.get(wid)
     if not rec:
-        return f"Error: worker '{wid}' not found"
+        raise ToolError(f"Error: worker '{wid}' not found")
     rec.state = S_TRUST_GATE
     rec.last_snapshot = ""
     rec.prompt = ""
@@ -198,9 +198,9 @@ def worker_restart(inp: dict) -> str:
 def worker_terminate(inp: dict) -> str:
     wid = (inp.get("worker_id") or "").strip()
     if not wid:
-        return "Error: worker_id is required"
+        raise ToolError("Error: worker_id is required")
     if not _registry.remove(wid):
-        return f"Error: worker '{wid}' not found"
+        raise ToolError(f"Error: worker '{wid}' not found")
     return f"Worker {wid} terminated"
 
 
@@ -208,12 +208,12 @@ def worker_observe_completion(inp: dict) -> str:
     wid = (inp.get("worker_id") or "").strip()
     finish_reason = (inp.get("finish_reason") or "").strip()
     if not wid:
-        return "Error: worker_id is required"
+        raise ToolError("Error: worker_id is required")
     if finish_reason not in ("Finished", "Failed"):
-        return "Error: finish_reason must be 'Finished' or 'Failed'"
+        raise ToolError("Error: finish_reason must be 'Finished' or 'Failed'")
     rec = _registry.get(wid)
     if not rec:
-        return f"Error: worker '{wid}' not found"
+        raise ToolError(f"Error: worker '{wid}' not found")
     rec.state = S_FINISHED if finish_reason == "Finished" else S_FAILED
     rec.finish_reason = finish_reason
     return f"Worker {wid} completed: {finish_reason}"

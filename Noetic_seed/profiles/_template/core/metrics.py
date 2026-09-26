@@ -681,27 +681,23 @@ def observe_outward_selection(event: dict) -> None:
     event["best_outward_g_minus_selected_g"] = min(outward_g) - values[idx] if outward_g else None
 
 
-def tool_execution_status(output: str, is_error: bool) -> str:
-    """拒否、実行例外、先頭空白を除いたエラー文、成功の順で成否を判定する。"""
-    text = str(output)
-    if text.startswith("[REJECTED]"):
-        return "rejected"
-    elif is_error:
-        return "runtime_error"
-    elif text.lstrip().startswith(("エラー", "Error")):
-        return "tool_error"
-    else:
+def tool_execution_status(output: str, is_error: bool, error_kind=None) -> str:
+    """Runtime の構造だけで判定する。本文の語句は成否を表さない。"""
+    if not is_error:
         return "ok"
+    return {"rejected": "rejected", "tool_failure": "tool_error",
+            "exception": "runtime_error"}.get(error_kind, "runtime_error")
 
 
 def build_outward_execution(tool: str, args: dict, output: str,
-                            is_error: bool, channel: str) -> dict:
-    """全 invocation の観察。tool_error は先頭の「エラー」/「Error」による近似。
+                            is_error: bool, channel: str, *, error_kind=None,
+                            detail=None, detail_error=None) -> dict:
+    """全 invocation の観察。成否と失敗の種類は runtime の構造を使う。
 
     connected_at_enqueue は output_display の受付文から取得し、到達数とは扱わない。
     """
     text = str(output)
-    status = tool_execution_status(text, is_error)
+    status = tool_execution_status(text, is_error, error_kind)
     connected = None
     if tool == "output_display":
         channel = str(args.get("channel", "")).strip()
@@ -711,6 +707,8 @@ def build_outward_execution(tool: str, args: dict, output: str,
         elif is_error and "接続している受け手が 0 件" in text:
             connected = 0
     return {"tool": tool, "channel": channel, "status": status,
+            "is_error": is_error, "error_kind": error_kind,
+            "detail": detail, "detail_error": detail_error,
             "connected_at_enqueue": connected, "category": classify_outward(tool, args)}
 
 
@@ -743,6 +741,7 @@ def build_tool_invocation_events(records: list, *, run_id: str, attempt_id: str,
         output = str(r.get("output", ""))
         events.append({
             "event_type": "tool_invocation", "run_id": run_id,
+            "failure_contract": ACTIVE_FAILURE_CONTRACT,
             "attempt_id": attempt_id, "time": time,
             "entry_id": entry_id, "cycle_id": cycle_id,
             "chain_position": r["chain_position"],
@@ -753,8 +752,11 @@ def build_tool_invocation_events(records: list, *, run_id: str, attempt_id: str,
             "note": str(ti.get("note", "") or ""),
             "args": {k: v for k, v in ti.items() if k not in _APPROVAL_FIELDS},
             "is_error": r.get("is_error"),
+            "error_kind": r.get("error_kind"),
+            "detail": r.get("detail"), "detail_error": r.get("detail_error"),
             "status": build_outward_execution(r["tool"], ti, output,
-                                              bool(r.get("is_error")), "")["status"],
+                                              bool(r.get("is_error")), "",
+                                              error_kind=r.get("error_kind"))["status"],
             "result": cap_tool_result(output),
             "in_cycle_result": bool(r.get("in_cycle_result")),
         })
@@ -796,6 +798,20 @@ def emit_tool_invocations(events: list) -> int:
 
 # C-2: 観察専用。state / prompt / G へは接続しない。
 ERROR_MODEL_VERSION = "beta_bernoulli_v1"
+# All tool families now report failures explicitly; v1 history is excluded.
+ACTIVE_FAILURE_CONTRACT = 2
+
+
+def failure_contract_exclusion(event, required_contract=None):
+    """Shared by live observation, rebuild and summaries; never infer from text."""
+    required = ACTIVE_FAILURE_CONTRACT if required_contract is None else required_contract
+    version = event.get("failure_contract", 1)
+    if type(version) is not int or version not in (1, 2):
+        return "unknown_failure_contract"
+    if version != required:
+        return "old_failure_contract" if version < required else "unknown_failure_contract"
+    return None
+
 _INVOCATION_KEY = ("run_id", "attempt_id", "chain_position", "invocation_position")
 _PREDICTION_REFS = (*_INVOCATION_KEY, "entry_id", "cycle_id", "tool_id", "tool", "time")
 
@@ -827,8 +843,11 @@ def beta_error_prediction(alpha: float, beta: float, is_error: bool) -> dict:
             "posterior_beta": beta + int(not is_error)}
 
 
-def _invocation_exclusion(event: dict, seen: set) -> Optional[str]:
+def _invocation_exclusion(event: dict, seen: set, required_contract=None) -> Optional[str]:
     """復元・通常運転共通の検証。無関係な event は呼出側で除く。"""
+    contract_reason = failure_contract_exclusion(event, required_contract)
+    if contract_reason:
+        return contract_reason
     if (any(not isinstance(event.get(k), str) or not event[k].strip()
             for k in ("run_id", "attempt_id"))
             or any(type(event.get(k)) is not int or event[k] < 0
@@ -862,15 +881,16 @@ def _emit_error_observation(event: dict) -> bool:
 class ErrorPredictionObserver:
     """保存済み invocation だけを数える、main 専用の観察者 (state と独立)。"""
 
-    def __init__(self, run_id: str):
+    def __init__(self, run_id: str, *, required_contract=None):
         self.run_id = run_id
+        self.required_contract = required_contract
         self.counts = {}
         self.total = (1, 1)
         self.seen = set()
         self.history_reset = False
 
     def _accept(self, event: dict):
-        reason = _invocation_exclusion(event, self.seen)
+        reason = _invocation_exclusion(event, self.seen, self.required_contract)
         if reason:
             return None, reason
         before = self.counts.get(event["tool"], (1, 1))
@@ -913,6 +933,7 @@ class ErrorPredictionObserver:
             self.counts, self.total, self.seen = {}, (1, 1), set()
             self.history_reset = True
         report = {"event_type": "error_model_rebuilt", "run_id": self.run_id,
+                  "failure_contract": self.required_contract if self.required_contract is not None else ACTIVE_FAILURE_CONTRACT,
                   "history_id": self.run_id, "history_reset": self.history_reset,
                   "history_scope": "since_startup" if self.history_reset else "profile",
                   "model_version": ERROR_MODEL_VERSION, "prior": {"alpha": 1, "beta": 1},
@@ -935,7 +956,8 @@ class ErrorPredictionObserver:
                        history_scope="since_startup" if self.history_reset else "profile")
             if reason:
                 _emit_error_observation({**ref, "event_type": "error_prediction_excluded",
-                                         "reason": reason})
+                                         "reason": reason,
+                                         "source_failure_contract": event.get("failure_contract", 1)})
                 continue
             # _accept が先に計数済み。以下の失敗は学習履歴を欠落させない。
             try:
@@ -943,6 +965,7 @@ class ErrorPredictionObserver:
                 prediction = beta_error_prediction(*before, event["is_error"])
                 baseline = beta_error_prediction(*global_before, event["is_error"])
                 row = {**ref, **prediction, "event_type": "error_prediction",
+                       "failure_contract": self.required_contract if self.required_contract is not None else ACTIVE_FAILURE_CONTRACT,
                        "prior": {"alpha": 1, "beta": 1},
                        "baseline": {**baseline, "prior": {"alpha": 1, "beta": 1}},
                        "prediction_timing": "posthoc_from_preceding_invocations"}
@@ -955,7 +978,8 @@ class ErrorPredictionObserver:
                                          "reason": "append_failed"})
 
 
-def summarize_error_prediction(events: list, *, run_id: Optional[str] = None) -> dict:
+def summarize_error_prediction(events: list, *, run_id: Optional[str] = None,
+                               required_contract=None) -> dict:
     """指定行 (任意で run 限定) のみ集計。履歴復元はせず、保存済み baseline と比較。
 
     tool_invocation と予測を複合キーで重複排除し、未対応の実行は missing として返す。
@@ -968,7 +992,7 @@ def summarize_error_prediction(events: list, *, run_id: Optional[str] = None) ->
         kind = event.get("event_type")
         if kind not in ("tool_invocation", "error_prediction"):
             continue
-        if _invocation_exclusion(event, set()):
+        if _invocation_exclusion(event, set(), required_contract):
             continue
         key = tuple(event[k] for k in _INVOCATION_KEY)
         if kind == "tool_invocation":

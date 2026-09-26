@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from core.runtime.registry import ToolError
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -106,7 +107,9 @@ def test_empty_missing_and_unregistered_network(store, archive):
         _write(store, "archive_test.jsonl", [])
     assert memory_tool._search_memory({"id": "missing"}) == "ID 'missing' に一致するエントリなし"
     for args in ({}, {"query": "", "id": ""}):
-        assert memory_tool._search_memory(args) == "エラー: queryまたはidを指定してください"
+        with pytest.raises(ToolError) as caught:
+            memory_tool._search_memory(args)
+        assert str(caught.value) == "エラー: queryまたはidを指定してください"
     expected = "記憶ファイルが空です" if archive else "記憶ファイルがまだありません"
     assert memory_tool._search_memory({"query": "anything", "id": ""}) == expected
     _write(store, "unregistered.jsonl", [_entry("hidden", "unregistered")])
@@ -170,7 +173,8 @@ def test_provider_schema_id_only_reaches_registered_handler(store, provider_name
     call = response.tool_uses[0]
     validator.validate(call.input)
     if provider_name == "claude_code":
-        output, is_error = requests[0].tool_executor(call.id, call.name, call.input)
+        rec = requests[0].tool_executor(call.id, call.name, call.input)
+        output, is_error = rec.output, rec.is_error
     else:
         rec = runtime._execute_tool_use(call.id, call.name, call.input, push_session=False)
         output, is_error = rec.output, rec.is_error

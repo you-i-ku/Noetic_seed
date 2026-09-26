@@ -1,5 +1,6 @@
 """Elyth操作ツール（AITuber専用SNS）
 API キーは secrets.json の auth_profiles.elyth から取得する。"""
+from core.runtime.registry import ToolError, ToolResult, result_redactor
 import json
 import httpx
 from core.auth import get_auth_profile
@@ -20,9 +21,9 @@ def _elyth_headers():
 def _elyth_post(args):
     content = args.get("content", "")
     if not content:
-        return "エラー: contentを指定してください"
+        raise ToolError("エラー: contentを指定してください")
     if len(content) > 500:
-        return f"エラー: {len(content)}文字（500文字制限）"
+        raise ToolError(f"エラー: {len(content)}文字（500文字制限）")
     try:
         resp = httpx.post(f"{ELYTH_API_BASE}/api/mcp/posts",
                           headers=_elyth_headers(), json={"content": content}, timeout=15.0)
@@ -31,16 +32,18 @@ def _elyth_post(args):
         post_id = data.get("id", data.get("post_id", ""))
         # 段階10 Step 4 付帯 D: Fix 5 精神で post content truncation 撤去
         return f"投稿完了: {content}" + (f" (id={post_id})" if post_id else "")
+    except ToolError:
+        raise
     except Exception as e:
-        return f"エラー: {e}"
+        raise ToolError(f"エラー: {e}")
 
 def _elyth_reply(args):
     content = args.get("content", "")
     reply_to_id = args.get("reply_to_id", "")
     if not content or not reply_to_id:
-        return "エラー: contentとreply_to_idを指定してください"
+        raise ToolError("エラー: contentとreply_to_idを指定してください")
     if len(content) > 500:
-        return f"エラー: {len(content)}文字（500文字制限）"
+        raise ToolError(f"エラー: {len(content)}文字（500文字制限）")
     try:
         resp = httpx.post(f"{ELYTH_API_BASE}/api/mcp/posts",
                           headers=_elyth_headers(),
@@ -60,8 +63,10 @@ def _elyth_reply(args):
         # 段階10 Step 4 付帯 D: Fix 5 精神で reply content truncation 撤去
         # (reply_to_id の [:8] は UUID 短縮表示で発話境界じゃないので維持)
         return f"返信完了: {content} (reply_to={reply_to_id[:8]}...)"
+    except ToolError:
+        raise
     except Exception as e:
-        return f"エラー: {e}"
+        raise ToolError(f"エラー: {e}")
 
 
 def _try_mark_read_for_post(post_id: str):
@@ -81,6 +86,8 @@ def _try_mark_read_for_post(post_id: str):
             httpx.post(f"{ELYTH_API_BASE}/api/mcp/notifications/read",
                        headers=_elyth_headers(),
                        json={"notification_ids": notif_ids}, timeout=10.0)
+    except ToolError:
+        raise
     except Exception:
         pass  # 失敗しても返信自体は成功しているので無視
 
@@ -90,7 +97,7 @@ def _try_mark_read_for_post(post_id: str):
 def _elyth_like(args):
     post_id = args.get("post_id", "")
     if not post_id:
-        return "エラー: post_idを指定してください"
+        raise ToolError("エラー: post_idを指定してください")
     unlike = str(args.get("unlike", "")).lower() in ("true", "1", "yes")
     try:
         if unlike:
@@ -103,13 +110,15 @@ def _elyth_like(args):
                               headers=_elyth_headers(), timeout=15.0)
             resp.raise_for_status()
             return f"いいね完了: {post_id}"
+    except ToolError:
+        raise
     except Exception as e:
-        return f"エラー: {e}"
+        raise ToolError(f"エラー: {e}")
 
 def _elyth_follow(args):
     aituber_id = args.get("aituber_id", "") or args.get("handle", "")
     if not aituber_id:
-        return "エラー: aituber_idまたはhandleを指定してください"
+        raise ToolError("エラー: aituber_idまたはhandleを指定してください")
     unfollow = str(args.get("unfollow", "")).lower() in ("true", "1", "yes")
     try:
         if unfollow:
@@ -121,10 +130,12 @@ def _elyth_follow(args):
             resp = httpx.post(f"{ELYTH_API_BASE}/api/mcp/aitubers/{aituber_id}/follow",
                               headers=_elyth_headers(), timeout=15.0)
             resp.raise_for_status()
-            body = resp.text[:500]
+            body = result_redactor()(resp.text)[:500]
             return f"フォロー完了: {aituber_id} (応答: {body})"
+    except ToolError:
+        raise
     except Exception as e:
-        return f"エラー: {e}"
+        raise ToolError(f"エラー: {e}")
 
 
 # === 情報取得系 ===
@@ -188,7 +199,7 @@ def _format_notifications(data: dict) -> str:
     """通知データを整形。対応済みを除外し、reply_to_idの混同を防ぐ。"""
     notifs = data.get("notifications", [])
     if not notifs:
-        return json.dumps(data, ensure_ascii=False)[:3000]
+        return result_redactor()(json.dumps(data, ensure_ascii=False))[:3000]
 
     # 対応済みpost_idを取得
     state = load_state()
@@ -198,6 +209,8 @@ def _format_notifications(data: dict) -> str:
     try:
         if _resolve_elyth_feedback(notifs, state):
             save_state(state)
+    except ToolError:
+        raise
     except Exception:
         pass
 
@@ -214,7 +227,7 @@ def _format_notifications(data: dict) -> str:
         ntype = n.get("notification_type", "?")
         author = n.get("post_author_name", "?")
         handle = n.get("post_author_handle", "")
-        content = n.get("post_content", "")[:200]
+        content = result_redactor()(n.get("post_content", ""))[:200]
         post_id = n.get("post_id", "")
         notif_id = n.get("notification_id", "")
         created = n.get("notification_created_at", "")[:19]
@@ -228,7 +241,7 @@ def _format_notifications(data: dict) -> str:
     # 通知以外のデータも含める
     other = {k: v for k, v in data.items() if k != "notifications"}
     if other:
-        lines.append(f"\n{json.dumps(other, ensure_ascii=False)[:1000]}")
+        lines.append(f"\n{result_redactor()(json.dumps(other, ensure_ascii=False))[:1000]}")
     return "\n".join(lines)
 
 
@@ -236,6 +249,8 @@ def _elyth_info(args):
     """Elyth総合情報取得。section指定で絞り込み可能。"""
     section = args.get("section", "").strip()
     params = {}
+    if section and section not in _VALID_SECTIONS:
+        raise ToolError(f"エラー: section='{section}' は未対応です")
     if section and section in _VALID_SECTIONS:
         params["include"] = section
         if section == "notifications":
@@ -252,9 +267,11 @@ def _elyth_info(args):
         # 通知セクションがある場合は整形して返す
         if "notifications" in data and data["notifications"]:
             return _format_notifications(data)
-        return json.dumps(data, ensure_ascii=False)[:3000]
+        return result_redactor()(json.dumps(data, ensure_ascii=False))[:3000]
+    except ToolError:
+        raise
     except Exception as e:
-        return f"エラー: {e}"
+        raise ToolError(f"エラー: {e}")
 
 
 def _elyth_get(args):
@@ -267,54 +284,62 @@ def _elyth_get(args):
             resp = httpx.get(f"{ELYTH_API_BASE}/api/mcp/posts/mine",
                              headers=_elyth_headers(), params={"limit": str(limit)}, timeout=15.0)
             resp.raise_for_status()
-            return json.dumps(resp.json(), ensure_ascii=False)[:3000]
+            return result_redactor()(json.dumps(resp.json(), ensure_ascii=False))[:3000]
+        except ToolError:
+            raise
         except Exception as e:
-            return f"エラー: {e}"
+            raise ToolError(f"エラー: {e}")
 
     elif get_type == "thread":
         post_id = args.get("post_id", "")
         if not post_id:
-            return "エラー: post_idを指定してください"
+            raise ToolError("エラー: post_idを指定してください")
         try:
             resp = httpx.get(f"{ELYTH_API_BASE}/api/mcp/posts/{post_id}/thread",
                              headers=_elyth_headers(), timeout=15.0)
             resp.raise_for_status()
-            return json.dumps(resp.json(), ensure_ascii=False)[:3000]
+            return result_redactor()(json.dumps(resp.json(), ensure_ascii=False))[:3000]
+        except ToolError:
+            raise
         except Exception as e:
-            return f"エラー: {e}"
+            raise ToolError(f"エラー: {e}")
 
     elif get_type == "profile":
         handle = args.get("handle", "")
         if not handle:
-            return "エラー: handleを指定してください"
+            raise ToolError("エラー: handleを指定してください")
         try:
             limit = args.get("limit", "5")
             resp = httpx.get(f"{ELYTH_API_BASE}/api/mcp/aitubers/{handle}/profile",
                              headers=_elyth_headers(), params={"limit": str(limit)}, timeout=15.0)
             resp.raise_for_status()
-            return json.dumps(resp.json(), ensure_ascii=False)[:3000]
+            return result_redactor()(json.dumps(resp.json(), ensure_ascii=False))[:3000]
+        except ToolError:
+            raise
         except Exception as e:
-            return f"エラー: {e}"
+            raise ToolError(f"エラー: {e}")
 
     else:
-        return f"エラー: type='{get_type}' は未対応です。my_posts/thread/profile のいずれかを指定してください"
+        raise ToolError(f"エラー: type='{get_type}' は未対応です。my_posts/thread/profile のいずれかを指定してください")
 
 
 def _elyth_mark_read(args):
     """通知を既読にする。"""
     ids_raw = args.get("notification_ids", "")
     if not ids_raw:
-        return "エラー: notification_idsを指定してください（カンマ区切り）"
+        raise ToolError("エラー: notification_idsを指定してください（カンマ区切り）")
     if isinstance(ids_raw, str):
         ids_list = [x.strip() for x in ids_raw.split(",") if x.strip()]
     else:
         ids_list = list(ids_raw)
     if not ids_list:
-        return "エラー: notification_idsが空です"
+        raise ToolError("エラー: notification_idsが空です")
     try:
         resp = httpx.post(f"{ELYTH_API_BASE}/api/mcp/notifications/read",
                           headers=_elyth_headers(), json={"notification_ids": ids_list}, timeout=15.0)
         resp.raise_for_status()
         return f"既読完了: {len(ids_list)}件"
+    except ToolError:
+        raise
     except Exception as e:
-        return f"エラー: {e}"
+        raise ToolError(f"エラー: {e}")

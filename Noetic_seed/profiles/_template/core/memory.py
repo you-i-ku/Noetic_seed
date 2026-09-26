@@ -1,4 +1,6 @@
 """長期記憶管理（アーカイブ・要約・圧縮 + Entity/Opinionネットワーク）"""
+from core.runtime.registry import result_redactor
+
 import json
 import re
 import uuid
@@ -10,6 +12,8 @@ from core.llm import call_llm
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.tag_registry import is_tag_registered, list_registered_tags, get_tag_rules
 from core.perspective import Perspective, default_self_perspective
+from core.memory_read import MemoryReadReport, read_memory_jsonl
+from core.runtime.registry import ToolError
 
 # === Entity/Opinion Network (段階7: tag_registry で動的管理) ===
 # 段階6-C まで: _VALID_NETWORKS = {"experience", "opinion", "entity"} (ハードコード)
@@ -129,7 +133,8 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
                  _reconcile_embed_fn: Optional[object] = None,
                  _reconcile_cosine_fn: Optional[object] = None,
                  _reconcile_llm_fn: Optional[object] = None,
-                 _link_generation_enabled: bool = True) -> dict:
+                 _link_generation_enabled: bool = True,
+                 _post_save_failures: Optional[list] = None) -> dict:
     """記憶を保存。origin=生成きっかけ、source_context=根拠の出処。
 
     段階11-A: perspective kwarg を専用キーとして entry に昇格 (metadata と並列、
@@ -165,8 +170,10 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
             _meta = _generate_memory_metadata(content, network)
             keywords = _meta.get("keywords", [])
             contextual_description = _meta.get("contextual_description", "")
+        except ToolError:
+            raise
         except Exception as e:
-            print(f"  [memory] metadata 自動生成 skip (error: {e})")
+            print(f"  [memory] metadata 自動生成 skip (error: {result_redactor()(str(e))})")
             keywords = []
             contextual_description = ""
     else:
@@ -196,9 +203,15 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
     if _state is not None:
         _ef = _reconcile_embed_fn
         _cf = _reconcile_cosine_fn
-        if _ef is None and is_vector_ready():
-            _ef = _embed_sync
-            _cf = cosine_similarity
+        try:
+            if _ef is None and is_vector_ready():
+                _ef = _embed_sync
+                _cf = cosine_similarity
+        except Exception as e:
+            if _post_save_failures is None:
+                raise
+            _post_save_failures.append({"phase": "post_save_setup", "exception_type": type(e).__name__, "message": str(e)})
+            return entry
 
         # Phase 3 Step 3.3: reconciliation (矛盾検出 → EC 誤差)
         # bitemporal 凍結原則: 既存 fact は書き換えない
@@ -211,7 +224,9 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
                 llm_call_fn=_reconcile_llm_fn,
             )
         except Exception as e:
-            print(f"  [reconciliation] skip (error: {e})")
+            if _post_save_failures is not None:
+                _post_save_failures.append({"phase": "reconciliation", "exception_type": type(e).__name__, "message": str(e)})
+            print(f"  [reconciliation] skip (error: {result_redactor()(str(e))})")
 
         # Phase 4 Step 4.3: memory_links 同期生成 (近傍 top-K)
         if _link_generation_enabled:
@@ -222,64 +237,90 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
                     embed_fn=_ef,
                     cosine_fn=_cf,
                     llm_call_fn=_reconcile_llm_fn,
+                    **({"failures": _post_save_failures} if _post_save_failures is not None else {}),
                 )
             except Exception as e:
-                print(f"  [memory_links] skip (error: {e})")
+                if _post_save_failures is not None:
+                    _post_save_failures.append({"phase": "links", "exception_type": type(e).__name__, "message": str(e)})
+                print(f"  [memory_links] skip (error: {result_redactor()(str(e))})")
 
     return entry
 
 
-def memory_update(memory_id: str, content: str = None, metadata: dict = None) -> str:
-    """既存記憶を更新。
+def memory_update(memory_id: str, content: str = None, metadata: dict = None,
+                  *, read_report=None) -> str:
+    """Update a matching ID, retaining unreadable rows unchanged."""
+    def update(entry):
+        if content is not None:
+            entry["content"] = content
+        if metadata is not None:
+            entry.setdefault("metadata", {}).update(metadata)
+        entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return entry
+    found, searched = _mutate_memory(memory_id, update, read_report=read_report)
+    if not found:
+        raise ToolError(f"エラー: {memory_id} が見つかりません",
+                        detail={"memory_id": memory_id, "networks_searched": searched,
+                                **(vars(read_report) if read_report is not None else {})})
+    return f"更新完了: {memory_id}"
 
-    段階11-D Phase 1 (Step 1.1): UNTAGGED_NETWORK も走査対象に追加。
-    """
+
+def memory_forget(memory_id: str, *, read_report=None) -> str:
+    """Delete a matching ID; content substrings and blank rows are not IDs."""
+    found, searched = _mutate_memory(memory_id, lambda entry: None, read_report=read_report)
+    if not found:
+        raise ToolError(f"エラー: {memory_id} が見つかりません",
+                        detail={"memory_id": memory_id, "networks_searched": searched,
+                                **(vars(read_report) if read_report is not None else {})})
+    return f"削除完了: {memory_id}"
+
+
+def _mutate_memory(memory_id, mutate, *, read_report=None):
+    report = read_report if read_report is not None else MemoryReadReport()
+    searched = 0
     for network in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
-        fpath = _network_file(network)
-        if not fpath.exists():
+        searched += 1
+        path = _network_file(network)
+        if not path.exists():
             continue
-        lines = fpath.read_text(encoding="utf-8").splitlines()
-        updated = False
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            if read_report is None:
+                raise
+            report.files_unreadable += 1
+            continue
+        if not any(line.strip() for line in lines):
+            report.empty_files += 1
+        found = False
         new_lines = []
         for line in lines:
             if not line.strip():
+                new_lines.append(line)
                 continue
             try:
                 entry = json.loads(line)
-                if entry.get("id") == memory_id:
-                    if content is not None:
-                        entry["content"] = content
-                    if metadata is not None:
-                        entry["metadata"].update(metadata)
-                    entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    updated = True
-                new_lines.append(json.dumps(entry, ensure_ascii=False))
-            except Exception:
+                if not isinstance(entry, dict):
+                    raise ValueError("memory row is not an object")
+            except ValueError:
+                report.rows_unreadable += 1
                 new_lines.append(line)
-        if updated:
-            fpath.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-            return f"更新完了: {memory_id}"
-    return f"エラー: {memory_id} が見つかりません"
+                continue
+            report.records_read += 1
+            if entry.get("id") != memory_id:
+                new_lines.append(line)
+                continue
+            updated = mutate(entry)
+            found = True
+            if updated is not None:
+                new_lines.append(json.dumps(updated, ensure_ascii=False))
+        if found:
+            path.write_text("\n".join(new_lines) + "\n" if new_lines else "", encoding="utf-8")
+            return True, searched
+    return False, searched
 
 
-def memory_forget(memory_id: str) -> str:
-    """記憶を削除。
-
-    段階11-D Phase 1 (Step 1.1): UNTAGGED_NETWORK も走査対象に追加。
-    """
-    for network in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
-        fpath = _network_file(network)
-        if not fpath.exists():
-            continue
-        lines = fpath.read_text(encoding="utf-8").splitlines()
-        new_lines = [l for l in lines if l.strip() and memory_id not in l]
-        if len(new_lines) < len(lines):
-            fpath.write_text("\n".join(new_lines) + "\n" if new_lines else "", encoding="utf-8")
-            return f"削除完了: {memory_id}"
-    return f"エラー: {memory_id} が見つかりません"
-
-
-def load_all_memories() -> list:
+def load_all_memories(*, read_report=None) -> list:
     """全 network (UNTAGGED 含む) の memory entry を 1 list に集めて返す。
 
     段階11-D Phase 5 Step 5.2: cluster 推定 (estimate_clusters) の入力源。
@@ -301,17 +342,7 @@ def load_all_memories() -> list:
         fpath = _network_file(network)
         if not fpath.exists():
             continue
-        try:
-            lines = fpath.read_text(encoding="utf-8").splitlines()
-        except Exception:
-            continue
-        for line in reversed(lines):
-            if not line.strip():
-                continue
-            try:
-                all_entries.append(json.loads(line))
-            except Exception:
-                continue
+        all_entries.extend(read_memory_jsonl(fpath, report=read_report, reverse=True))
     return all_entries
 
 
@@ -372,7 +403,7 @@ def load_all_subjective_entries() -> list:
     return entries
 
 
-def list_records(network, limit: int = 20) -> list:
+def list_records(network, limit: int = 20, *, read_report=None) -> list:
     """指定ネットワークの jsonl を新しい順に読んで直近 limit 件を返す。
     WM の C-gradual 同期 (段階3) 等、検索ではなく全件走査系の消費者向け。
 
@@ -382,27 +413,11 @@ def list_records(network, limit: int = 20) -> list:
     if network != UNTAGGED_NETWORK and not is_tag_registered(network):
         return []
     fpath = _network_file(network)
-    if not fpath.exists():
-        return []
-    try:
-        lines = fpath.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return []
-    records = []
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            records.append(json.loads(line))
-        except Exception:
-            continue
-        if len(records) >= limit:
-            break
-    return records
+    return read_memory_jsonl(fpath, report=read_report, reverse=True, limit=limit)
 
 
 def memory_network_search(query: str, networks: list = None, limit: int = 5,
-                           view_filter: Optional[dict] = None) -> list:
+                           view_filter: Optional[dict] = None, *, read_report=None) -> list:
     """Entity/Opinionネットワークをベクトル検索。
 
     段階11-A Step 6: view_filter kwarg 追加 (perspective filter)。
@@ -423,15 +438,7 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5,
         if network != UNTAGGED_NETWORK and not is_tag_registered(network):
             continue
         fpath = _network_file(network)
-        if not fpath.exists():
-            continue
-        for line in fpath.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                all_entries.append(json.loads(line))
-            except Exception:
-                pass
+        all_entries.extend(read_memory_jsonl(fpath, report=read_report))
     if not all_entries:
         return []
 
@@ -456,6 +463,8 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5,
                           for i in range(len(all_entries))]
                 scored.sort(key=lambda x: x[0], reverse=True)
                 return [{"score": s, **e} for s, e in scored[:limit]]
+        except ToolError:
+            raise
         except Exception:
             pass
     # フォールバック: キーワード
@@ -583,7 +592,7 @@ def get_relevant_memories(
                                                   current_cycle=current_cycle,
                                                   prediction_error=current_pe)
                     except Exception as e:
-                        print(f"  [memory_links] strength update skip (error: {e})")
+                        print(f"  [memory_links] strength update skip (error: {result_redactor()(str(e))})")
                 merged.append(entry)
                 seen_ids.add(eid)
 
@@ -614,7 +623,7 @@ def get_relevant_memories(
                         current_cycle=current_cycle,
                     )
             except Exception as e:
-                print(f"  [memory_links] co_activation hook skip (error: {e})")
+                print(f"  [memory_links] co_activation hook skip (error: {result_redactor()(str(e))})")
 
     # 段階13 Phase 1: subjective entry 直近 N 件を kind='subjective' marker で append。
     # PLAN §21-6 (d) literal「結果 list に subj entry も append」+ 案 b (concept-perception
@@ -956,7 +965,7 @@ def _enrich_subjective_inline(entry: dict) -> None:
             entry["keywords"] = metadata.get("keywords", [])
             entry["contextual_description"] = metadata.get("contextual_description", "")
         except Exception as e:
-            print(f"  [phase1] subj metadata 生成 skip (error: {e})")
+            print(f"  [phase1] subj metadata 生成 skip (error: {result_redactor()(str(e))})")
             entry["keywords"] = []
             entry["contextual_description"] = ""
 
@@ -967,7 +976,7 @@ def _enrich_subjective_inline(entry: dict) -> None:
             if vecs and len(vecs) == 1:
                 entry["embedding"] = list(vecs[0])
         except Exception as e:
-            print(f"  [phase1] subj embedding 生成 skip (error: {e})")
+            print(f"  [phase1] subj embedding 生成 skip (error: {result_redactor()(str(e))})")
 
 
 def _record_entry(state: dict, entry: dict) -> None:

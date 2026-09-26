@@ -35,7 +35,7 @@ def _compile_main_parts(env):
     tree = ast.parse(MAIN_SOURCE)
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
     hook = next(n for n in main.body if isinstance(n, ast.FunctionDef)
-                and n.name == "_post_hook_with_sync")
+                and n.name == "_post_hook")
     registration = next(n for n in main.body if isinstance(n, ast.Expr)
                         and isinstance(n.value, ast.Call)
                         and any(isinstance(a, ast.Name) and a.id == hook.name
@@ -76,9 +76,8 @@ class FakeProvider(BaseProvider):
         if self.completed:
             records = []
             for call in calls:
-                output, is_error = request.tool_executor(call.id, call.name, call.input)
-                records.append(dict(tool_id=call.id, tool_name=call.name,
-                                    tool_input=call.input, output=output, is_error=is_error))
+                rec = request.tool_executor(call.id, call.name, call.input)
+                records.append(vars(rec))
             return AssistantMessage(tool_invocations=records)
         return AssistantMessage(tool_uses=calls)
 
@@ -110,7 +109,7 @@ def _exercise(stages, planned=None, completed=False, old_e=True, llm_responses=N
     def handler(args):
         if args.get("fail"):
             raise RuntimeError("tool failed")
-        return f"result {args['score']}"
+        return args.get("echo", f"result {args['score']}")
 
     for name in names:
         registry.register(ToolSpec(name, "", {"type": "object"}, PermissionMode.READ_ONLY, handler))
@@ -133,7 +132,7 @@ def _exercise(stages, planned=None, completed=False, old_e=True, llm_responses=N
         copy=copy, json=json, re=re, datetime=datetime, state=state,
         _hook_runner=hooks, _runtime=runtime, _rt_registry=registry,
         _hook_ctx={"state_before": copy.deepcopy(state), "evaluations": []},
-        _refresh_state=Mock(), _base_post_hook=evaluation, save_state=Mock(),
+        _base_post_hook=evaluation, save_state=Mock(),
         selected={"tool": planned[0], "tools": planned, "reason": "test",
                   "chain": [{"tool": n, "predicted_e2": 90 - i * 20,
                              "predicted_ec": 0.9 - i * 0.2} for i, n in enumerate(planned)],

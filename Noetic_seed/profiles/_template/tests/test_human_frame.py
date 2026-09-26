@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.approval_callback import make_approval_callback, _format_preview
 from core.runtime.approval_rules import make_policy_fn
 from core.runtime.hooks import HookRunner, make_pre_tool_use_approval_check
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tools import (
     register_all, ensure_approval_props,
     ensure_noetic_file_hints, ensure_noetic_bash_hint,
@@ -155,8 +155,10 @@ def test_all_registered_schemas_preserve_business_message(tmp_path, provider_nam
     # 共通 schema を使い回し、他の legacy tool に message が漏れる誤実装を検出。
     assert "message" not in reg.get("elyth_post").input_schema["properties"]
     from core.runtime.tools import task, ui
-    assert "message is required" in task.task_update({"task_id": "missing", "note": "N"})
-    assert "message is required" in ui.send_user_message({"note": "N"})
+    with pytest.raises(ToolError, match="message is required"):
+        task.task_update({"task_id": "missing", "note": "N"})
+    with pytest.raises(ToolError, match="message is required"):
+        ui.send_user_message({"note": "N"})
 
 
 def _assert_no_approval_notice(value):
@@ -252,11 +254,12 @@ def test_internal_confirmation_remains_separate(monkeypatch, auto_all, outer_cou
         inp["note"] = "外側自由欄"
     assert not hook("secret_write", inp).denied
     assert callback("secret_write", inp, [])
-    result = secret_tools.secret_write(inp)
+    with pytest.raises(ToolError, match="キャンセル"):
+        secret_tools.secret_write(inp)
     assert outer.call_count == outer_count and inner.call_count == 1
     assert "内部用説明" in inner.call_args.args[1]
     assert "外側自由欄" not in inner.call_args.args[1]
-    assert "キャンセル" in result  # 実ファイルへの書込なし
+    # 実ファイルへの書込なし。内部の拒否も ToolError として伝わる。
 
 
 def test_main_wires_same_policy_before_hook():
