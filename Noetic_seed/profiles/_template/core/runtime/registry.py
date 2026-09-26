@@ -6,6 +6,7 @@ mcp_tool_bridge (rust/crates/runtime/src/mcp_tool_bridge.rs) の Python port。
 厳密 claw-code 準拠。Noetic 固有機能は含めない。
 """
 from typing import Optional
+from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 import math
@@ -13,6 +14,10 @@ import re
 from urllib.parse import quote, unquote
 
 from core.runtime.tool_schema import ToolSpec
+
+
+# Runtime-owned invocation metadata; never supplied through the tool schema.
+current_tool_id = ContextVar("current_tool_id", default="")
 
 
 class ToolError(Exception):

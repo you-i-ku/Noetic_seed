@@ -1198,12 +1198,14 @@ def main():
             if delta != 0:
                 print(f"  energy: {round(state['energy'], 1)} (delta={delta:+.2f})")
 
-        _FLAG_TERMS = ["AIアシスタント", "AI assistant", "AIAssistant"]
-        detected = [t for t in _FLAG_TERMS if t in propose_resp or t in _last_llm_text]
-        if detected:
-            flag_msg = f"[SYSTEM] 検出: {' / '.join(f'「{t}」' for t in detected)} という自己定義が検出・記録されました。"
-            print(f"  {flag_msg}")
-            result_str += f"\n{flag_msg}"
+        try:
+            from core.metrics import emit_identity_term_detected
+            emit_identity_term_detected(
+                run_id=state.get("run_id", ""), cycle_id=state.get("cycle_id", 0) + 1,
+                llm1_text=propose_resp, llm2_text=_last_llm_text,
+            )
+        except Exception as exc:
+            print(f"  [identity] term observation skip: {exc}")
         if lv_msg:
             result_str += f"\n{lv_msg}"
 

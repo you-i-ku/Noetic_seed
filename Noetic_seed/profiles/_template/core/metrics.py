@@ -721,6 +721,53 @@ def emit_outward_attempt(event: dict) -> dict:
     return event
 
 
+IDENTITY_TERM_DETECTOR_VERSION = "substring-v1"
+_IDENTITY_TERMS = ("AIアシスタント", "AI assistant", "AIAssistant")
+
+
+def _emit_identity_observation(event: dict) -> bool:
+    """Append once, independently of state and cognitive memory; failures are observational."""
+    from core.config import MEMORY_DIR
+    target = MEMORY_DIR / METRICS_FILE_NAME
+    try:
+        _atomic_append_jsonl(target, event)
+    except Exception as exc:
+        print(f"  [identity] append skip ({event['event_type']}): {exc}")
+        return False
+    try:
+        _update_metrics_index(MEMORY_DIR / INDEX_FILE_NAME, target.name, event)
+    except Exception as exc:
+        print(f"  [identity] index skip (行は保存済み): {exc}")
+    return True
+
+
+def emit_identity_term_detected(*, run_id: str, cycle_id: int,
+                                llm1_text: str, llm2_text: str) -> bool:
+    """One event per cycle, preserving each term/source pair (including quotes/negation)."""
+    detections = [
+        {"term": term, "source": source}
+        for source, text in (("LLM①", llm1_text), ("LLM②", llm2_text))
+        for term in _IDENTITY_TERMS if term in text
+    ]
+    if not detections:
+        return False
+    return _emit_identity_observation({
+        "event_type": "identity_term_detected",
+        "time": datetime.now().isoformat(), "run_id": run_id, "cycle_id": cycle_id,
+        "detections": detections, "detector_version": IDENTITY_TERM_DETECTOR_VERSION,
+    })
+
+
+def emit_identity_name_changed(*, run_id: str, cycle_id: int,
+                               old_name: str, new_name: str, tool_id: str) -> bool:
+    """Called only after successful persistence by update_self, using its live state."""
+    return _emit_identity_observation({
+        "event_type": "identity_name_changed",
+        "time": datetime.now().isoformat(), "run_id": run_id, "cycle_id": cycle_id,
+        "old_name": old_name, "new_name": new_name, "tool_id": tool_id,
+    })
+
+
 _APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome", "note")
 
 

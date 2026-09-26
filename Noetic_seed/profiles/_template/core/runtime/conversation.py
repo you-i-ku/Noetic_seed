@@ -17,7 +17,7 @@ from core.runtime.permissions import (
     PermissionMode,
 )
 from core.runtime.registry import (ToolRegistry, ToolError, ToolResult, result_redactor,
-                                   normalize_detail, exception_detail)
+                                   normalize_detail, exception_detail, current_tool_id)
 from core.runtime.session import Session
 
 
@@ -377,7 +377,11 @@ class ConversationRuntime:
 
         try:
             rec.tool_input = current_input
-            output = self.tool_registry.execute(tool_name, current_input)
+            token = current_tool_id.set(tool_id)
+            try:
+                output = self.tool_registry.execute(tool_name, current_input)
+            finally:
+                current_tool_id.reset(token)
         except Exception as e:
             expected = isinstance(e, ToolError)
             detail = e.detail if expected else exception_detail(e)

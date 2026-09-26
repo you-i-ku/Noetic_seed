@@ -154,13 +154,13 @@ def test_update_self_multi_key_grows_components(mock_state_and_bge_m3):
 def test_update_self_name_key_silently_ignores_confidence(mock_state_and_bge_m3):
     """case F (§6.5 NAME_KEY exception): key='name' のとき confidence 引数 silently ignore。
 
-    NAME_KEY は不変層 exception (PLAN §5.4 literal)、_efe_self_confidence に追加されない。
+    NAME_KEY は改名しても _efe_self_confidence に追加されない。
     識別力誤実装 fail: name exception 漏れで _efe_self_confidence['name'] = 0.5 になる
     実装で assert fail。
     """
     mock_state = mock_state_and_bge_m3
-    # 先に non-name key を立ててから name 設定 (NAME_KEY は state.self の初期値で
-    # 既に何か入ってると拒否されるため、clean な状態で初回 name set を simulate)
+    # E-4: 既存の名前からの改名でも confidence/C 除外は維持する。
+    mock_state["self"]["name"] = "old-name"
     result = _update_self("name", "iku", confidence=0.5)
     _rebuild_efe_C_snapshot(mock_state)  # V07.5 commit 4 A2 cycle end hook simulate
 

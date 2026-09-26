@@ -73,12 +73,12 @@ _NOETIC_FILE_HINTS = {
         "その他の workspace 配下は自由に読めます。"
     ),
     "write_file": (
-        "[Noetic 制約] 書込先は profile 配下 (= 自分の身体、PLAN §3-1)。"
+        "[Noetic 制約] 書込先は現在の作業ディレクトリ (このプロファイルのフォルダ) の中。"
         "secrets.json / sandbox/secrets/ は secret_write を使用。"
-        "profile 外への書込はガードで拒否されます。"
+        "作業ディレクトリの外への書込はガードで拒否されます。"
     ),
     "edit_file": (
-        "[Noetic 制約] 編集対象は profile 配下。"
+        "[Noetic 制約] 編集対象は現在の作業ディレクトリ (このプロファイルのフォルダ) の中。"
         "secrets.json / sandbox/secrets/ は secret_write を使用。"
     ),
     "glob_search": (

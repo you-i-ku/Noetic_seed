@@ -1,6 +1,7 @@
-"""HUMAN_FRAME_PLAN v0.3 §4-2: 条件付き note と本来の message を区別する。"""
+"""HUMAN_FRAME_PLAN v0.4: 条件付き note、観察専用の検出、改名。"""
 import ast
 import copy
+import json
 import re
 import sys
 from pathlib import Path
@@ -28,6 +29,8 @@ from core.runtime.tool_schema import ToolSpec
 from test_runtime_core import MockProvider
 from test_prompt_assembly import _fresh_state, _sample_tools
 from core.prompt_assembly import assemble_system_prompt
+from test_outward_metrics import fixed_io  # noqa: F401
+from test_failure_contract_foundation import persistence_io  # noqa: F401
 
 
 REASONS = {"tool_intent": "自分の理由", "tool_expected_outcome": "自分の予想"}
@@ -154,6 +157,14 @@ def test_all_registered_schemas_preserve_business_message(tmp_path, provider_nam
             assert "message" not in props, spec.name
     # 共通 schema を使い回し、他の legacy tool に message が漏れる誤実装を検出。
     assert "message" not in reg.get("elyth_post").input_schema["properties"]
+    for name in ("write_file", "edit_file"):
+        description = reg.get(name).description
+        assert "現在の作業ディレクトリ" in description
+        assert "PLAN §" not in description and "profile 配下" not in description
+        assert "profile 外" not in description
+    name_description = reg.get("update_self").description + json.dumps(
+        reg.get("update_self").input_schema, ensure_ascii=False)
+    assert "変更不可" not in name_description and "不変" not in name_description
     from core.runtime.tools import task, ui
     with pytest.raises(ToolError, match="message is required"):
         task.task_update({"task_id": "missing", "note": "N"})
@@ -274,3 +285,176 @@ def test_main_wires_same_policy_before_hook():
         kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
         assert kw["policy_fn"] == "_policy_fn"
         assert kw["auto_approve_all"] == "_approval_cfg.get('auto_approve_all', False)"
+
+
+def _identity_events(directory):
+    path = directory / "metrics_events.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if json.loads(line)["event_type"].startswith("identity_")] if path.exists() else []
+
+
+@pytest.mark.parametrize("source", ["LLM①", "LLM②", "both", "neither"])
+@pytest.mark.parametrize("term", ["AIアシスタント", "AI assistant", "AIAssistant"])
+def test_identity_detection_fire_is_observation_only(monkeypatch, fixed_io, source, term):
+    """Execute main's actual fire: wrong side, missing wire, memory injection and duplicates fail."""
+    from core import metrics
+    from test_outward_metrics import _fire_harness, _run, FakeProvider
+    original = FakeProvider.stream
+    def stream(provider, request):
+        message = original(provider, request)
+        message.text = f"引用: {term} / {term}" if source in ("LLM②", "both") else "本文"
+        return message
+    monkeypatch.setattr(FakeProvider, "stream", stream)
+    proposal = "1. [考える] → reflect (pe2=40, pec=0.2)\n2. [応答] → output_display (pe2=70, pec=0.5)"
+    if source in ("LLM①", "both"):
+        proposal += f"\n引用: {term} / {term}"
+    baseline = _fire_harness(monkeypatch, fixed_io, proposal=proposal)
+    with monkeypatch.context() as patch:
+        patch.setattr(metrics, "emit_identity_term_detected", lambda **kw: None)
+        baseline_result = _run(baseline[0]["observed"])
+    observed = _fire_harness(monkeypatch, fixed_io, proposal=proposal)
+    assert _run(observed[0]["observed"]) == baseline_result
+    assert observed[1] == baseline[1]  # includes raw_events / subjective_entries
+    assert observed[2] == baseline[2]
+    assert [(r.system_prompt, r.messages) for r in observed[3]] == [
+        (r.system_prompt, r.messages) for r in baseline[3]]
+    assert "[SYSTEM] 検出" not in repr(observed[1])
+    events = _identity_events(fixed_io)
+    if source == "neither":
+        assert events == []
+    else:
+        assert len(events) == 1
+        event = events[0]
+        assert event["event_type"] == "identity_term_detected"
+        assert (event["run_id"], event["cycle_id"]) == ("r", 4)
+        assert event["detector_version"] == "substring-v1"
+        sources = ["LLM①", "LLM②"] if source == "both" else [source]
+        assert event["detections"] == [{"term": term, "source": side} for side in sources]
+
+
+def test_identity_detection_emit_exception_does_not_stop_fire(monkeypatch, fixed_io):
+    from core import metrics
+    from test_outward_metrics import _fire_harness, _run
+    observed = _fire_harness(monkeypatch, fixed_io)
+    monkeypatch.setattr(metrics, "emit_identity_term_detected", Mock(side_effect=OSError("offline")))
+    _run(observed[0]["observed"])
+    assert observed[1]["cycle_id"] == 4 and observed[1]["raw_events"]
+
+
+def _name_runtime():
+    from types import SimpleNamespace
+    from tools import TOOLS
+    reg = ToolRegistry()
+    register_noetic_tools(reg, TOOLS)
+    return ConversationRuntime(SimpleNamespace(name="anthropic"), reg, HookRunner(),
+                               PermissionEnforcer(PermissionMode.ALLOW))
+
+
+def _live_name(st):
+    state = st.load_state()
+    state.update(run_id="disk-run", cycle_id=2)
+    state["self"]["name"] = "before"
+    st.bind_live_state(state)
+    assert st.save_state(state)
+    # Deliberately newer than disk: an extra load/copy loses the run/cycle and this field.
+    state.update(run_id="live-run", cycle_id=8, live_only="keep")
+    return state
+
+
+def test_identity_name_change_uses_saved_live_state(persistence_io):
+    from datetime import datetime
+    from core.runtime.registry import current_tool_id
+    st = persistence_io
+    state = _live_name(st)
+    rt = _name_runtime()
+    for tool_id, value in (("rename-1", "after"), ("rename-2", "after"), ("rename-3", "third")):
+        rec = rt._execute_tool_use(tool_id, "update_self", {"key": "name", "value": value,
+                                                          "confidence": 0.2, "tool_id": "spoof"})
+        assert not rec.is_error and rec.output == f"self[name] = {value}"
+        assert current_tool_id.get() == ""
+    events = _identity_events(st.MEMORY_DIR)
+    assert len(events) == 2
+    for event, old, new, tool_id in zip(events, ["before", "after"], ["after", "third"],
+                                       ["rename-1", "rename-3"]):
+        assert event["event_type"] == "identity_name_changed"
+        assert (event["old_name"], event["new_name"], event["tool_id"]) == (old, new, tool_id)
+        assert (event["run_id"], event["cycle_id"]) == ("live-run", 9)
+        datetime.fromisoformat(event["time"])
+    assert st.load_state() is state and state["self"]["name"] == "third"
+    disk = json.loads(st.STATE_FILE.read_text(encoding="utf-8"))
+    assert disk["self"]["name"] == "third" and disk["live_only"] == "keep"
+    assert "name" not in state.get("_efe_self_confidence", {})
+    assert "identity_name_changed" not in json.dumps(state)
+    st.bind_live_state(None)
+    assert st.load_state()["self"]["name"] == "third"
+
+
+@pytest.mark.parametrize("value", ["", " \t", "AIアシスタント", "AI assistant", "AIAssistant"])
+def test_identity_name_rejection_is_tool_error_without_event(persistence_io, value):
+    st = persistence_io
+    state = _live_name(st)
+    before = copy.deepcopy(state)
+    rec = _name_runtime()._execute_tool_use("reject", "update_self", {"key": "name", "value": value})
+    assert rec.is_error and rec.error_kind == "tool_failure"
+    assert not rec.output.startswith("tool execution error:")
+    assert state == before and _identity_events(st.MEMORY_DIR) == []
+
+
+@pytest.mark.parametrize("failure", ["false", "raise"])
+def test_identity_name_failed_save_does_not_emit(persistence_io, monkeypatch, failure):
+    from tools import builtin
+    from core import metrics
+    st = persistence_io
+    state = _live_name(st)
+    emit = Mock()
+    monkeypatch.setattr(metrics, "emit_identity_name_changed", emit)
+    def save(current):
+        assert current is state
+        assert not emit.called  # Detect emission before persistence.
+        if failure == "raise":
+            raise OSError("save failed")
+        return False
+    monkeypatch.setattr(builtin, "save_state", save)
+    _name_runtime()._execute_tool_use("failed", "update_self", {"key": "name", "value": "after"})
+    emit.assert_not_called()
+    assert _identity_events(st.MEMORY_DIR) == []
+    assert json.loads(st.STATE_FILE.read_text(encoding="utf-8"))["self"]["name"] == "before"
+
+
+def test_identity_name_observation_exception_does_not_undo_save(persistence_io, monkeypatch):
+    from core import metrics
+    st = persistence_io
+    _live_name(st)
+    monkeypatch.setattr(metrics, "emit_identity_name_changed", Mock(side_effect=OSError("offline")))
+    rec = _name_runtime()._execute_tool_use("saved", "update_self", {"key": "name", "value": "after"})
+    assert not rec.is_error
+    assert json.loads(st.STATE_FILE.read_text(encoding="utf-8"))["self"]["name"] == "after"
+
+
+@pytest.mark.parametrize("kind", ["name", "term"])
+@pytest.mark.parametrize("failure", [None, "append", "index"])
+def test_identity_metrics_append_and_index_failures(monkeypatch, tmp_path, kind, failure):
+    from core import metrics
+    monkeypatch.setattr("core.config.MEMORY_DIR", tmp_path)
+    if failure:
+        method = "_atomic_append_jsonl" if failure == "append" else "_update_metrics_index"
+        monkeypatch.setattr(metrics, method, Mock(side_effect=OSError(failure)))
+    if kind == "name":
+        result = metrics.emit_identity_name_changed(run_id="r", cycle_id=5,
+                    old_name="before", new_name="after", tool_id="t")
+    else:
+        result = metrics.emit_identity_term_detected(run_id="r", cycle_id=5,
+                    llm1_text="AIアシスタント AI assistant", llm2_text="AIAssistant AI assistant")
+    assert result is (failure != "append")
+    events = _identity_events(tmp_path)
+    assert len(events) == (0 if failure == "append" else 1)
+    if events and kind == "term":
+        assert events[0]["detections"] == [
+            {"term": "AIアシスタント", "source": "LLM①"},
+            {"term": "AI assistant", "source": "LLM①"},
+            {"term": "AI assistant", "source": "LLM②"},
+            {"term": "AIAssistant", "source": "LLM②"},
+        ]
+    if failure is None:
+        index = json.loads((tmp_path / metrics.INDEX_FILE_NAME).read_text(encoding="utf-8"))
+        assert index[metrics.METRICS_FILE_NAME]["count"] == 1

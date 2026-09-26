@@ -6,10 +6,10 @@ hint string が「sandbox/ 以下のみ」という旧仕様のまま残って�
 core/*.py の書換えを諦めて reboot 直行する現象が観察された)。
 
 逆戻りガード:
-  - write_file hint に「profile」が含まれる (新仕様)
+  - write_file hint に「現在の作業ディレクトリ」が含まれる
   - write_file hint に「sandbox/ 以下のみ」「sandbox/ 外への書込」等の旧記述
     が含まれない
-  - edit_file hint に「profile」が含まれる
+  - edit_file hint に「現在の作業ディレクトリ」が含まれる
   - edit_file hint に「sandbox/ 以下のみ」が含まれない
 
 使い方:
@@ -35,8 +35,8 @@ def test_write_file_hint_profile_scope():
     """write_file hint が profile 配下を許可していること (段階12 仕様)。"""
     hint = _NOETIC_FILE_HINTS.get("write_file", "")
     _assert(
-        "profile" in hint,
-        "write_file hint に 'profile' (= 段階12 仕様の身体範囲) が含まれる",
+        "現在の作業ディレクトリ" in hint,
+        "write_file hint が実際の書込範囲を示す",
     )
 
 
@@ -59,8 +59,8 @@ def test_edit_file_hint_profile_scope():
     """edit_file hint が profile 配下を許可していること。"""
     hint = _NOETIC_FILE_HINTS.get("edit_file", "")
     _assert(
-        "profile" in hint,
-        "edit_file hint に 'profile' が含まれる",
+        "現在の作業ディレクトリ" in hint,
+        "edit_file hint が実際の編集範囲を示す",
     )
 
 

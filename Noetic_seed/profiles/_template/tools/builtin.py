@@ -9,7 +9,7 @@ import time
 import math
 from core.runtime.registry import ToolError, ToolResult, result_redactor
 from core.config import BASE_DIR, SANDBOX_DIR
-from core.state import load_state, save_state
+from core.state import load_state, save_state, state_locked
 
 # AIから見えないファイル
 _HIDDEN_ALWAYS = {"raw_log.txt", "llm_debug.log", "setup.bat", "_setup.py", "run.bat", "requirements.txt", "settings.json"}
@@ -227,6 +227,7 @@ def _listen_audio(args: dict) -> str:
     return message
 
 
+@state_locked
 def _update_self(key: str, value: str, confidence=None) -> str:
     """自己モデル更新。
 
@@ -240,19 +241,17 @@ def _update_self(key: str, value: str, confidence=None) -> str:
     として literal 再構築 (Active Inference posterior observer pattern、homeostatic
     prior preferences として固定 snapshot)。
 
-    NAME_KEY exception: key="name" は不変層、confidence 引数は silently ignore
+    NAME_KEY exception: key="name" の confidence 引数は silently ignore
     (NAME_KEY は _efe_self_confidence に含めない、_efe_C source からも自動除外)。
     """
     if not key:
         raise ToolError("エラー: keyが空です")
     state = load_state()
     if key == "name":
-        current = str(state["self"].get("name", "")).strip()
-        if current:
-            raise ToolError(f"エラー: nameは既に「{current}」として確定しています。変更できません")
+        current = state["self"].get("name", "")
         if not value.strip():
             raise ToolError("エラー: 空のnameは設定できません")
-        # 段階11-C sub-B: identity name guard (LLM 役割語ブロック、cycle 1 汚染防止)
+        # 初回設定・改名とも identity_guard の役割語ブロックを維持する。
         from core.identity_guard import validate_identity_name
         ok, msg = validate_identity_name(value)
         if not ok:
@@ -280,7 +279,17 @@ def _update_self(key: str, value: str, confidence=None) -> str:
         state["_efe_self_confidence"][key] = conf_val
     # NAME_KEY の場合: confidence 引数は無視 (silently ignore、ToolSpec docstring 記載済)
 
-    save_state(state)
+    saved = save_state(state)
+    if key == NAME_KEY and saved and current != value:
+        try:
+            from core.metrics import emit_identity_name_changed
+            from core.runtime.registry import current_tool_id
+            emit_identity_name_changed(
+                run_id=state.get("run_id", ""), cycle_id=state.get("cycle_id", 0) + 1,
+                old_name=current, new_name=value, tool_id=current_tool_id.get(),
+            )
+        except Exception as exc:
+            print(f"  [identity] name observation skip: {exc}")
     return f"self[{key}] = {value}"
 
 
