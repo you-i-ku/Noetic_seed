@@ -197,6 +197,55 @@ MUTANTS = [('ToolError prefix',
   'test_sanity_check_preserves_tool_error_identity')]
 
 
+MUTANTS.extend([
+    ("search error leaks protected path", "core.runtime.tools.file_ops",
+     'f"Error: search failed ({kind})"', 'f"Error: search failed ({exc})"',
+     'tests/test_failure_contract_file_shell_web.py::test_search_path_errors_never_expose_secret_names'),
+    ("partial reflect rejected", "core.reflection",
+     '                skipped[kind] = skipped.get(kind, 0) + 1',
+     '                raise ToolError("bad line rejects entire response")',
+     'test_manual_reflect_partial_success_and_detail'),
+    ("readable reflect items dropped", "core.reflection",
+     '            accepted.append(line)', '            pass',
+     'test_manual_reflect_partial_success_and_detail'),
+    ("empty reflect is success", "core.reflection",
+     '    if not readable:', '    if False:',
+     'test_manual_reflect_empty_sections_fail_and_automatic_fallback'),
+    ("manual LLM failure swallowed", "core.reflection",
+     '        if strict:\n            if isinstance(e, ToolError):',
+     '        if False:\n            if isinstance(e, ToolError):',
+     'test_manual_reflect_failure_not_zero_success'),
+    ("reflect detail dropped", "main",
+     'detail=result.get("parse_detail")', 'detail=None',
+     'test_manual_reflect_partial_success_and_detail'),
+    ("automatic reflect becomes strict", "core.reflection",
+     'else reflect_fn(state, call_llm_fn)', 'else reflect_fn(state, call_llm_fn, strict=True)',
+     'test_automatic_reflect_keeps_permissive_behavior'),
+    ("root search rejected again", "core.runtime.hooks",
+     '        # Root search is allowed;',
+     '        if tool_name in ("glob_search", "grep_search") and rel == ".":\n'
+     '            return HookRunResult.deny(["root scan denied"])\n        # Root search is allowed;',
+     'tests/test_failure_contract_file_shell_web.py::test_root_search_filters_secret_paths_before_reads'),
+    ("protected search candidates leak", "core.runtime.tools.file_ops",
+     '            excluded += 1\n            continue', '            excluded += 1',
+     'tests/test_failure_contract_file_shell_web.py::test_root_search_filters_secret_paths_before_reads'),
+    ("grep bypasses candidate filtering", "core.runtime.tools.file_ops",
+     'candidates, excluded = _search_candidates(workspace_root, start, glob_pat)',
+     'candidates, excluded = sorted(start.glob(glob_pat)), 0',
+     'tests/test_failure_contract_file_shell_web.py::test_root_search_filters_secret_paths_before_reads'),
+    ("public search candidates dropped", "core.runtime.tools.file_ops",
+     '        candidates.append(path)', '        pass',
+     'tests/test_failure_contract_file_shell_web.py::test_root_search_filters_secret_paths_before_reads'),
+    ("brace glob silently empty", "core.runtime.tools.file_ops",
+     '    if "{" in pattern or "}" in pattern:', '    if False:',
+     'tests/test_failure_contract_file_shell_web.py::test_glob_braces_are_explicit_tool_failure'),
+    ("protected aliases leak", "core.runtime.tools.file_ops",
+     'or target == secret_file.resolve() or target.is_relative_to(secret_dir.resolve())',
+     'or False',
+     'tests/test_failure_contract_file_shell_web.py::test_search_aliases_and_outside_boundary'),
+])
+
+
 def main():
     killed = 0
     for label, module, before, after, test in MUTANTS:
@@ -221,9 +270,10 @@ source = Path(module.__file__).read_text(encoding="utf-8")
 assert {before!r} in source
 exec(compile(source.replace({before!r}, {after!r}), module.__file__, "exec"), module.__dict__)
 '''
+        target = test if test.startswith("tests/") else TEST + test
         command = setup + f'''
 import pytest
-raise SystemExit(pytest.main(["-q", "-p", "no:cacheprovider", "--disable-warnings", {TEST + test!r}]))
+raise SystemExit(pytest.main(["-q", "-p", "no:cacheprovider", "--disable-warnings", {target!r}]))
 '''
         result = subprocess.run([sys.executable, "-B", "-c", command], cwd=ROOT,
                                 capture_output=True, text=True, encoding="utf-8", errors="replace")

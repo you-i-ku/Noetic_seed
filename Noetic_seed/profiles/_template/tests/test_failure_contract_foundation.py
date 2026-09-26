@@ -469,7 +469,7 @@ def reflect_io(monkeypatch):
     return save
 
 
-@pytest.mark.parametrize("response", [RuntimeError("offline"), "", "unparseable", "NOTES:\n- first\nSELF_DISPOSITION:\n- curiosity_delta: bad", "NOTES:\n- note (confidence: ...)"])
+@pytest.mark.parametrize("response", [RuntimeError("offline"), "", "unparseable", "SELF_DISPOSITION:\n- curiosity_delta: bad", "NOTES:\n- note (confidence: ...)"])
 def test_manual_reflect_failure_not_zero_success(reflect_io, monkeypatch, response):
     from core import reflection
     write = Mock()
@@ -486,17 +486,62 @@ def test_manual_reflect_failure_not_zero_success(reflect_io, monkeypatch, respon
     write.assert_not_called()
 
 
-def test_manual_reflect_valid_zero_and_automatic_fallback(reflect_io):
+def test_manual_reflect_empty_sections_fail_and_automatic_fallback(reflect_io):
     from core.reflection import reflect_and_persist
     state = {"reflection_cycle": 12, "raw_events": [], "subjective_entries": []}
     record = runtime(_manual_reflect_handler(state, Mock(return_value="NOTES:\nSELF_DISPOSITION:\nATTRIBUTED_DISPOSITION:")))._execute_tool_use("id", "probe", {})
-    assert not record.is_error and record.output == "内省完了: 0件の気づき"
-    assert state["reflection_cycle"] == 0
-    assert reflect_io.call_count == 1
+    assert record.is_error and record.error_kind == "tool_failure"
+    assert state["reflection_cycle"] == 12
+    assert reflect_io.call_count == 0
     state["reflection_cycle"] = 12
     result = reflect_and_persist(state, Mock(side_effect=RuntimeError("offline")))
     assert result["notes"] == [] and state["reflection_cycle"] == 0
-    assert reflect_io.call_count == 2
+    assert reflect_io.call_count == 1
+
+
+def test_manual_reflect_partial_success_and_detail(reflect_io, monkeypatch):
+    """A bad line must not discard readable notes or either disposition; no text in detail."""
+    from core import reflection
+    write = Mock(return_value={"id": "readable"})
+    monkeypatch.setattr(reflection, "memory_store", write)
+    state = {"reflection_cycle": 12, "raw_events": [], "subjective_entries": []}
+    response = ("preamble to skip\nNOTES:\n- usable (confidence: 0.8)\n"
+                "- invalid number (confidence: ...)\nSELF_DISPOSITION:\n"
+                "- curiosity_delta: +0.05\n- unreadable trait\n"
+                "ATTRIBUTED_DISPOSITION:\n- viewer: friend, key: calm, delta: -0.03, confidence: 0.6\n"
+                "- invalid attributed\n- viewer: friend, key: bad, delta: ..., confidence: 0.6\n")
+    record = runtime(_manual_reflect_handler(state, Mock(return_value=response)))._execute_tool_use("id", "probe", {})
+    assert not record.is_error and record.output == "内省完了: 1件の気づき"
+    assert record.detail == {"unparsed_lines": 5, "unparsed_line_types": {
+        "unparsed_line": 1, "invalid_note_confidence": 1,
+        "invalid_self_disposition": 1, "invalid_attributed_disposition": 2}}
+    assert write.call_count == 1 and write.call_args.kwargs["content"] == "usable"
+    assert write.call_args.kwargs["metadata"]["confidence"] == 0.8
+    assert state["dispositions"]["self"]["curiosity"]["value"] == pytest.approx(0.55)
+    assert state["dispositions"]["attributed:friend"]["calm"]["value"] == pytest.approx(0.47)
+    assert state["reflection_cycle"] == 0
+    reflect_io.assert_called_once_with(state)
+
+
+@pytest.mark.parametrize("section,item,key", [
+    ("SELF_DISPOSITION", "curiosity_delta: 0.05", "self"),
+    ("ATTRIBUTED_DISPOSITION", "viewer: friend, key: calm, delta: 0.05", "attributed:friend"),
+])
+def test_manual_reflect_disposition_only_is_success(reflect_io, section, item, key):
+    state = {"reflection_cycle": 12, "raw_events": [], "subjective_entries": []}
+    record = runtime(_manual_reflect_handler(state, Mock(return_value=f"{section}:\n- {item}\n- malformed")))._execute_tool_use("id", "probe", {})
+    assert not record.is_error and state["dispositions"][key]
+    assert record.detail["unparsed_lines"] == 1
+
+
+def test_automatic_reflect_keeps_permissive_behavior(reflect_io, monkeypatch):
+    from core import reflection
+    monkeypatch.setattr(reflection, "memory_store", Mock(return_value={"id": "auto"}))
+    monkeypatch.setattr(reflection, "_validate_reflection_response", Mock(side_effect=AssertionError("manual only")))
+    state = {"reflection_cycle": 12, "raw_events": [], "subjective_entries": []}
+    result = reflection.reflect_and_persist(state, Mock(return_value="NOTES:\n- usable\nSELF_DISPOSITION:\n- malformed"))
+    assert result["notes"] == [{"id": "auto"}] and "parse_detail" not in result
+    assert state["reflection_cycle"] == 0
 
 
 def test_display_zero_recipients_is_tool_failure(monkeypatch):
@@ -1611,8 +1656,10 @@ def test_generation_directory_excluded_from_file_tools(persistence_io):
     for factory in (_make_read_file, _make_write_file, _make_edit_file):
         with pytest.raises(ToolError):
             factory(root)({"path": str(path), "content": "overwrite", "old_string":"private_generation", "new_string":"overwrite"})
-    assert "state-1" not in _make_glob_search(root)({"pattern":"**/*"})
-    assert "private_generation" not in _make_grep_search(root)({"pattern":"private_generation"}).replace("No matches for pattern: private_generation", "")
+    glob_result = _make_glob_search(root)({"pattern":"**/*"})
+    grep_result = _make_grep_search(root)({"pattern":"private_generation"})
+    assert "state-1" not in glob_result.message
+    assert "private_generation" not in grep_result.message.replace("No matches for pattern: private_generation", "")
     assert path.read_text() == "private_generation"
 
 

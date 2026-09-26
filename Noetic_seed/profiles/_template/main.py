@@ -290,7 +290,8 @@ def main():
         except Exception as e:
             raise ToolError(f"エラー: {e}", detail={"exception_type": type(e).__name__, "message": str(e)}) from e
         notes = result.get("notes", [])
-        return f"内省完了: {len(notes)}件の気づき"
+        from core.runtime.registry import ToolResult
+        return ToolResult(f"内省完了: {len(notes)}件の気づき", detail=result.get("parse_detail"))
     TOOLS["reflect"]["func"] = _tool_reflect
 
     # pref.json 初期化

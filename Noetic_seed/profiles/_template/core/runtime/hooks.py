@@ -527,17 +527,7 @@ def make_file_access_guard(
                 ])
             return HookRunResult.allow()  # read は claw 側 boundary check に委譲
 
-        # 0. workspace root 全 scan の deny (Codex rescue 7 周目 RISK-2 fix)
-        # grep_search/glob_search で path="." (= workspace root 相対 = ".")
-        # を渡すと、root 配下全 scan に sandbox/secrets/ が含まれる。
-        # 具体的 dir 指定を強制して root 全 scan を防御。
-        if tool_name in ("glob_search", "grep_search") and rel == ".":
-            return HookRunResult.deny([
-                f"[file_guard] {tool_name} は workspace root 全 scan できません "
-                f"(sandbox/{secrets_subdir}/ 配下が含まれるため)。"
-                f"具体的な dir / path を指定してください "
-                f"(例: path='core', path='memory', path='sandbox', etc.)。"
-            ])
+        # Root search is allowed; file_ops filters protected candidates before reading.
 
         # 1. secrets.json 保護 (canonical 相対 POSIX で比較、Windows case 対応)
         if rel == secrets_json_rel:

@@ -12,6 +12,7 @@ from core.runtime.hooks import HookRunner, HookRunResult
 from core.runtime.permissions import PermissionEnforcer, PermissionMode
 from core.runtime.registry import ToolError, ToolRegistry, ToolResult
 from core.runtime.tools import file_ops, shell, web
+from core.runtime.hooks import make_file_access_guard
 
 
 @pytest.fixture
@@ -35,6 +36,108 @@ def invoke(reg, name, args):
     assert success.call_count == (not record.is_error)
     assert failure.call_count == record.is_error
     return record
+
+
+@pytest.mark.parametrize("name", ["glob_search", "grep_search"])
+@pytest.mark.parametrize("path", [".", ""])
+@pytest.mark.parametrize("public", [True, False])
+def test_root_search_filters_secret_paths_before_reads(registry, tmp_path, monkeypatch, name, path, public):
+    secret_dir = tmp_path / "sandbox" / "secrets"
+    secret_dir.mkdir(parents=True)
+    (tmp_path / "secrets.json").write_text("MATCH SECRET_ROOT_CONTENT")
+    (secret_dir / "hidden-key.txt").write_text("MATCH SECRET_NESTED_CONTENT")
+    if public:
+        (tmp_path / "public.md").write_text("MATCH PUBLIC_CONTENT")
+    reads = []
+    original = Path.read_bytes
+    def read(current):
+        reads.append(current)
+        return original(current)
+    monkeypatch.setattr(Path, "read_bytes", read)
+    hooks = HookRunner()
+    hooks.register_pre(make_file_access_guard(tmp_path))
+    rt = ConversationRuntime(SimpleNamespace(name="anthropic"), registry, hooks,
+                             PermissionEnforcer(PermissionMode.ALLOW))
+    rec = rt._execute_tool_use("search", name, {"path": path, "pattern": "**/*" if name == "glob_search" else "MATCH"})
+    assert not rec.is_error
+    assert ("public.md" in rec.output) is public
+    if name == "grep_search":
+        assert ("PUBLIC_CONTENT" in rec.output) is public
+    assert rec.detail == {"excluded_paths": 3}  # file + directory + child, independent of regex hits
+    for text in ("secrets.json", "sandbox/secrets", "hidden-key", "SECRET_ROOT_CONTENT", "SECRET_NESTED_CONTENT"):
+        assert text not in rec.output + str(rec.detail)
+    assert all(p == tmp_path / "public.md" for p in reads)
+
+
+@pytest.mark.parametrize("name", ["glob_search", "grep_search"])
+@pytest.mark.parametrize("stage", ["secret_candidate", "enumeration", "start", "candidate", "recheck"])
+def test_search_path_errors_never_expose_secret_names(registry, tmp_path, monkeypatch, name, stage):
+    secret = tmp_path / "sandbox" / "secrets" / "private-key-name.txt"
+    public = tmp_path / "public.txt"
+    public.write_text("MATCH")
+    original_resolve = Path.resolve
+    resolutions = []
+    def resolve(path, *args, **kwargs):
+        resolutions.append(path)
+        if (path == secret or (stage == "start" and path == tmp_path)
+                or (stage == "candidate" and path == public)
+                or (stage == "recheck" and path == public and resolutions.count(public) == 2)):
+            raise OSError(f"cannot resolve {secret}")
+        return original_resolve(path, *args, **kwargs)
+    def glob(path, pattern):
+        if stage == "enumeration":
+            raise OSError(f"cannot enumerate {secret}")
+        return iter([secret] if stage == "secret_candidate" else [public])
+    monkeypatch.setattr(Path, "resolve", resolve)
+    monkeypatch.setattr(Path, "glob", glob)
+    args = {"path": ".", "pattern": "**/*" if name == "glob_search" else "MATCH"}
+    rec = invoke(registry, name, args)
+    exposed = rec.output + repr(rec.detail)
+    assert "private-key-name" not in exposed and str(tmp_path) not in exposed
+    if stage == "secret_candidate":
+        assert not rec.is_error and rec.detail == {"excluded_paths": 1}
+        assert secret not in resolutions  # Sanitizing a resolve failure alone is insufficient.
+    else:
+        assert rec.is_error and rec.error_kind == "tool_failure"
+        assert rec.detail == {"exception_type": "OSError"}
+        with pytest.raises(ToolError) as caught:
+            resolutions.clear()
+            registry.execute(name, args)
+        assert "private-key-name" not in str(caught.value) + repr(caught.value.detail)
+
+
+@pytest.mark.parametrize("name", ["glob_search", "grep_search"])
+def test_search_aliases_and_outside_boundary(registry, tmp_path, name):
+    (tmp_path / "secrets.json").write_text("MATCH SECRET_CONTENT")
+    (tmp_path / "public.md").write_text("MATCH PUBLIC_CONTENT")
+    outside = tmp_path.parent / (tmp_path.name + "-outside.txt")
+    outside.write_text("MATCH OUTSIDE_CONTENT")
+    try:
+        (tmp_path / "alias.txt").symlink_to(tmp_path / "secrets.json")
+        (tmp_path / "escape.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    rec = invoke(registry, name, {"path": ".", "pattern": "**/*" if name == "glob_search" else "MATCH"})
+    assert not rec.is_error and "public.md" in rec.output
+    assert rec.detail == {"excluded_paths": 3}
+    assert all(text not in rec.output for text in ("alias.txt", "escape.txt", "SECRET_CONTENT", "OUTSIDE_CONTENT"))
+    rec = invoke(registry, name, {"path": "..", "pattern": "*" if name == "glob_search" else "MATCH"})
+    assert rec.is_error and rec.error_kind == "tool_failure"
+
+
+@pytest.mark.parametrize("name", ["glob_search", "grep_search"])
+def test_glob_braces_are_explicit_tool_failure(registry, tmp_path, name):
+    (tmp_path / "sample.json").write_text("MATCH")
+    (tmp_path / "sample.md").write_text("MATCH")
+    args = {"path": ".", "pattern": "**/*.{json,md}"} if name == "glob_search" else {
+        "path": ".", "pattern": "MATCH", "glob": "**/*.{json,md}"}
+    rec = invoke(registry, name, args)
+    assert rec.is_error and rec.error_kind == "tool_failure"
+    assert "brace expansion is not supported" in rec.output
+    assert "No matches" not in rec.output
+    args["pattern" if name == "glob_search" else "glob"] = "**/*.md"
+    rec = invoke(registry, name, args)
+    assert not rec.is_error and "sample.md" in rec.output and "sample.json" not in rec.output
 
 
 @pytest.mark.parametrize("name,args", [

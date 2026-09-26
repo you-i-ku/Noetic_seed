@@ -1,7 +1,7 @@
 """File Operations — read_file / write_file / edit_file / glob_search / grep_search.
 
 claw-code 参照: rust/crates/runtime/src/file_ops.rs:1-744
-厳密 claw-code 準拠。Noetic 固有セキュリティは一切含めない。
+claw-code 移植。検索候補では Noetic の秘密領域・復旧用領域を除外する。
 
 workspace_root を constructor 的に渡すことで、path traversal を防ぐ。
 バイナリ判定 (NUL byte)、最大サイズ (10 MB)、行指定 offset/limit をサポート。
@@ -190,7 +190,49 @@ def _make_edit_file(workspace_root: Path) -> Callable:
 # glob_search
 # ============================================================
 
+def _search_candidates(workspace_root: Path, start: Path, pattern: str):
+    """Filter before content reads, including aliases into protected locations.
+
+    Keep pathlib glob syntax; brace expansion is not supported by this backend.
+    excluded_paths counts matched paths, not regex hits or hidden contents.
+    """
+    if "{" in pattern or "}" in pattern:
+        raise ToolError("Error: brace expansion is not supported in glob patterns; use separate patterns")
+    root = workspace_root.resolve()
+    secret_file = root / "secrets.json"
+    secret_dir = root / "sandbox" / "secrets"
+    candidates = []
+    excluded = 0
+    for path in sorted(start.glob(pattern)):
+        # Exclude lexical secret paths before resolution can expose their names.
+        if path == secret_file or path.is_relative_to(secret_dir):
+            excluded += 1
+            continue
+        target = _resolve_and_check(root, str(path))
+        if (target is None
+                or target == secret_file.resolve() or target.is_relative_to(secret_dir.resolve())):
+            excluded += 1
+            continue
+        candidates.append(path)
+    return candidates, excluded
+
+
+def _search_path_errors(search):
+    """Resolution/enumeration failures may name protected paths; expose only type."""
+    def guarded(inp):
+        try:
+            return search(inp)
+        except ToolError:
+            raise
+        except Exception as exc:
+            kind = type(exc).__name__
+            raise ToolError(f"Error: search failed ({kind})",
+                            detail={"exception_type": kind}) from None
+    return guarded
+
+
 def _make_glob_search(workspace_root: Path) -> Callable:
+    @_search_path_errors
     def glob_search(inp: dict) -> str:
         pattern = (inp.get("pattern") or "").strip()
         if not pattern:
@@ -209,12 +251,7 @@ def _make_glob_search(workspace_root: Path) -> Callable:
         if not start.is_dir():
             raise ToolError(f"Error: not a directory: {start_raw}")
 
-        try:
-            matches = sorted(start.glob(pattern))
-        except ToolError:
-            raise
-        except Exception as e:
-            raise ToolError(f"Error: glob failed: {e}")
+        matches, excluded = _search_candidates(workspace_root, start, pattern)
 
         results: list = []
         for f in matches:
@@ -229,7 +266,8 @@ def _make_glob_search(workspace_root: Path) -> Callable:
                 continue
 
         if not results:
-            return f"No matches for pattern: {pattern}"
+            message = f"No matches for pattern: {pattern}"
+            return ToolResult(message, detail={"excluded_paths": excluded}) if excluded else message
 
         shown = results[:100]
         more = len(results) - len(shown)
@@ -237,7 +275,8 @@ def _make_glob_search(workspace_root: Path) -> Callable:
         lines.extend(f"  {p}" for p in shown)
         if more > 0:
             lines.append(f"  ... ({more} more not shown)")
-        return "\n".join(lines)
+        message = "\n".join(lines)
+        return ToolResult(message, detail={"excluded_paths": excluded}) if excluded else message
 
     return glob_search
 
@@ -247,6 +286,7 @@ def _make_glob_search(workspace_root: Path) -> Callable:
 # ============================================================
 
 def _make_grep_search(workspace_root: Path) -> Callable:
+    @_search_path_errors
     def grep_search(inp: dict) -> str:
         pattern = inp.get("pattern") or ""
         if not pattern:
@@ -288,12 +328,7 @@ def _make_grep_search(workspace_root: Path) -> Callable:
         results: list = []
         total = 0
         readable = unreadable = 0
-        try:
-            candidates = sorted(start.glob(glob_pat))
-        except ToolError:
-            raise
-        except Exception as e:
-            raise ToolError(f"Error: glob failed: {e}")
+        candidates, excluded = _search_candidates(workspace_root, start, glob_pat)
 
         for f in candidates:
             if total >= head_limit:
@@ -328,9 +363,11 @@ def _make_grep_search(workspace_root: Path) -> Callable:
 
         message = (f"Found {total} match(es) for '{pattern}':\n" + "\n".join(results)
                    if results else f"No matches for pattern: {pattern}")
-        if unreadable:
-            detail = {"unreadable_files": unreadable, "readable_files": readable}
-            if not readable:
+        if unreadable or excluded:
+            detail = {"excluded_paths": excluded} if excluded else {}
+            if unreadable:
+                detail.update(unreadable_files=unreadable, readable_files=readable)
+            if unreadable and not readable:
                 raise ToolError(message, detail=detail)
             return ToolResult(message, detail=detail)
         return message
@@ -396,7 +433,7 @@ def register(registry: ToolRegistry, workspace_root: Path) -> None:
         ),
         ToolSpec(
             name="glob_search",
-            description="Find files matching a glob pattern (e.g. '**/*.py').",
+            description="Find files matching a glob pattern (e.g. '**/*.py'). Brace expansion is not supported; use separate patterns.",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -418,7 +455,7 @@ def register(registry: ToolRegistry, workspace_root: Path) -> None:
                     "pattern": {"type": "string"},
                     "path": {"type": "string"},
                     "glob": {"type": "string",
-                             "description": "File name glob (e.g. '*.py')"},
+                             "description": "File name glob (e.g. '*.py'); brace expansion is not supported"},
                     "-i": {"type": "boolean",
                            "description": "Case insensitive"},
                     "head_limit": {"type": "integer", "minimum": 1,

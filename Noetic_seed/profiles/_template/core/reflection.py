@@ -338,8 +338,10 @@ ATTRIBUTED_DISPOSITION:
         append_debug_log("Reflection", text)
         phase = "parse"
         if strict:
-            _validate_reflection_response(text)
+            text, parse_detail = _validate_reflection_response(text)
         parsed = _parse_reflection(text, state, strict=True) if strict else _parse_reflection(text, state)
+        if strict:
+            parsed["parse_detail"] = parse_detail
         # 段階11-D Phase 6 Step 6.2: 戻り値に MI 観察値を含める (新キー追加のみ、既存 test 影響なし)
         parsed.setdefault("cluster_mi", mi_metrics["cluster_mi"])
         parsed.setdefault("cluster_inter_ratio", mi_metrics["cluster_inter_ratio"])
@@ -411,52 +413,71 @@ def reflect_and_persist(
 
 
 def _validate_reflection_response(text):
-    """Manual reflect only: validate the whole response before parsing writes notes.
+    """Manual only: retain readable items and count skipped lines before any writes.
 
-    Empty declared sections are valid zero results. Automatic reflection keeps
-    its historical permissive parser and fallback.
+    Automatic reflection keeps its historical parser and fallback. Diagnostics
+    contain counts/types only, never discarded text or a model interpretation.
     """
     import re
     import math
     if not isinstance(text, str) or not text.strip():
         raise ValueError("empty reflection response")
     section = None
-    seen = False
+    accepted = []
+    readable = 0
+    skipped = {}
     for line in text.splitlines():
         stripped = line.strip()
         upper = stripped.strip("#* :").upper()
         for name in ("SELF_DISPOSITION", "ATTRIBUTED_DISPOSITION", "NOTES"):
-            if name == upper:
+            if not stripped.startswith("-") and name in upper:
                 section = name
-                seen = True
+                accepted.append(name + ":")
                 break
         else:
             if not stripped or stripped.startswith("```"):
                 continue
-            if section is None or not stripped.startswith("-"):
-                raise ValueError("unparsed reflection line")
-            body = stripped.lstrip("- ").strip()
-            if not body:
-                raise ValueError("empty reflection item")
-            if section == "NOTES":
-                if "confidence:" in body.lower():
-                    match = re.search(r'confidence:\s*([-+\d.eE]+)', body, re.I)
-                    if not match or not math.isfinite(float(match.group(1))):
-                        raise ValueError("invalid note confidence")
-            elif section == "SELF_DISPOSITION":
-                match = re.search(r'(\w+)_delta:\s*([-+]?[\d.]+)', body)
-                if not match or not math.isfinite(float(match.group(2))):
-                    raise ValueError("invalid self disposition")
-            else:
-                match = re.search(r'viewer:\s*([^,]+?),\s*key:\s*([^,]+?),\s*delta:\s*([-+]?[\d.]+)(?:,\s*confidence:\s*([\d.]+))?', body)
-                if not match or not math.isfinite(float(match.group(3))):
-                    raise ValueError("invalid attributed disposition")
-                if "confidence:" in body and not match.group(4):
-                    raise ValueError("invalid attributed confidence")
-                if match.group(4) and not math.isfinite(float(match.group(4))):
-                    raise ValueError("invalid attributed confidence")
-    if not seen:
-        raise ValueError("reflection sections not found")
+            kind = "unparsed_line"
+            try:
+                if section is None or not stripped.startswith("-"):
+                    raise ValueError()
+                body = stripped.lstrip("- ").strip()
+                kind = "empty_item"
+                if not body:
+                    raise ValueError()
+                if section == "NOTES":
+                    kind = "invalid_note_confidence"
+                    match = re.search(r'confidence:\s*([\d.]+)', body, re.I)
+                    if match:
+                        if not math.isfinite(float(match.group(1))):
+                            raise ValueError()
+                        body = re.sub(r'\(?\s*confidence:\s*[\d.]+\s*\)?', '', body).strip()
+                    kind = "empty_item"
+                    if not body:
+                        raise ValueError()
+                elif section == "SELF_DISPOSITION":
+                    kind = "invalid_self_disposition"
+                    match = re.search(r'(\w+)_delta:\s*([-+]?[\d.]+)', body)
+                    if not match or not math.isfinite(float(match.group(2))):
+                        raise ValueError()
+                else:
+                    kind = "invalid_attributed_disposition"
+                    match = re.search(r'viewer:\s*([^,]+?),\s*key:\s*([^,]+?),\s*delta:\s*([-+]?[\d.]+)(?:,\s*confidence:\s*([\d.]+))?', body)
+                    if (not match or not match.group(1).strip() or not match.group(2).strip()
+                            or not math.isfinite(float(match.group(3)))):
+                        raise ValueError()
+                    kind = "invalid_attributed_confidence"
+                    if match.group(4) and not math.isfinite(float(match.group(4))):
+                        raise ValueError()
+            except ValueError:
+                skipped[kind] = skipped.get(kind, 0) + 1
+                continue
+            accepted.append(line)
+            readable += 1
+    detail = {"unparsed_lines": sum(skipped.values()), "unparsed_line_types": skipped}
+    if not readable:
+        raise ToolError("エラー: no readable reflection items", detail={"phase": "parse", **detail})
+    return "\n".join(accepted), detail
 
 
 def _parse_reflection(text: str, state: dict, *, strict=False) -> dict:
