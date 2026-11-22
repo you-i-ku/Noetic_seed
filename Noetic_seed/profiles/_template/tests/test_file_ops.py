@@ -11,9 +11,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tools import file_ops
 
+
+
+def _expect_tool_error(fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+    except ToolError as exc:
+        return str(exc)
+    raise AssertionError("expected ToolError, not a successful string")
 
 def _assert(cond, label):
     status = "OK " if cond else "FAIL"
@@ -81,28 +89,28 @@ def test_read_offset_limit():
 def test_read_path_traversal():
     print("== read_file: path traversal block ==")
     reg = _get_tools()
-    out = reg.execute("read_file", {"path": "../../../etc/passwd"})
+    out = _expect_tool_error(reg.execute, "read_file", {"path": "../../../etc/passwd"})
     return _assert("outside workspace" in out, "outside ブロック")
 
 
 def test_read_not_found():
     print("== read_file: not found ==")
     reg = _get_tools()
-    out = reg.execute("read_file", {"path": "missing.txt"})
+    out = _expect_tool_error(reg.execute, "read_file", {"path": "missing.txt"})
     return _assert("not found" in out, "not found エラー")
 
 
 def test_read_binary():
     print("== read_file: binary 拒否 ==")
     reg = _get_tools()
-    out = reg.execute("read_file", {"path": "binary.bin"})
+    out = _expect_tool_error(reg.execute, "read_file", {"path": "binary.bin"})
     return _assert("binary" in out.lower(), "binary エラー")
 
 
 def test_read_empty_path():
     print("== read_file: 空 path ==")
     reg = _get_tools()
-    out = reg.execute("read_file", {"path": ""})
+    out = _expect_tool_error(reg.execute, "read_file", {"path": ""})
     return _assert("required" in out.lower(), "empty path エラー")
 
 
@@ -135,7 +143,7 @@ def test_write_create_subdir():
 def test_write_path_traversal():
     print("== write_file: path traversal block ==")
     reg = _get_tools()
-    out = reg.execute("write_file", {"path": "../outside.txt", "content": "x"})
+    out = _expect_tool_error(reg.execute, "write_file", {"path": "../outside.txt", "content": "x"})
     return _assert("outside workspace" in out, "outside ブロック")
 
 
@@ -160,7 +168,7 @@ def test_edit_single():
 def test_edit_multi_without_all():
     print("== edit_file: 複数マッチ + replace_all なし → エラー ==")
     reg = _get_tools()
-    out = reg.execute("edit_file", {
+    out = _expect_tool_error(reg.execute, "edit_file", {
         "path": "dupes.txt", "old_string": "aa", "new_string": "XX",
     })
     content = (TMPDIR / "dupes.txt").read_text()
@@ -188,7 +196,7 @@ def test_edit_replace_all():
 def test_edit_not_found():
     print("== edit_file: old_string not found ==")
     reg = _get_tools()
-    out = reg.execute("edit_file", {
+    out = _expect_tool_error(reg.execute, "edit_file", {
         "path": "hello.txt", "old_string": "ZZZ", "new_string": "x",
     })
     return _assert("not found" in out, "エラー")

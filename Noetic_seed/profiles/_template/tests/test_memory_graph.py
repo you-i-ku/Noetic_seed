@@ -20,6 +20,7 @@
 """
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -30,6 +31,7 @@ from tools.memory_graph_tool import (
     _compute_self_to_memory_edges,
     _compute_memory_edges,
     _compute_trace,
+    _list_all_memory_entries,
     _memory_graph,
 )
 
@@ -216,6 +218,46 @@ def test_compute_trace_basic():
     ])
 
 
+def test_list_all_memory_entries_includes_untagged():
+    print("== _list_all_memory_entries: untagged memory も graph 対象 ==")
+    import core.memory as memory_mod
+    import core.tag_registry as tr
+    from core.memory import UNTAGGED_NETWORK, memory_store
+
+    original_memory_dir = memory_mod.MEMORY_DIR
+    original_registry_file = tr._REGISTRY_FILE
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            memory_mod.MEMORY_DIR = tmp
+            tr._reset_for_testing(registry_file=tmp / "registered_tags.json")
+            tr.register_standard_tags()
+
+            tagged = memory_store(
+                network="opinion",
+                content="tagged graph memory",
+                _auto_metadata=False,
+            )
+            untagged = memory_store(
+                network=None,
+                content="untagged graph memory",
+                _auto_metadata=False,
+            )
+
+            entries = _list_all_memory_entries(limit_per_tag=10)
+            ids = {e.get("id") for e in entries}
+            networks = {e.get("network") for e in entries}
+            return all([
+                _assert(tagged["id"] in ids, "tagged memory を含む"),
+                _assert(untagged["id"] in ids, "untagged memory を含む"),
+                _assert(UNTAGGED_NETWORK in networks,
+                        f"{UNTAGGED_NETWORK} network を含む"),
+            ])
+    finally:
+        memory_mod.MEMORY_DIR = original_memory_dir
+        tr._reset_for_testing(registry_file=original_registry_file)
+
+
 # ============================================================
 # _memory_graph (tool entry point)
 # ============================================================
@@ -248,26 +290,17 @@ def test_memory_graph_default_view():
 
 
 def test_memory_graph_invalid_view_error():
-    print("== _memory_graph: 不正 view 値で error response (ego/global/both 以外) ==")
-    for v in ["invalid", "ezo", "world"]:
-        result = _memory_graph({"view": v})
+    from core.runtime.registry import ToolError
+    for view in ["invalid", "ezo", "world"]:
         try:
-            data = json.loads(result)
-        except Exception:
-            return _assert(False, f"view={v} で JSON parse 失敗")
-        if "error" not in data:
-            return _assert(False, f"view={v} で error key なし")
-        if "supported_views" not in data:
-            return _assert(False, f"view={v} で supported_views なし")
-    result_invalid = json.loads(_memory_graph({"view": "invalid"}))
-    return all([
-        _assert("ego" in result_invalid.get("supported_views", []),
-                "supported_views に ego 含む"),
-        _assert("global" in result_invalid.get("supported_views", []),
-                "supported_views に global 含む (軽減 2 配線済)"),
-        _assert("both" in result_invalid.get("supported_views", []),
-                "supported_views に both 含む (軽減 2 配線済)"),
-    ])
+            _memory_graph({"view": view})
+        except ToolError as exc:
+            data = json.loads(str(exc))
+            assert data["error"] == f"view={view} は未対応"
+            assert data["supported_views"] == ["ego", "global", "both"]
+        else:
+            raise AssertionError("expected ToolError")
+    return True
 
 
 def test_memory_graph_global_view_shape():
@@ -373,11 +406,10 @@ def _build_minimal_controller_args(state_overrides: dict = None):
     """controller() を呼ぶための最小 mock 引数セット."""
     from tools import TOOLS, LEVEL_TOOLS
     state = {
-        "log": [],
+        "raw_events": [], "subjective_entries": [],
         "energy": 50,
         "files_read": ["file1", "file2", "file3"],   # tool_level >=2 確保
         "files_written": ["w1", "w2"],
-        "tools_created": [],
         "tool_level": 2,                              # memory_graph が level 1+ なので 2 で十分
         "voluntary_memory_store_count": 0,
         "self": {},
@@ -388,9 +420,6 @@ def _build_minimal_controller_args(state_overrides: dict = None):
         "state": state,
         "tools_dict": dict(TOOLS),
         "level_tools": LEVEL_TOOLS,
-        "ai_created_tools": {},
-        "dangerous_patterns": [],
-        "run_ai_tool_fn": lambda f, a: "",
     }
 
 
@@ -477,6 +506,116 @@ def test_memory_graph_output_no_natural_language_keys():
 
 
 # ============================================================
+# 段階13 Phase 5: graph_maturity natural unit + frontier_node_count
+# (PLAN §3-2 5 軸 sigmoid + 集約 scalar、CLAUDE.md §5 識別力 + §6 docstring 同期)
+#
+# 想定誤実装 (識別力 fixture cover):
+#   M1: global view に graph_maturity を出さない実装
+#   M2: breakdown を 4 軸しか出さない / typo / extra (literal 名整合不全)
+#   M3: 集約 scalar が breakdown 5 軸 weighted_avg と一致しない実装
+#   M4: frontier_node_count が float / bool / negative
+#   M5: ego view にも Phase 5 fields が漏れる (view 分岐ミス)
+#   M6: both view で Phase 5 fields が抜ける (重畳漏れ)
+# ============================================================
+
+def test_memory_graph_global_view_has_graph_maturity():
+    print("== _memory_graph: global view に graph_maturity scalar (Phase 5、M1 cover) ==")
+    result = _memory_graph({"view": "global"})
+    data = json.loads(result)
+    maturity = data.get("graph_maturity")
+    return all([
+        _assert("graph_maturity" in data, "graph_maturity key 存在"),
+        _assert(isinstance(maturity, (int, float)) and not isinstance(maturity, bool),
+                f"graph_maturity が numeric (actual type: {type(maturity).__name__})"),
+        _assert(maturity is not None and 0.0 <= float(maturity) <= 1.0,
+                f"graph_maturity in [0, 1] (actual: {maturity})"),
+    ])
+
+
+def test_memory_graph_global_view_breakdown_5_axes():
+    print("== _memory_graph: breakdown 5 軸 literal name (Phase 5、M2 cover、§5 識別力) ==")
+    result = _memory_graph({"view": "global"})
+    data = json.loads(result)
+    breakdown = data.get("graph_maturity_breakdown", {})
+    expected_keys = {"density", "structure", "anomaly", "frontier", "avg_strength"}
+    actual_keys = set(breakdown.keys()) if isinstance(breakdown, dict) else set()
+    return all([
+        _assert("graph_maturity_breakdown" in data, "breakdown key 存在"),
+        _assert(isinstance(breakdown, dict), "breakdown が dict"),
+        _assert(actual_keys == expected_keys,
+                f"PLAN §3-2 literal 5 軸完全一致 (expected: {sorted(expected_keys)}, actual: {sorted(actual_keys)})"),
+        _assert(all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    for v in breakdown.values()),
+                "各 sub-score が numeric (bool 除外)"),
+        _assert(all(0.0 <= float(v) <= 1.0 for v in breakdown.values()),
+                f"各 sub-score in [0, 1] (actual: {breakdown})"),
+    ])
+
+
+def test_memory_graph_global_view_maturity_consistency():
+    print("== _memory_graph: 集約 == 5 軸 weighted_avg (Phase 5、M3 cover、§5 識別力) ==")
+    result = _memory_graph({"view": "global"})
+    data = json.loads(result)
+    maturity = data.get("graph_maturity")
+    breakdown = data.get("graph_maturity_breakdown", {})
+    if not isinstance(breakdown, dict) or maturity is None:
+        return _assert(False, "breakdown / maturity 構造前提不足")
+    # PLAN §3-2 literal weight: uniform 0.2 × 5、本 test は重み構造の同期検証
+    expected = 0.2 * (
+        breakdown.get("density", 0.0)
+        + breakdown.get("structure", 0.0)
+        + breakdown.get("anomaly", 0.0)
+        + breakdown.get("frontier", 0.0)
+        + breakdown.get("avg_strength", 0.0)
+    )
+    return _assert(
+        abs(float(maturity) - expected) < 1e-9,
+        f"集約 {maturity} ~= weighted_avg(breakdown) {expected} (差 < 1e-9)",
+    )
+
+
+def test_memory_graph_global_view_has_frontier_node_count():
+    print("== _memory_graph: global view に frontier_node_count (Phase 5、M4 cover) ==")
+    result = _memory_graph({"view": "global"})
+    data = json.loads(result)
+    count = data.get("frontier_node_count")
+    return all([
+        _assert("frontier_node_count" in data, "frontier_node_count key 存在"),
+        _assert(isinstance(count, int) and not isinstance(count, bool),
+                f"frontier_node_count が int (bool 除外、actual type: {type(count).__name__})"),
+        _assert(count is not None and count >= 0,
+                f"frontier_node_count >= 0 (actual: {count})"),
+    ])
+
+
+def test_memory_graph_both_view_has_phase5_fields():
+    print("== _memory_graph: both view にも Phase 5 fields (Phase 5、M6 cover) ==")
+    result = _memory_graph({"view": "both"})
+    data = json.loads(result)
+    return all([
+        _assert("graph_maturity" in data, "both view に graph_maturity"),
+        _assert("graph_maturity_breakdown" in data, "both view に breakdown"),
+        _assert("frontier_node_count" in data, "both view に frontier_node_count"),
+        _assert("self" in data, "both view に self (ego payload 重畳)"),
+        _assert("memory_total" in data, "both view に memory_total (global payload 重畳)"),
+    ])
+
+
+def test_memory_graph_ego_view_no_phase5_fields():
+    print("== _memory_graph: ego view には Phase 5 fields なし (Phase 5、M5 cover、§5 識別力) ==")
+    result = _memory_graph({"view": "ego"})
+    data = json.loads(result)
+    return all([
+        _assert("graph_maturity" not in data,
+                "ego view に graph_maturity なし (global 限定)"),
+        _assert("graph_maturity_breakdown" not in data,
+                "ego view に breakdown なし"),
+        _assert("frontier_node_count" not in data,
+                "ego view に frontier_node_count なし"),
+    ])
+
+
+# ============================================================
 # 実行
 # ============================================================
 
@@ -492,6 +631,7 @@ if __name__ == "__main__":
         ("_compute_self_to_memory_edges: empty", test_self_to_memory_edges_empty_inputs),
         ("_compute_memory_edges: list 返却", test_compute_memory_edges_no_links),
         ("_compute_trace: 総数", test_compute_trace_basic),
+        ("_list_all_memory_entries: untagged も graph 対象", test_list_all_memory_entries_includes_untagged),
         ("_memory_graph: ego view shape", test_memory_graph_ego_view_shape),
         ("_memory_graph: default view", test_memory_graph_default_view),
         ("_memory_graph: 不正 view で error", test_memory_graph_invalid_view_error),
@@ -506,6 +646,12 @@ if __name__ == "__main__":
         ("Step 0.4 hotfix: count=0 で displayed != allowed (description 維持)", test_controller_displayed_tools_keeps_memory_graph_at_count_zero),
         ("Step 0.4 hotfix: count>=1 で displayed == allowed (両方含む)", test_controller_displayed_tools_equals_allowed_when_unlocked),
         ("_memory_graph: 自然言語 key なし", test_memory_graph_output_no_natural_language_keys),
+        ("Phase 5: global view に graph_maturity scalar (M1)", test_memory_graph_global_view_has_graph_maturity),
+        ("Phase 5: breakdown 5 軸 literal name (§5 識別力 M2)", test_memory_graph_global_view_breakdown_5_axes),
+        ("Phase 5: 集約 == 5 軸 weighted_avg (§5 識別力 M3)", test_memory_graph_global_view_maturity_consistency),
+        ("Phase 5: global view に frontier_node_count int (M4)", test_memory_graph_global_view_has_frontier_node_count),
+        ("Phase 5: both view にも Phase 5 fields (M6)", test_memory_graph_both_view_has_phase5_fields),
+        ("Phase 5: ego view には Phase 5 fields なし (§5 識別力 M5)", test_memory_graph_ego_view_no_phase5_fields),
     ]
     results = []
     for _label, fn in groups:

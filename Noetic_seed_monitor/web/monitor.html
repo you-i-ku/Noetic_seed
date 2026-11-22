@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Noetic Seed Monitor</title>
+<style>
+  :root {
+    --bg:        #0A0A1A;
+    --panel:     #1A1A2E;
+    --track:     #333355;
+    --line:      #22223a;
+    --fg:        #ffffff;
+    --dim:       #8888a0;
+    --accent:    #4FC3F7;
+    --green:     #76FF03;
+    --yellow:    #FFEB3B;
+    --orange:    #FF6D00;
+    --red:       #EF5350;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 13px/1.5 system-ui, -apple-system, "Segoe UI", "Yu Gothic UI", sans-serif;
+    overflow: hidden;
+  }
+  button {
+    font: inherit; cursor: pointer; color: var(--fg);
+    background: #23233c; border: 1px solid var(--track);
+    border-radius: 6px; padding: 6px 12px;
+  }
+  button:hover:not(:disabled) { background: #2e2e4d; border-color: var(--accent); }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  input, select, textarea {
+    font: inherit; color: var(--fg); background: #14142a;
+    border: 1px solid var(--track); border-radius: 6px; padding: 7px 10px; width: 100%;
+  }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  .mono { font-family: var(--mono); }
+  .dim  { color: var(--dim); }
+
+  /* ---------- shell ---------- */
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  #topbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 8px 14px; background: var(--panel);
+    border-bottom: 1px solid var(--line); flex: none;
+  }
+  #topbar .title { color: var(--accent); font-weight: 700; letter-spacing: .04em; }
+  #topbar .spacer { flex: 1; }
+  .statchip { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .statchip b { color: var(--fg); font-weight: 600; }
+  #conn.on  { color: var(--green); }
+  #conn.off { color: var(--dim); }
+  #conn.warn{ color: var(--yellow); }
+
+  /* ---------- approvals ---------- */
+  /* 承認が複数たまっても本体を潰さない（積み上がると log が 0px になる事故の防止） */
+  #approvals { flex: none; max-height: 38vh; overflow-y: auto; }
+  .approval {
+    background: #3a2a10; border-bottom: 1px solid #6a4a18;
+    padding: 10px 14px; display: flex; gap: 12px; align-items: flex-start;
+  }
+  .approval .body { flex: 1; min-width: 0; }
+  .approval .tool { color: var(--yellow); font-weight: 700; font-family: var(--mono); }
+  .approval .preview {
+    color: #e8e0c8; font-family: var(--mono); font-size: 11px;
+    white-space: pre-wrap; word-break: break-word; max-height: 8em; overflow: auto; margin-top: 4px;
+  }
+  .approval .acts { display: flex; gap: 8px; flex: none; }
+  .btn-yes { background: #1d4620; border-color: #2f7a34; }
+  .btn-no  { background: #4a1d1d; border-color: #7a2f2f; }
+
+  /* ---------- main split ---------- */
+  #main { flex: 1; display: flex; min-height: 0; }
+  .pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  #leftpane  { flex: 0 0 clamp(340px, 38%, 520px); border-right: 1px solid var(--line); }
+  #rightpane { flex: 1; }
+
+  #tabs { display: flex; gap: 4px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
+  #tabs button { padding: 5px 12px; background: transparent; border-color: transparent; color: var(--dim); }
+  #tabs button.active { color: var(--accent); border-color: var(--accent); background: #14142a; }
+  .scroll { flex: 1; overflow-y: auto; overflow-x: hidden; }
+
+  /* ---------- dashboard ---------- */
+  .dash { padding: 16px 18px 40px; }
+  .dashrow { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
+  .dashrow .lbl { color: var(--dim); width: 92px; flex: none; font-size: 12px; }
+  .dashrow .bar { flex: 1; height: 4px; background: var(--track); border-radius: 2px; overflow: hidden; }
+  .dashrow .bar > i { display: block; height: 100%; border-radius: 2px; }
+  .dashrow .val { font-family: var(--mono); font-size: 12px; min-width: 62px; text-align: right; }
+
+  h3.sec {
+    color: var(--dim); font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; margin: 22px 0 8px;
+    border-bottom: 1px solid var(--line); padding-bottom: 4px;
+  }
+  h3.sec:first-child { margin-top: 0; }
+
+  .ebars { display: flex; justify-content: space-evenly; align-items: flex-end; gap: 8px; }
+  .ebar { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .ebar .cap { color: var(--dim); font-size: 11px; }
+  .ebar .col { width: 40px; height: 60px; background: var(--track); border-radius: 4px; display: flex; align-items: flex-end; overflow: hidden; }
+  .ebar .col > i { display: block; width: 100%; }
+  .ebar .pct { font-family: var(--mono); font-size: 11px; }
+
+  #chartwrap { background: var(--panel); border-radius: 8px; padding: 4px; }
+  .chartlegend { display: flex; justify-content: center; gap: 10px; font-family: var(--mono); font-size: 10px; margin-bottom: 4px; }
+
+  .kv { margin: 6px 0; }
+  .kv .k { color: var(--accent); font-size: 11px; }
+  .kv .v { color: rgba(255,255,255,.85); font-size: 11px; padding-left: 10px; white-space: pre-wrap; word-break: break-word; }
+  .kv.name { color: #fff; font-weight: 700; font-size: 13px; }
+
+  .pend { border-left: 2px solid var(--track); padding: 3px 0 3px 8px; margin: 5px 0; }
+  .pend .t { color: var(--yellow); font-size: 11px; font-family: var(--mono); }
+  .pend .c { font-size: 11px; color: rgba(255,255,255,.8); word-break: break-word; }
+
+  /* ---------- terminal ---------- */
+  #logbox { flex: 1; overflow-y: auto; padding: 6px 10px; }
+  .logline {
+    font-family: var(--mono); font-size: 11px; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-word; color: #aaa; padding: 1px 0;
+  }
+  .l-head { color: var(--accent); }
+  .l-err  { color: var(--red); }
+  .l-press{ color: #555577; }
+  .l-sel  { color: var(--green); }
+  .l-run  { color: var(--yellow); }
+  .l-ai   { color: #e6c8ff; }
+  .l-ext  { color: var(--accent); }
+  .l-sys  { color: var(--orange); }
+
+  #chatbar { display: flex; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--panel); flex: none; }
+
+  /* ---------- centered screens ---------- */
+  .center { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; overflow-y: auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 26px; width: 100%; max-width: 440px; }
+  .card h2 { margin: 0 0 4px; color: var(--accent); font-size: 18px; }
+  .card .sub { color: var(--dim); font-size: 12px; margin-bottom: 20px; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; color: var(--dim); font-size: 11px; margin-bottom: 4px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .err { color: var(--red); font-size: 12px; margin-top: 10px; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--track); border-top-color: var(--accent); border-radius: 50%; animation: sp .8s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+
+  .plist { display: flex; flex-direction: column; gap: 8px; }
+  .pitem { text-align: left; padding: 12px 14px; }
+  .pitem .pn { font-weight: 700; }
+  .pitem .pm { color: var(--dim); font-size: 11px; font-family: var(--mono); margin-top: 3px; }
+
+  /* ---------- settings / test ---------- */
+  .panel { padding: 16px 18px 40px; }
+  .provider { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .provider .pn { font-family: var(--mono); flex: 1; }
+  .badge { font-size: 10px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--track); color: var(--dim); }
+  .badge.active { color: var(--green); border-color: var(--green); }
+  .badge.key { color: var(--accent); border-color: var(--accent); }
+  .tgroup { margin-bottom: 18px; }
+  .tgroup .gh { color: var(--dim); font-size: 12px; margin-bottom: 6px; }
+  .tgroup .gb { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tgroup button { font-size: 12px; padding: 5px 10px; }
+  .note { color: var(--dim); font-size: 11px; margin-top: 6px; line-height: 1.6; }
+  .warnbox { background: #2a1a10; border: 1px solid #6a4a18; border-radius: 8px; padding: 10px 12px; color: #e8d8b8; font-size: 11px; line-height: 1.6; }
+
+  /* ---------- narrow: tabs ---------- */
+  #mobiletabs { display: none; }
+  @media (max-width: 900px) {
+    #leftpane { flex: 1; border-right: none; }
+    #rightpane { flex: 1; }
+    #main.narrow > .pane { display: none; }
+    #main.narrow > .pane.shown { display: flex; }
+    #tabs { display: none; }
+    #mobiletabs { display: flex; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="topbar">
+    <span class="title">NOETIC SEED</span>
+    <span id="conn" class="statchip off">○ offline</span>
+    <span class="statchip">cycle <b id="t-cycle">0</b></span>
+    <span class="statchip">lv <b id="t-lv">0</b></span>
+    <span class="statchip">pend <b id="t-pend">0</b></span>
+    <span class="spacer"></span>
+    <div id="mobiletabs" style="gap:4px"></div>
+    <button id="btn-pause" title="cycle を一時停止 / 再開">⏸ pause</button>
+    <button id="btn-stop"  title="iku を graceful に終了">⏹ stop</button>
+    <button id="btn-dc"    title="この画面を切断（iku は動き続ける）">⏏ 切断</button>
+  </div>
+
+  <div id="approvals"></div>
+
+  <div id="main">
+    <!-- 左: dashboard / test / settings -->
+    <div class="pane" id="leftpane">
+      <div id="tabs"></div>
+      <div class="scroll" id="leftbody"></div>
+    </div>
+    <!-- 右: terminal -->
+    <div class="pane" id="rightpane">
+      <div id="logbox"></div>
+      <div id="chatbar">
+        <input id="chatinput" placeholder="iku に話しかける…（Enter で送信）" autocomplete="off">
+        <button id="chatsend">送信</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 接続前 / プロファイル選択 は main を覆う -->
+  <div id="overlay" class="center" style="display:none"></div>
+</div>
+
+<script>
+"use strict";
+
+/* =========================================================================
+   Noetic Seed Monitor — Web 版
+   Android アプリ (Noetic_seed_monitor) と同一の WebSocket プロトコルを話す。
+   正典: Noetic_seed/profiles/_template/core/ws_server.py
+   ========================================================================= */
+
+const MAX_LOG   = 500;   // 保持するログ行数
+const MAX_HIST  = 20;    // E値トレンドの保持サイクル数
+const BACKOFF   = [200, 1000, 5000, 30000, 60000];
+
+/* ---------- state ---------- */
+const S = {
+  phase: "disconnected",   // disconnected | reconnecting | waiting | profileSelect | loading | running
+  profiles: [],
+  loadingName: "",
+  entropy: 0.65, energy: 50, cycleId: 0, toolLevel: 0, pressure: 0,
+  pendingCount: 0, pendingItems: [],
+  selfModel: {}, disposition: {},
+  e1: 0, e2: 0, e3: 0, e4: 0, negentropy: 0,
+  eHistory: [],
+  approvals: [],
+  paused: false,
+  llmProviders: [], llmActive: { provider: "", model: "" }, llmSetResult: null,
+  error: null,
+  leftTab: "dash",         // dash | test | config（左ペインに何を出すか）
+  mobileTerm: false,       // 狭い画面で Terminal を前面に出しているか
+  // プロファイルを選んだあと、起動前に LLM を決める画面（Android の PreLaunchConfigScreen 相当）
+  pendingProfile: null,
+  pre: { provider: "", model: "", apiKey: "", baseUrl: "" },
+  retryCount: 0,
+};
+
+const $ = (id) => document.getElementById(id);
+
+/* =========================================================================
+   WebSocket
+   ========================================================================= */
+let ws = null;
+let wantConnect = false, dormant = false, everConnected = false;
+let failCount = 0, firstFailAt = 0, retryTimer = null;
+let url = "", token = "";
+// bat から起動した直後はサーバがまだ port を掴んでいないことがある。
+// その場合だけ初回接続を数回リトライする（手動接続は今まで通り即エラーで返す）
+let initialRetries = 0;
+
+function connect(u, t) {
+  url = u; token = t;
+  wantConnect = true; dormant = false; everConnected = false;
+  failCount = 0; firstFailAt = 0;
+  open();
+}
+
+function open() {
+  clearTimeout(retryTimer);
+  try { ws = new WebSocket(url); }
+  catch (e) { onFail("URL が不正です: " + e.message); return; }
+
+  ws.onopen = () => {
+    everConnected = true; failCount = 0; firstFailAt = 0;
+    send({ type: "auth", token: token });
+    if (S.phase === "disconnected" || S.phase === "reconnecting") setPhase("waiting");
+    S.error = null;
+    renderConn(); renderOverlay();
+  };
+
+  ws.onmessage = (ev) => {
+    let j; try { j = JSON.parse(ev.data); } catch (_) { return; }
+    handle(j);
+  };
+
+  ws.onclose = () => { ws = null; onFail(null); };
+  ws.onerror = () => { /* onclose が続く */ };
+}
+
+function onFail(msg) {
+  if (msg) S.error = msg;
+  if (!wantConnect || dormant) { renderConn(); return; }
+
+  // 一度も繋がってない = URL/token/サーバ側の問題。即あきらめる
+  if (!everConnected) {
+    if (initialRetries > 0) {          // bat 起動直後の「サーバがまだ立ち上がってない」猶予
+      initialRetries--;
+      setPhase("reconnecting");
+      renderConn(); renderOverlay();
+      retryTimer = setTimeout(() => { if (wantConnect && !dormant) open(); }, 1500);
+      return;
+    }
+    dormant = true;
+    S.error = S.error || "接続できませんでした。iku (run_server.bat) が起動しているか、URL を確認してね。";
+    setPhase("disconnected");
+    renderConn(); renderOverlay();
+    return;
+  }
+
+  // 一度つながった相手には諦めずに待ち続ける（最大 60 秒間隔）。
+  // Android は電池のため 2 分で dormant にするが、PC のブラウザは開きっぱなしなので
+  // 「iku が戻ってきたら勝手に復帰」が正しい。profile 起動 (pip / torch import) で
+  // WS が数分落ちるのが通常運転なため、ここで諦めると毎回手動再接続になる。
+  if (!firstFailAt) firstFailAt = Date.now();
+  setPhase("reconnecting");
+  const d = BACKOFF[Math.min(failCount, BACKOFF.length - 1)];
+  failCount++;
+  S.retryCount = failCount;
+  renderConn(); renderOverlay();
+  retryTimer = setTimeout(() => { if (wantConnect && !dormant) open(); }, d);
+}
+
+function disconnect() {
+  wantConnect = false; dormant = false;
+  clearTimeout(retryTimer);
+  if (ws) { try { ws.close(1000, "bye"); } catch (_) {} ws = null; }
+  Object.assign(S, {
+    phase: "disconnected", profiles: [], approvals: [],
+    selfModel: {}, disposition: {}, pendingItems: [], eHistory: [], error: null,
+    pendingProfile: null, retryCount: 0,
+  });
+  renderAll();
+}
+
+function send(o) {
+  if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(o)); return true; }
+  return false;
+}
+
+/* =========================================================================
+   受信ハンドラ — ws_server.py の broadcast と 1:1 対応
+   ========================================================================= */
+function handle(j) {
+  const type = j.type;
+  if (!type) return;
+
+  switch (type) {
+
+    case "error":
+      S.error = "認証に失敗しました。token が settings.json の ws_token と一致しているか確認してね。";
+      dormant = true; wantConnect = false;
+      setPhase("disconnected"); renderOverlay(); renderConn();
+      break;
+
+    case "sync": {
+      // 接続時のログ復元（Running への遷移はしない = アプリと同じ方針）
+      const logs = j.recent_logs || [];
+      if (logs.length) {
+        $("logbox").innerHTML = "";
+        logs.slice(-MAX_LOG).forEach(l => appendLog(l && l.text ? l.text : String(l), true));
+        scrollLog(true);
+      }
+      break;
+    }
+
+    case "log":
+      appendLog(j.text || "");
+      break;
+
+    case "reply": {
+      const c = j.content || "";
+      if (!c) break;
+      appendLog("[AI] " + c);
+      break;
+    }
+
+    case "state":
+      if (j.entropy       !== undefined) S.entropy      = j.entropy;
+      if (j.energy        !== undefined) S.energy       = j.energy;
+      if (j.cycle_id      !== undefined) S.cycleId      = j.cycle_id;
+      if (j.tool_level    !== undefined) S.toolLevel    = j.tool_level;
+      if (j.pressure      !== undefined) S.pressure     = j.pressure;
+      if (j.pending_count !== undefined) S.pendingCount = j.pending_count;
+      if (j.pending_items !== undefined) S.pendingItems = j.pending_items || [];
+      if (j.paused        !== undefined) S.paused       = j.paused;
+      toRunning();
+      renderTop(); renderLeft();
+      break;
+
+    case "self": {
+      const data = j.data || {};
+      // アプリ準拠: disposition 系と内部配列は自己モデル本文から除外
+      const skip = new Set(["disposition", "dispositions", "last_e_values", "drives_state"]);
+      const m = {};
+      for (const k of Object.keys(data)) {
+        if (skip.has(k)) continue;
+        const v = data[k];
+        if (v === null || v === undefined) m[k] = "";
+        else if (typeof v === "object" && !Array.isArray(v))
+          m[k] = Object.keys(v).map(kk => kk + "=" + fmtVal(v[kk])).join(", ");
+        else if (Array.isArray(v)) m[k] = v.map(fmtVal).join(", ");
+        else m[k] = String(v);
+      }
+      S.selfModel = m;
+      const d = {};
+      const dp = data.disposition || {};
+      for (const k of Object.keys(dp)) { const n = Number(dp[k]); if (!isNaN(n)) d[k] = n; }
+      S.disposition = d;
+      toRunning(); renderLeft();
+      break;
+    }
+
+    case "e_values":
+      if (j.e1 !== undefined) S.e1 = j.e1;
+      if (j.e2 !== undefined) S.e2 = j.e2;
+      if (j.e3 !== undefined) S.e3 = j.e3;
+      if (j.e4 !== undefined) S.e4 = j.e4;
+      if (j.negentropy !== undefined) S.negentropy = j.negentropy;
+      S.eHistory.push([S.e1, S.e2, S.e3, S.e4]);
+      if (S.eHistory.length > MAX_HIST) S.eHistory.shift();
+      toRunning(); renderLeft();
+      break;
+
+    case "approval_request":
+      if (!j.id) break;
+      S.approvals.push({ id: j.id, tool: j.tool || "", preview: j.preview || "", timestamp: j.timestamp || "" });
+      renderApprovals();
+      beep();
+      break;
+
+    case "approval_result":
+      S.approvals = S.approvals.filter(a => a.id !== j.id);
+      renderApprovals();
+      if (j.decision === "timeout") appendLog("[sys] 承認タイムアウト: " + j.id);
+      break;
+
+    case "profile_list": {
+      if (S.phase === "loading" || S.phase === "running") break;   // アプリ準拠: 稼働中の定期 broadcast は無視
+      S.profiles = (j.profiles || []).map(p => ({
+        name: p.name || "", cycleId: p.cycle_id || 0,
+        entropy: p.entropy !== undefined ? p.entropy : 0.65,
+        energy: p.energy !== undefined ? p.energy : 50,
+      }));
+      setPhase("profileSelect");
+      // server.py は profile_list を 0.5s ごとに流し続ける。起動前設定を開いている間に
+      // 再描画すると入力中の文字が消えるので、一覧の更新だけして描画はしない
+      if (!S.pendingProfile) renderOverlay();
+      break;
+    }
+
+    case "llm_providers_list":
+      S.llmProviders = (j.providers || []).map(p => ({
+        provider: p.provider || "", baseUrl: p.base_url || "",
+        lastModel: p.last_model || "", hasKey: !!p.has_key,
+      }));
+      if (j.active) S.llmActive = { provider: j.active.provider || "", model: j.active.model || "" };
+      renderLeft();
+      // 起動前設定を開いている最中なら、届いた provider 情報で既定値を埋め直す
+      if (S.pendingProfile) {
+        if (!S.pre.provider) {
+          preLaunchDefaults(S.llmActive.provider ||
+                            (S.llmProviders[0] ? S.llmProviders[0].provider : ""));
+        }
+        renderOverlay();
+      }
+      break;
+
+    case "set_llm_result":
+      S.llmSetResult = j.ok
+        ? "設定完了: " + (j.provider || "") + " / " + (j.model || "")+ "（次サイクルから反映）"
+        : "エラー: " + (j.error || "unknown");
+      renderLeft();
+      if (j.ok) send({ type: "get_llm_providers" });
+      break;
+
+    case "server_command_result":
+      if (j.action === "pause")  S.paused = true;
+      if (j.action === "resume") S.paused = false;
+      renderTop();
+      break;
+
+    case "device_request":
+      // camera / mic / screen_peek は Android 端末のハードウェアが要る。
+      // web 版は応答できないので、握りつぶさず可視化する（黙って落ちるのが一番読めない）
+      appendLog("[sys] device_request(" + (j.tool || j.action || "?") +
+                ") はスマホアプリが必要です。web モニターからは応答できません。");
+      break;
+  }
+}
+
+function fmtVal(v) {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "object") { try { return JSON.stringify(v); } catch (_) { return String(v); } }
+  return String(v);
+}
+
+/** state/self/e_values のどれかが来たら「稼働中」とみなす（アプリと同じ判定） */
+function toRunning() {
+  if (S.phase === "waiting" || S.phase === "loading" || S.phase === "profileSelect") {
+    setPhase("running"); renderOverlay(); renderConn(); renderTop(); renderTabs();
+  }
+}
+
+function setPhase(p) { S.phase = p; }
+
+/* =========================================================================
+   描画
+   ========================================================================= */
+function renderAll() { renderConn(); renderTop(); renderTabs(); renderLeft(); renderApprovals(); renderOverlay(); }
+
+function renderConn() {
+  const el = $("conn");
+  if (S.phase === "running" || S.phase === "waiting") { el.textContent = "● live";        el.className = "statchip on"; }
+  else if (S.phase === "reconnecting")                { el.textContent = "◐ 再接続中…";   el.className = "statchip warn"; }
+  else if (S.phase === "loading")                     { el.textContent = "◐ 起動中…";     el.className = "statchip warn"; }
+  else                                                { el.textContent = "○ offline";     el.className = "statchip off"; }
+}
+
+function renderTop() {
+  $("t-cycle").textContent = S.cycleId;
+  $("t-lv").textContent    = S.toolLevel;
+  $("t-pend").textContent  = S.pendingCount;
+  const live = (S.phase === "running");
+  $("btn-pause").textContent = S.paused ? "▶ resume" : "⏸ pause";
+  $("btn-pause").disabled = !live;
+  $("btn-stop").disabled   = !live;
+  $("btn-dc").disabled     = (S.phase === "disconnected");
+}
+
+const TABS = [
+  { id: "dash",   label: "Dashboard" },
+  { id: "test",   label: "Test" },
+  { id: "config", label: "Settings" },
+];
+const MTABS = [
+  { id: "dash",   label: "Dash" },
+  { id: "term",   label: "Term" },
+  { id: "test",   label: "Test" },
+  { id: "config", label: "Cfg" },
+];
+
+function renderTabs() {
+  $("tabs").innerHTML = "";
+  TABS.forEach(t => {
+    const b = document.createElement("button");
+    b.textContent = t.label;
+    b.className = (S.leftTab === t.id) ? "active" : "";
+    b.onclick = () => { S.leftTab = t.id; S.mobileTerm = false; renderTabs(); renderLeft(); applyNarrow(); };
+    $("tabs").appendChild(b);
+  });
+
+  $("mobiletabs").innerHTML = "";
+  MTABS.forEach(t => {
+    const b = document.createElement("button");
+    b.textContent = t.label;
+    b.style.cssText = "padding:4px 9px;font-size:12px";
+    // active 判定は leftTab / mobileTerm から導出する（状態を二重に持たない）
+    const active = (t.id === "term") ? S.mobileTerm : (!S.mobileTerm && S.leftTab === t.id);
+    if (active) { b.style.color = "var(--accent)"; b.style.borderColor = "var(--accent)"; }
+    b.onclick = () => {
+      if (t.id === "term") S.mobileTerm = true;
+      else { S.mobileTerm = false; S.leftTab = t.id; }
+      renderTabs(); renderLeft(); applyNarrow();
+    };
+    $("mobiletabs").appendChild(b);
+  });
+}
+
+function applyNarrow() {
+  const narrow = window.matchMedia("(max-width: 900px)").matches;
+  const main = $("main");
+  main.classList.toggle("narrow", narrow);
+  if (!narrow) {
+    $("leftpane").classList.add("shown");
+    $("rightpane").classList.add("shown");
+  } else {
+    $("leftpane").classList.toggle("shown", !S.mobileTerm);
+    $("rightpane").classList.toggle("shown", S.mobileTerm);
+  }
+}
+
+/* ---------- 左ペイン ---------- */
+function renderLeft() {
+  const box = $("leftbody");
+  const keep = box.scrollTop;
+  if (S.leftTab === "dash")        box.innerHTML = htmlDash();
+  else if (S.leftTab === "test")   box.innerHTML = htmlTest();
+  else                             box.innerHTML = htmlConfig();
+  box.scrollTop = keep;
+  if (S.leftTab === "dash")   wireDash();
+  if (S.leftTab === "test")   wireTest();
+  if (S.leftTab === "config") wireConfig();
+}
+
+/** Android アプリの entropyToColor() 移植（同じ配色で見えるように） */
+function entropyToColor(e) {
+  let r, g, b;
+  if (e < 0.2)      { r = 0.05;                  g = 0.15 + e * 2;          b = 0.6 + e; }
+  else if (e < 0.4) { r = 0.05 + (e - 0.2) * 1.5; g = 0.35 + (e - 0.2);      b = 0.5 - (e - 0.2) * 2; }
+  else if (e < 0.6) { r = 0.35 + (e - 0.4) * 2;   g = 0.55 - (e - 0.4) * 1.5;b = 0.1; }
+  else if (e < 0.8) { r = 0.75 + (e - 0.6);       g = 0.25 - (e - 0.6);      b = 0.05; }
+  else              { r = 0.9;                    g = 0.1 - (e - 0.8) * 0.5; b = 0.05 + (e - 0.8) * 0.3; }
+  const c = (x) => Math.round(Math.min(1, Math.max(0, x)) * 255);
+  return "rgb(" + c(r) + "," + c(g) + "," + c(b) + ")";
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
+}
+
+function dashRow(label, value, progress) {
+  let bar = "";
+  if (progress !== null && progress !== undefined) {
+    const p = Math.min(1, Math.max(0, progress));
+    bar = '<div class="bar"><i style="width:' + (p * 100).toFixed(1) + '%;background:' + entropyToColor(p) + '"></i></div>';
+  } else {
+    bar = '<div style="flex:1"></div>';
+  }
+  return '<div class="dashrow"><span class="lbl">' + esc(label) + '</span>' + bar +
+         '<span class="val">' + esc(value) + '</span></div>';
+}
+
+function eBar(label, v) {
+  const val = Math.min(1, Math.max(0, v || 0));
+  const pct = Math.round(val * 100);
+  const col = pct >= 70 ? "var(--green)" : pct >= 50 ? "var(--yellow)" : "var(--red)";
+  return '<div class="ebar"><span class="cap">' + label + '</span>' +
+         '<div class="col"><i style="height:' + (val * 100).toFixed(1) + '%;background:' + col + '"></i></div>' +
+         '<span class="pct">' + pct + '%</span></div>';
+}
+
+function trendChart(hist) {
+  if (!hist || hist.length < 2) return '<div class="note">2 サイクル以上たまると出るよ（今 ' + (hist ? hist.length : 0) + '）</div>';
+  const colors = ["#4FC3F7", "#76FF03", "#FFEB3B", "#FF6D00"];
+  const names  = ["E1", "E2", "E3", "E4"];
+  const W = 300, H = 120, P = 8;
+  const cw = W - P * 2, ch = H - P * 2;
+  let paths = "";
+  for (let e = 0; e < 4; e++) {
+    const pts = hist.map((row, i) => {
+      const x = P + (i / (hist.length - 1)) * cw;
+      const v = Math.min(1, Math.max(0, row[e] || 0));
+      const y = P + (1 - v) * ch;
+      return x.toFixed(1) + "," + y.toFixed(1);
+    }).join(" ");
+    paths += '<polyline points="' + pts + '" fill="none" stroke="' + colors[e] +
+             '" stroke-width="2" vector-effect="non-scaling-stroke" />';
+  }
+  const legend = names.map((n, i) => '<span style="color:' + colors[i] + '">' + n + '</span>').join("");
+  return '<div class="chartlegend">' + legend + '</div>' +
+         '<div id="chartwrap"><svg width="100%" height="120" viewBox="0 0 ' + W + ' ' + H +
+         '" preserveAspectRatio="none">' + paths + '</svg></div>';
+}
+
+function htmlDash() {
+  if (S.phase !== "running") {
+    return '<div class="panel"><div class="note">iku が稼働すると、ここに状態が出るよ。</div></div>';
+  }
+  let h = '<div class="dash">';
+
+  h += dashRow("entropy",    Number(S.entropy).toFixed(4),  S.entropy);
+  h += dashRow("energy",     Number(S.energy).toFixed(1),   S.energy / 100);
+  h += dashRow("pressure",   Number(S.pressure).toFixed(2), Math.min(1, S.pressure / 15));
+  h += dashRow("cycle",      S.cycleId,   null);
+  h += dashRow("tool level", S.toolLevel, null);
+
+  h += '<h3 class="sec">E-values</h3>';
+  h += '<div class="ebars">' + eBar("E1", S.e1) + eBar("E2", S.e2) + eBar("E3", S.e3) + eBar("E4", S.e4) + '</div>';
+  if (S.negentropy) h += '<div class="note">negentropy: <span class="mono">' + Number(S.negentropy).toFixed(4) + '</span></div>';
+
+  h += '<h3 class="sec">E-value Trend (' + S.eHistory.length + ' cycles)</h3>';
+  h += trendChart(S.eHistory);
+
+  if (S.pendingItems.length) {
+    h += '<h3 class="sec">pending (' + S.pendingCount + ')</h3>';
+    S.pendingItems.forEach(p => {
+      h += '<div class="pend"><div class="t">' + esc(p.type || "") + '</div>' +
+           '<div class="c">' + esc(p.content || "") + '</div></div>';
+    });
+  }
+
+  const dk = Object.keys(S.disposition);
+  if (dk.length) {
+    h += '<h3 class="sec">disposition</h3>';
+    dk.forEach(k => h += dashRow(k, Number(S.disposition[k]).toFixed(2), S.disposition[k]));
+  }
+
+  const sk = Object.keys(S.selfModel);
+  if (sk.length) {
+    h += '<h3 class="sec">self_model</h3>';
+    sk.forEach(k => {
+      if (k === "name") h += '<div class="kv name">' + esc(k) + ': ' + esc(S.selfModel[k]) + '</div>';
+      else h += '<div class="kv"><div class="k">' + esc(k) + '</div><div class="v">' +
+                esc(String(S.selfModel[k]).slice(0, 300)) + '</div></div>';
+    });
+  }
+
+  h += '</div>';
+  return h;
+}
+function wireDash() { /* 静的表示のみ */ }
+
+/* ---------- Test タブ ---------- */
+const TEST_GROUPS = [
+  { title: "💬 出力", device: false, items: [
+    { label: "output_display テスト", tool: "output_display",
+      args: { content: "テストメッセージ from web monitor", intent: "test", expect: "reply appears on main" } },
+  ]},
+  { title: "🔍 記憶", device: false, items: [
+    { label: "search_memory テスト", tool: "search_memory",
+      args: { query: "test", intent: "test search", expect: "results" } },
+    { label: "memory_store テスト", tool: "memory_store",
+      args: { network: "experience", content: "テスト記憶 from web monitor", intent: "test", expect: "stored" } },
+  ]},
+  { title: "🌸 Elyth", device: false, items: [
+    { label: "elyth_info 通知取得", tool: "elyth_info",
+      args: { section: "notifications", limit: "5", intent: "test", expect: "notification list" } },
+  ]},
+  { title: "📸 カメラ / 📱 画面 / 🎙 マイク", device: true, items: [
+    { label: "camera_stream", tool: "camera_stream", args: {} },
+    { label: "screen_peek",   tool: "screen_peek",   args: {} },
+    { label: "mic_record",    tool: "mic_record",    args: {} },
+  ]},
+];
+
+function htmlTest() {
+  let h = '<div class="panel">';
+  TEST_GROUPS.forEach((g, gi) => {
+    h += '<div class="tgroup"><div class="gh">' + g.title + '</div><div class="gb">';
+    g.items.forEach((it, ii) => {
+      h += '<button data-g="' + gi + '" data-i="' + ii + '"' + (g.device ? " disabled" : "") + '>' +
+           esc(it.label) + '</button>';
+    });
+    h += '</div>';
+    if (g.device) h += '<div class="note">端末のカメラ・マイク・画面はスマホアプリ側のハードウェアを使うため、web モニターからは実行できません。</div>';
+    h += '</div>';
+  });
+
+  h += '<h3 class="sec">任意の tool を実行</h3>';
+  h += '<div class="field"><label>tool 名</label><input id="tt-name" placeholder="reflect" autocomplete="off"></div>';
+  h += '<div class="field"><label>args（JSON）</label><textarea id="tt-args" rows="4" class="mono" placeholder=\'{"intent":"test"}\'>{}</textarea></div>';
+  h += '<button id="tt-run">実行</button><div class="note" id="tt-msg"></div>';
+  h += '</div>';
+  return h;
+}
+
+function wireTest() {
+  document.querySelectorAll("#leftbody .gb button").forEach(b => {
+    b.onclick = () => {
+      const g = TEST_GROUPS[+b.dataset.g], it = g.items[+b.dataset.i];
+      runTool(it.tool, it.args);
+    };
+  });
+  const run = $("tt-run");
+  if (run) run.onclick = () => {
+    const name = ($("tt-name").value || "").trim();
+    if (!name) { $("tt-msg").textContent = "tool 名を入れてね"; return; }
+    let args;
+    try { args = JSON.parse($("tt-args").value || "{}"); }
+    catch (e) { $("tt-msg").textContent = "args が JSON として読めません: " + e.message; return; }
+    runTool(name, args);
+    $("tt-msg").textContent = "送信しました。結果は Terminal に出ます。";
+  };
+}
+
+function runTool(tool, args) {
+  const ok = send({ type: "test_tool", tool: tool, args: args || {} });
+  appendLog((ok ? "[test] → " : "[test] 送信失敗 ") + tool + " " + JSON.stringify(args || {}));
+}
+
+/* ---------- Settings タブ ---------- */
+function htmlConfig() {
+  let h = '<div class="panel">';
+
+  h += '<h3 class="sec">LLM provider</h3>';
+  if (!S.llmProviders.length) {
+    h += '<div class="note">読み込み中…（出てこなければ下の「再取得」を押してね）</div>';
+  } else {
+    S.llmProviders.forEach(p => {
+      const isActive = p.provider === S.llmActive.provider;
+      h += '<div class="provider"><span class="pn">' + esc(p.provider) + '</span>';
+      if (p.hasKey)  h += '<span class="badge key">key</span>';
+      if (isActive)  h += '<span class="badge active">active</span>';
+      h += '</div>';
+      if (p.lastModel) h += '<div class="note" style="margin:0 0 6px 2px">last: <span class="mono">' + esc(p.lastModel) + '</span></div>';
+    });
+    h += '<div class="note" style="margin-top:8px">現在: <span class="mono" style="color:var(--green)">' +
+         esc(S.llmActive.provider) + ' / ' + esc(S.llmActive.model) + '</span></div>';
+  }
+
+  h += '<h3 class="sec">切り替え</h3>';
+  h += '<div class="field"><label>provider</label><select id="cf-prov">';
+  ["lmstudio", "claude", "openai", "gemini", "claude_code"].forEach(p => {
+    h += '<option value="' + p + '"' + (p === S.llmActive.provider ? " selected" : "") + '>' + p + '</option>';
+  });
+  h += '</select></div>';
+  h += '<div class="field"><label>model</label><input id="cf-model" class="mono" value="' + esc(S.llmActive.model) + '" autocomplete="off"></div>';
+  h += '<div class="field"><label>base_url（空なら変更しない）</label><input id="cf-url" class="mono" placeholder="http://localhost:1234/v1" autocomplete="off"></div>';
+  h += '<div class="field"><label>api_key（空なら既存を温存）</label><input id="cf-key" type="password" autocomplete="off"></div>';
+  h += '<div class="row"><button id="cf-save">保存（次サイクルから反映）</button><button id="cf-reload">再取得</button></div>';
+  if (S.llmSetResult) h += '<div class="note" style="color:var(--green)">' + esc(S.llmSetResult) + '</div>';
+
+  h += '<h3 class="sec">接続</h3>';
+  h += '<div class="note">' + esc(url || "-") + '</div>';
+
+  h += '<h3 class="sec">web 版でできないこと</h3>';
+  h += '<div class="warnbox">カメラ・マイク・画面キャプチャ・ペット overlay は、スマホ本体のハードウェアと権限が要る機能です。' +
+       'iku がそれらを要求（device_request）しても web モニターは応答できません。' +
+       'その場合は Terminal に <span class="mono">[sys]</span> 行が出ます。</div>';
+
+  h += '</div>';
+  return h;
+}
+
+function wireConfig() {
+  const save = $("cf-save");
+  if (save) save.onclick = () => {
+    send({
+      type: "set_llm",
+      provider: $("cf-prov").value,
+      model: ($("cf-model").value || "").trim(),
+      api_key: $("cf-key").value || "",
+      base_url: ($("cf-url").value || "").trim(),
+    });
+  };
+  const rl = $("cf-reload");
+  if (rl) rl.onclick = () => send({ type: "get_llm_providers" });
+}
+
+/* ---------- 承認 ---------- */
+function renderApprovals() {
+  const box = $("approvals");
+  // 承認欄の増減で log 欄の高さが変わる。下端に貼り付いていたなら貼り直す
+  const stick = nearBottom();
+  box.innerHTML = "";
+  S.approvals.forEach(a => {
+    const d = document.createElement("div");
+    d.className = "approval";
+    d.innerHTML =
+      '<div class="body"><div class="tool">🔐 ' + esc(a.tool) + '</div>' +
+      '<div class="preview">' + esc(a.preview) + '</div>' +
+      (a.timestamp ? '<div class="note">' + esc(a.timestamp) + '</div>' : "") + '</div>' +
+      '<div class="acts"><button class="btn-yes">承認</button><button class="btn-no">拒否</button></div>';
+    d.querySelector(".btn-yes").onclick = () => decide(a.id, true);
+    d.querySelector(".btn-no").onclick  = () => decide(a.id, false);
+    box.appendChild(d);
+  });
+  if (stick) requestAnimationFrame(scrollLog);
+}
+
+function decide(id, yes) {
+  send({ type: "approve", id: id, decision: yes ? "yes" : "no" });
+  S.approvals = S.approvals.filter(a => a.id !== id);
+  renderApprovals();
+  appendLog("[sys] 承認: " + id + " → " + (yes ? "yes" : "no"));
+}
+
+/* ---------- ログ ---------- */
+function logClass(line) {
+  if (line.startsWith("---"))            return "l-head";
+  if (line.startsWith("[AI]"))           return "l-ai";
+  if (line.startsWith("[external]"))     return "l-ext";
+  if (line.startsWith("[sys]"))          return "l-sys";
+  if (line.indexOf("エラー") >= 0 || line.indexOf("失敗") >= 0) return "l-err";
+  if (line.indexOf("[pressure]") >= 0)   return "l-press";
+  if (line.indexOf("選択:") >= 0)        return "l-sel";
+  if (line.indexOf("実行:") >= 0)        return "l-run";
+  return "";
+}
+
+function appendLog(text, bulk) {
+  const box = $("logbox");
+  const stick = bulk || nearBottom();
+  const d = document.createElement("div");
+  d.className = "logline " + logClass(text);
+  d.textContent = text;
+  box.appendChild(d);
+  while (box.childElementCount > MAX_LOG) box.removeChild(box.firstChild);
+  if (stick) scrollLog();
+}
+
+function nearBottom() {
+  const b = $("logbox");
+  return b.scrollHeight - b.scrollTop - b.clientHeight < 60;
+}
+function scrollLog() { const b = $("logbox"); b.scrollTop = b.scrollHeight; }
+
+/* ---------- 承認音（小さく鳴らす。ブラウザが許せば） ---------- */
+function beep() {
+  try {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return;
+    const ctx = new C();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine"; o.frequency.value = 880;
+    g.gain.setValueAtTime(0.06, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + 0.25);
+    setTimeout(() => ctx.close(), 500);
+  } catch (_) {}
+}
+
+/* =========================================================================
+   オーバーレイ（接続前 / プロファイル選択 / 起動待ち）
+   ========================================================================= */
+function renderOverlay() {
+  const ov = $("overlay");
+
+  if (S.phase === "running") { ov.style.display = "none"; $("main").style.display = "flex"; applyNarrow(); return; }
+
+  ov.style.display = "flex";
+  $("main").style.display = "none";
+
+  if (S.phase === "profileSelect")      ov.innerHTML = S.pendingProfile ? cardPreLaunch() : cardProfiles();
+  else if (S.phase === "loading")       ov.innerHTML = cardWait("プロファイル「" + esc(S.loadingName) + "」を起動中…", true);
+  else if (S.phase === "waiting")       ov.innerHTML = cardWait("接続しました。iku からの応答を待っています…");
+  else if (S.phase === "reconnecting")  ov.innerHTML = cardWait("再接続しています…" +
+                                          (S.retryCount > 1 ? "（" + S.retryCount + " 回目）" : ""), true);
+  else                                  ov.innerHTML = cardConnect();
+
+  wireOverlay();
+}
+
+function cardWait(msg, longWait) {
+  return '<div class="card"><div class="row" style="gap:12px"><span class="spin"></span>' +
+         '<span>' + msg + '</span></div>' +
+         (longWait ? '<div class="note">プロファイル起動時は venv の pip install や torch の読み込みで' +
+                     '数分かかることがあります。iku が WebSocket を立て直したら自動でつながります。</div>' : "") +
+         '<div style="margin-top:18px"><button id="ov-cancel">やめる</button></div></div>';
+}
+
+/** プロファイルを選んだあと、起動する LLM を決める画面（Android の PreLaunchConfigScreen 相当） */
+function cardPreLaunch() {
+  const p = S.pre;
+  const info = S.llmProviders.find(x => x.provider === p.provider);
+  const hasKey = info ? info.hasKey : false;
+
+  let h = '<div class="card"><h2>プロファイル起動</h2>' +
+          '<div style="font-size:17px;font-weight:700;margin:2px 0 4px">' + esc(S.pendingProfile) + '</div>' +
+          '<div class="sub">起動する LLM を選んでください</div>';
+
+  h += '<h3 class="sec">プロバイダ</h3>';
+  if (!S.llmProviders.length) {
+    h += '<div class="note">(読み込み中…)</div>';
+  } else {
+    h += '<div style="display:flex;flex-wrap:wrap;gap:8px">';
+    S.llmProviders.forEach(x => {
+      const sel = (x.provider === p.provider);
+      h += '<button class="pv" data-p="' + esc(x.provider) + '" style="border-radius:20px;padding:7px 14px;' +
+           (sel ? 'background:var(--accent);color:#000;border-color:var(--accent)' : 'background:#2A2A4A') + '">' +
+           esc(x.provider) + (x.hasKey ? ' <span style="color:' + (sel ? '#000' : 'var(--green)') + '">✓</span>' : "") +
+           '</button>';
+    });
+    h += '</div>';
+  }
+
+  h += '<h3 class="sec">モデル名</h3>';
+  h += '<input id="pl-model" class="mono" value="' + esc(p.model) + '" placeholder="例: qwen3.6-27b" autocomplete="off">';
+
+  h += '<h3 class="sec">API Key</h3>';
+  h += '<div class="note" style="margin:0 0 5px;color:' + (hasKey ? "var(--green)" : "#FFAB40") + '">' +
+       (hasKey ? "保存済み（空欄のままなら既存を使用）" : "未登録（lmstudio 以外は入力必須）") + '</div>';
+  h += '<input id="pl-key" type="password" value="' + esc(p.apiKey) + '" placeholder="sk-… または空欄" autocomplete="off">';
+
+  h += '<h3 class="sec">Base URL（任意）</h3>';
+  h += '<input id="pl-url" class="mono" value="' + esc(p.baseUrl) + '" placeholder="空欄ならデフォルト" autocomplete="off">';
+
+  const ready = !!(p.provider && p.model.trim());
+  h += '<div style="margin-top:20px"><button id="pl-go"' + (ready ? "" : " disabled") +
+       ' style="width:100%;background:var(--accent);color:#000;border-color:var(--accent);font-weight:700">' +
+       'この設定で起動</button></div>';
+  h += '<div style="margin-top:8px"><button id="pl-back" style="width:100%">プロファイル選択に戻る</button></div>';
+  h += '</div>';
+  return h;
+}
+
+/** provider を選び直したとき、その provider の保存値でフォームを引き直す（アプリと同じ挙動） */
+function preLaunchDefaults(provider) {
+  const info = S.llmProviders.find(x => x.provider === provider);
+  S.pre = {
+    provider: provider,
+    model: (info && info.lastModel) || (provider === S.llmActive.provider ? S.llmActive.model : "") || "",
+    apiKey: "",
+    baseUrl: (info && info.baseUrl) || "",
+  };
+}
+
+function cardConnect() {
+  const savedUrl   = localStorage.getItem("noetic.url")   || "ws://localhost:8765";
+  const savedToken = localStorage.getItem("noetic.token") || "iku2026";
+  return '<div class="card"><h2>Noetic Seed Monitor</h2>' +
+    '<div class="sub">PC / ブラウザ版。iku を起動してから接続してね。</div>' +
+    '<div class="field"><label>WebSocket URL</label>' +
+    '<input id="ov-url" class="mono" value="' + esc(savedUrl) + '" autocomplete="off"></div>' +
+    '<div class="field"><label>token（settings.json の ws_token）</label>' +
+    '<input id="ov-token" class="mono" value="' + esc(savedToken) + '" autocomplete="off"></div>' +
+    '<div class="row"><button id="ov-connect" style="flex:1;background:#1d3a46;border-color:var(--accent)">接続</button></div>' +
+    (S.error ? '<div class="err">' + esc(S.error) + '</div>' : "") +
+    '<div class="note">同じ PC からなら <span class="mono">ws://localhost:8765</span>。' +
+    '別の端末から見るときは PC の LAN IP に置き換えてね（例 <span class="mono">ws://192.168.1.5:8765</span>）。</div>' +
+    '</div>';
+}
+
+function cardProfiles() {
+  let h = '<div class="card"><h2>プロファイル選択</h2><div class="sub">起動するプロファイルを選んでね</div><div class="plist">';
+  if (!S.profiles.length) h += '<div class="note">プロファイルが見つかりません</div>';
+  S.profiles.forEach((p, i) => {
+    h += '<button class="pitem" data-i="' + i + '"><div class="pn">' + esc(p.name) + '</div>' +
+         '<div class="pm">cycle ' + p.cycleId + ' · entropy ' + Number(p.entropy).toFixed(3) +
+         ' · energy ' + Number(p.energy).toFixed(1) + '</div></button>';
+  });
+  h += '</div><div style="margin-top:18px"><button id="ov-cancel">切断</button></div></div>';
+  return h;
+}
+
+function wireOverlay() {
+  const c = $("ov-connect");
+  if (c) c.onclick = doConnect;
+  const u = $("ov-url"), t = $("ov-token");
+  if (u) u.onkeydown = (e) => { if (e.key === "Enter") doConnect(); };
+  if (t) t.onkeydown = (e) => { if (e.key === "Enter") doConnect(); };
+
+  const cancel = $("ov-cancel");
+  if (cancel) cancel.onclick = disconnect;
+
+  // プロファイルを押しても即起動しない。LLM 設定画面を挟む（アプリと同じ 2 段階）
+  document.querySelectorAll("#overlay .pitem").forEach(b => {
+    b.onclick = () => {
+      S.pendingProfile = S.profiles[+b.dataset.i].name;
+      S.pre = { provider: "", model: "", apiKey: "", baseUrl: "" };
+      send({ type: "get_llm_providers" });   // 返信 → llm_providers_list で既定値を埋める
+      renderOverlay();
+    };
+  });
+
+  // --- LLM 設定画面 ---
+  document.querySelectorAll("#overlay .pv").forEach(b => {
+    b.onclick = () => { preLaunchDefaults(b.dataset.p); renderOverlay(); };
+  });
+  const bind = (id, key) => {
+    const el = $(id);
+    if (el) el.oninput = () => {
+      S.pre[key] = el.value;
+      const go = $("pl-go");
+      if (go) go.disabled = !(S.pre.provider && S.pre.model.trim());
+    };
+  };
+  bind("pl-model", "model"); bind("pl-key", "apiKey"); bind("pl-url", "baseUrl");
+
+  const back = $("pl-back");
+  if (back) back.onclick = () => { S.pendingProfile = null; renderOverlay(); };
+
+  const go = $("pl-go");
+  if (go) go.onclick = () => {
+    const p = S.pre;
+    if (!p.provider || !p.model.trim()) return;
+    send({ type: "set_llm", provider: p.provider, model: p.model.trim(),
+           api_key: p.apiKey, base_url: p.baseUrl.trim() });
+    send({ type: "select_profile", name: S.pendingProfile });
+    S.loadingName = S.pendingProfile;
+    S.pendingProfile = null;
+    setPhase("loading"); renderOverlay(); renderConn();
+  };
+}
+
+function doConnect() {
+  const u = ($("ov-url").value || "").trim();
+  const t = ($("ov-token").value || "").trim();
+  if (!u) return;
+  localStorage.setItem("noetic.url", u);
+  localStorage.setItem("noetic.token", t);
+  S.error = null;
+  connect(u, t);
+  setPhase("reconnecting"); renderOverlay(); renderConn();
+}
+
+/* =========================================================================
+   起動
+   ========================================================================= */
+$("chatsend").onclick = sendChat;
+$("chatinput").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } };
+
+function sendChat() {
+  const el = $("chatinput");
+  const text = (el.value || "").trim();
+  if (!text) return;
+  if (!send({ type: "chat", text: text })) { appendLog("[sys] 未接続のため送信できませんでした"); return; }
+  appendLog("[external] " + text);
+  el.value = "";
+}
+
+$("btn-pause").onclick = () => send({ type: "server_command", action: S.paused ? "resume" : "pause" });
+$("btn-stop").onclick  = () => {
+  if (confirm("iku を終了します。よろしいですか？")) send({ type: "server_command", action: "stop" });
+};
+$("btn-dc").onclick = () => disconnect();
+
+window.addEventListener("resize", applyNarrow);
+
+// 接続したら LLM 一覧も取っておく（Settings タブを開いた瞬間に出るように）
+setInterval(() => {
+  if (S.phase === "running" && !S.llmProviders.length) send({ type: "get_llm_providers" });
+}, 5000);
+
+renderAll();
+applyNarrow();
+
+// run_with_monitor.bat は ?auto=1 を付けて開く → 保存済み設定でそのまま繋ぎにいく。
+// 手で monitor.html を開いたときは今まで通り接続画面から。
+if (new URLSearchParams(location.search).get("auto") === "1") {
+  initialRetries = 12;   // 1.5s x 12 = 最大 18 秒、サーバの起動を待つ
+  connect(localStorage.getItem("noetic.url")   || "ws://localhost:8765",
+          localStorage.getItem("noetic.token") || "iku2026");
+  setPhase("reconnecting"); renderOverlay(); renderConn();
+}
+</script>
+</body>
+</html>

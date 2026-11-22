@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError, result_redactor
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -32,8 +32,10 @@ def _parse_skill_file(path: Path) -> dict:
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except Exception:
-        return {}
+    except ToolError:
+        raise
+    except Exception as e:
+        raise ToolError(str(e), detail={"path": str(path), "exception_type": type(e).__name__}) from e
 
     frontmatter = {}
     body = text
@@ -53,7 +55,7 @@ def _make_skill(skill_dirs: list) -> Callable:
     def skill(inp: dict) -> str:
         name = (inp.get("name") or "").strip()
         if not name:
-            return "Error: name is required"
+            raise ToolError("Error: name is required")
 
         for d in skill_dirs:
             if not d or not Path(d).exists():
@@ -70,7 +72,7 @@ def _make_skill(skill_dirs: list) -> Callable:
                         f"{fm.get('description', '')}\n\n"
                         f"{body}"
                     )
-        return f"Error: skill '{name}' not found"
+        raise ToolError(f"Error: skill '{name}' not found")
 
     return skill
 
@@ -91,19 +93,21 @@ def agent(inp: dict) -> str:
     agent_type = (inp.get("agent_type") or "").strip()
     task = (inp.get("task") or "").strip()
     if not agent_type:
-        return "Error: agent_type is required"
+        raise ToolError("Error: agent_type is required")
     if not task:
-        return "Error: task is required"
+        raise ToolError("Error: task is required")
 
     fn = _agent_bridge.get("dispatch")
     if fn is None:
-        return (f"[Agent pending — dispatcher not configured]\n"
+        raise ToolError(f"[Agent pending — dispatcher not configured]\n"
                 f"agent_type: {agent_type}\n"
-                f"task: {task[:500]}")
+                f"task: {result_redactor()(task)[:500]}")
     try:
         return fn(agent_type, task, inp)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: agent dispatch failed: {e}"
+        raise ToolError(f"Error: agent dispatch failed: {e}")
 
 
 # ============================================================
@@ -114,7 +118,7 @@ def _make_tool_search(registry: ToolRegistry) -> Callable:
     def tool_search(inp: dict) -> str:
         query = (inp.get("query") or "").strip().lower()
         if not query:
-            return "Error: query is required"
+            raise ToolError("Error: query is required")
 
         query_tokens = set(re.findall(r"\w+", query))
         scored: list = []
@@ -131,7 +135,7 @@ def _make_tool_search(registry: ToolRegistry) -> Callable:
         scored.sort(key=lambda x: -x[0])
         lines = [f"Tools matching '{query}':"]
         for _, name, desc in scored[:10]:
-            lines.append(f"  - {name}: {desc[:100]}")
+            lines.append(f"  - {name}: {result_redactor()(desc)[:100]}")
         return "\n".join(lines)
 
     return tool_search

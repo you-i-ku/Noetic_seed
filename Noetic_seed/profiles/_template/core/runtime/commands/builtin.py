@@ -16,6 +16,7 @@ ctx (runtime context) の想定キー:
 各 handler は (args, ctx) -> CommandResult。
 """
 import json
+from core.runtime.registry import ToolError, ToolResult
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -25,6 +26,17 @@ from core.runtime.commands.dispatcher import (
     CommandResult,
     CommandSpec,
 )
+
+
+def _tool_command(call):
+    """Adapt direct tool calls to the existing slash-command result contract."""
+    try:
+        result = call()
+    except ToolError as exc:
+        return CommandResult(text=str(exc), is_error=True, detail=exc.detail)
+    if isinstance(result, ToolResult):
+        return CommandResult(text=result.message, detail=result.detail)
+    return CommandResult(text=result)
 
 
 # ============================================================
@@ -129,9 +141,11 @@ def _cmd_config(args, ctx) -> CommandResult:
     if not args:
         # show
         if not path.exists():
-            return CommandResult(text="(settings file not found)")
+            return CommandResult(text="(settings file not found)", is_error=True)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+        except ToolError:
+            raise
         except Exception as e:
             return CommandResult(text=f"Parse error: {e}", is_error=True)
         return CommandResult(text=json.dumps(data, ensure_ascii=False,
@@ -140,8 +154,12 @@ def _cmd_config(args, ctx) -> CommandResult:
         # get single key
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        except FileNotFoundError:
             data = {}
+        except ToolError:
+            raise
+        except Exception as e:
+            return CommandResult(text=f"Parse error: {e}", is_error=True)
         keys = args[0].split(".")
         node = data
         for k in keys:
@@ -156,12 +174,16 @@ def _cmd_config(args, ctx) -> CommandResult:
         value_str = " ".join(args[1:])
         try:
             value = json.loads(value_str)
-        except Exception:
+        except json.JSONDecodeError:
             value = value_str
         try:
             data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except Exception:
+        except FileNotFoundError:
             data = {}
+        except ToolError:
+            raise
+        except Exception as e:
+            return CommandResult(text=f"Parse error: {e}", is_error=True)
         keys = key.split(".")
         node = data
         for k in keys[:-1]:
@@ -172,7 +194,7 @@ def _cmd_config(args, ctx) -> CommandResult:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                         encoding="utf-8")
         return CommandResult(text=f"Set {key} = {json.dumps(value, ensure_ascii=False)}")
-    return CommandResult(text="Usage: /config [key] [value]")
+    return CommandResult(text="Usage: /config [key] [value]", is_error=True)
 
 
 # ============================================================
@@ -182,7 +204,7 @@ def _cmd_config(args, ctx) -> CommandResult:
 def _cmd_memory(args, ctx) -> CommandResult:
     session = ctx.get("session")
     if session is None:
-        return CommandResult(text="(no session)")
+        return CommandResult(text="(no session)", is_error=True)
     n = 10
     if args:
         try:
@@ -263,6 +285,8 @@ def _cmd_mcp(args, ctx) -> CommandResult:
             return CommandResult(text="(no settings)")
         try:
             data = json.loads(Path(settings_path).read_text(encoding="utf-8"))
+        except ToolError:
+            raise
         except Exception as e:
             return CommandResult(text=f"Parse error: {e}", is_error=True)
         servers = data.get("mcp_servers", {})
@@ -276,9 +300,8 @@ def _cmd_mcp(args, ctx) -> CommandResult:
     if sub == "auth" and len(args) >= 2:
         server = args[1]
         from core.runtime.tools import mcp as _mcp
-        out = _mcp.mcp_auth({"server": server})
-        return CommandResult(text=out)
-    return CommandResult(text="Usage: /mcp [list | auth <server>]")
+        return _tool_command(lambda: _mcp.mcp_auth({"server": server}))
+    return CommandResult(text="Usage: /mcp [list | auth <server>]", is_error=True)
 
 
 # ============================================================
@@ -295,19 +318,23 @@ def _run_git(args: list, cwd: Optional[Path] = None) -> str:
             timeout=30,
         )
     except FileNotFoundError:
-        return "Error: git not in PATH"
+        raise ToolError("Error: git not in PATH")
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: {e}"
+        raise ToolError(f"Error: {e}")
     out = result.stdout.rstrip()
     err = result.stderr.rstrip()
     if result.returncode != 0:
-        return f"[git {' '.join(args)} rc={result.returncode}]\n{err}\n{out}"
+        raise ToolError(f"[git {' '.join(args)} rc={result.returncode}]\n{err}\n{out}",
+                        detail={"returncode": result.returncode, "command": ["git"] + args,
+                                "stdout": result.stdout, "stderr": result.stderr})
     return out or err or "(no output)"
 
 
 def _cmd_branch(args, ctx) -> CommandResult:
     cwd = ctx.get("workspace_root")
-    return CommandResult(text=_run_git(["status", "-b", "--short"],
+    return _tool_command(lambda: _run_git(["status", "-b", "--short"],
                                        cwd=Path(cwd) if cwd else None))
 
 
@@ -315,18 +342,18 @@ def _cmd_commit(args, ctx) -> CommandResult:
     cwd = ctx.get("workspace_root")
     # /commit -m "msg"  または  /commit "msg"
     if not args:
-        return CommandResult(text="Usage: /commit -m <message>")
+        return CommandResult(text="Usage: /commit -m <message>", is_error=True)
     git_args = ["commit"]
     if args[0] == "-m" and len(args) > 1:
         git_args.extend(["-m", " ".join(args[1:])])
     else:
         git_args.extend(["-m", " ".join(args)])
-    return CommandResult(text=_run_git(git_args, cwd=Path(cwd) if cwd else None))
+    return _tool_command(lambda: _run_git(git_args, cwd=Path(cwd) if cwd else None))
 
 
 def _cmd_diff(args, ctx) -> CommandResult:
     cwd = ctx.get("workspace_root")
-    return CommandResult(text=_run_git(["diff"] + list(args),
+    return _tool_command(lambda: _run_git(["diff"] + list(args),
                                        cwd=Path(cwd) if cwd else None))
 
 
@@ -343,11 +370,14 @@ def _cmd_pr(args, ctx) -> CommandResult:
         )
     except FileNotFoundError:
         return CommandResult(text="Error: gh not in PATH", is_error=True)
+    except ToolError:
+        raise
     except Exception as e:
         return CommandResult(text=f"Error: {e}", is_error=True)
     out = (result.stdout or result.stderr).rstrip()
-    return CommandResult(text=out or "(no output)",
-                         is_error=result.returncode != 0)
+    return CommandResult(text=out or "(no output)", is_error=result.returncode != 0,
+                         detail={"returncode": result.returncode, "command": ["gh", "pr"] + list(args),
+                                 "stdout": result.stdout, "stderr": result.stderr} if result.returncode else None)
 
 
 # ============================================================
@@ -372,8 +402,8 @@ def _cmd_skill(args, ctx) -> CommandResult:
     if args[0] == "show" and len(args) > 1:
         from core.runtime.tools import skill as _skill
         loader = _skill._make_skill(skill_dirs)
-        return CommandResult(text=loader({"name": args[1]}))
-    return CommandResult(text="Usage: /skill [list | show <name>]")
+        return _tool_command(lambda: loader({"name": args[1]}))
+    return CommandResult(text="Usage: /skill [list | show <name>]", is_error=True)
 
 
 # ============================================================
@@ -382,7 +412,7 @@ def _cmd_skill(args, ctx) -> CommandResult:
 
 def _cmd_plugin(args, ctx) -> CommandResult:
     return CommandResult(text="Plugin system not yet implemented "
-                              "(see CLAWCODE_CAPABILITY_INVENTORY §10.5)")
+                              "(see CLAWCODE_CAPABILITY_INVENTORY §10.5)", is_error=True)
 
 
 # ============================================================

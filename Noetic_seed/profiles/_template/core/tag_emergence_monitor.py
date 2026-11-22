@@ -282,7 +282,7 @@ def log_cycle_metrics(cycle_idx: int,
     Returns:
         append した metrics dict (副作用: jsonl 追記)
     """
-    from core.memory_links import list_links
+    from core.memory_links import list_links, LINK_SCAN_LIMIT
 
     stats = collect_emergence_stats(state)
 
@@ -291,7 +291,7 @@ def log_cycle_metrics(cycle_idx: int,
     mem_count = sum(tag_usage.values())
 
     # link count + density (既存、link_grad_density は backward compat で保持)
-    links = list_links(limit=10000)
+    links = list_links(limit=LINK_SCAN_LIMIT)
     link_count = len(links)
     link_grad_density = link_count / max(1, mem_count)
 

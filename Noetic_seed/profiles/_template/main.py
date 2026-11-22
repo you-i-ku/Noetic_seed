@@ -25,7 +25,6 @@ def _bootstrap_venv():
 
     import subprocess
 
-    _pip = _venv / ("Scripts/pip.exe" if _is_win else "bin/pip")
     _req = _here / "requirements.txt"
 
     # venv がなければ作成
@@ -38,9 +37,14 @@ def _bootstrap_venv():
     # 反映される経路 (= 身体拡張の汎用チェーン) を成立させるため、venv 既存でも
     # 必ず実行する。pip は idempotent: 既 install pkg は manifest 検査で skip
     # されるので、全 install 済なら数秒、差分のみ DL する。
+    # pip.exe は起動用 stub で、作成時の python.exe の絶対パスが埋め込まれている。
+    # profile をコピーすると stub がコピー元の venv を指したままになり、同期が
+    # 別の venv に対して行われる (2026-09-24 実例)。この venv の python で
+    # `-m pip` を呼び、必ず自分の venv に入れる。
     if _req.exists():
         print("[bootstrap] requirements.txt から身体仕様を同期中...")
-        subprocess.run([str(_pip), "install", "--quiet", "-r", str(_req)], check=True)
+        subprocess.run([str(_venv_python), "-m", "pip", "install", "--quiet", "-r", str(_req)],
+                       check=True)
         print("[bootstrap] 同期完了。venv で再起動します...\n")
     else:
         print(f"[bootstrap] WARNING: {_req} が見つかりません。空 venv で起動します。\n")
@@ -73,13 +77,14 @@ from datetime import datetime
 # DualLoggerの設定（printをファイルにも書き出す）
 from core.config import (
     DualLogger, RAW_LOG_FILE, STATE_FILE, DEFAULT_PRESSURE_PARAMS,
-    ENV_INJECT_INTERVAL, _NOTIFICATION_HOURS, llm_cfg, BASE_DIR, prompt_budget
+    ENV_INJECT_INTERVAL, _NOTIFICATION_HOURS, llm_cfg, BASE_DIR, prompt_budget,
+    cap_tool_result
 )
 sys.stdout = DualLogger(RAW_LOG_FILE)
 
 from core.profile_repo import ensure_profile_repo
 from core.sanity_check import enforce_sanity_check
-from core.state import load_state, save_state, load_pref, save_pref, append_debug_log
+from core.state import STATE_LOCK, load_startup_state, bind_live_state, record_startup_recovery, save_state, load_pref, save_pref, append_debug_log
 from core.llm import call_llm, _get_active_provider_config
 from core.embedding import _init_vector, _compare_expect_result
 from core.eval import (_calc_e4, _update_energy, eval_with_llm, calc_state_change_bonus,
@@ -93,7 +98,7 @@ from core.pending_unified import pending_prune, pending_add_response_intent
 from core.providers.openai_compat import OpenAIProvider
 from core.providers.anthropic import AnthropicProvider
 from core.providers.claude_code import ClaudeCodeProvider
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.conversation import ConversationRuntime
 from core.runtime.hooks import (
     HookRunner,
@@ -118,16 +123,15 @@ from core.entropy import (
     ENTROPY_PARAMS, tick_entropy, calc_dynamic_threshold,
     calc_pressure_signals, apply_negentropy
 )
-from core.memory import _archive_entries, maybe_compress_log, get_relevant_memories, format_memories_for_prompt
+from core.memory import _record_entry, maybe_compress_log, get_relevant_memories, format_memories_for_prompt, non_empty_subjective_entries
+from core import event_emitter
 from core.perspective import make_perspective
-from core.reflection import should_reflect, reflect
+from core.reflection import should_reflect, reflect, reflect_and_persist
 from core.prompt import build_prompt_propose
 from core.controller import controller, controller_select, _intent_conditioned_scores
 
 from tools import TOOLS, LEVEL_TOOLS
-from tools.sandbox import AI_CREATED_TOOLS, _DANGEROUS_PATTERNS, _run_ai_tool
-from tools.x_tools import X_SESSION_PATH, _x_do_login, _x_get_notifications
-from tools.elyth_tools import _elyth_info as _elyth_get_info
+from tools.x_tools import X_SESSION_PATH, _x_do_login
 from core.ws_server import start_ws_server, broadcast_log, broadcast_state, broadcast_self, broadcast_e_values, get_pending_chats, is_paused, set_profile_running
 
 
@@ -184,11 +188,12 @@ def main():
     # 探すため、この後の身体改変 stash は profile 内 repo 上で行われる。
     ensure_profile_repo(BASE_DIR)
     # 段階12 Step 6 (PLAN §10): sanity check + 自動 revert。state load より前。
-    # state.json / memory JSON / core.controller + tools の import を検査、
+    # memory JSON / core.controller + tools の import を検査、
     # 失敗時は最新 iku-auto stash から git stash apply で復元、再検査して
     # 成功なら続行 / 失敗なら sys.exit(1)。「起動できない身体 = 存在できない」
     # の構造化 (PLAN §10-3、§1-5 介入レベル「物理的存在の前提」枠)。
-    enforce_sanity_check(profile_root=BASE_DIR, profile_name=BASE_DIR.name)
+    # state と世代の診断・復旧は load_startup_state が担当する。
+    enforce_sanity_check(profile_root=BASE_DIR, profile_name=BASE_DIR.name, recover_state=True)
     _p, _base, _k, _model = _get_active_provider_config()
     print(f"LLM: {_model or llm_cfg.get('model','?')} @ {_base} [{_p}]")
     print(f"state: {STATE_FILE}")
@@ -205,8 +210,34 @@ def main():
     # PLAN §5 Step 5.3 の手順準拠)。
     print()
 
-    state = load_state()
+    state = load_startup_state()
+    bind_live_state(state)
     state["session_id"] = str(uuid.uuid4())[:8]
+    # Slice 2: run_id (full uuid) を起動毎生成。session_id (8 char) と階層化
+    # することで「同 run 内の複数 session」(将来の手動再起動シナリオ等)
+    # も表現可能。metrics_events.jsonl に記録、replay arena で run 単位識別。
+    state["run_id"] = str(uuid.uuid4())
+    record_startup_recovery(state)
+    # C-2: プロファイル全体の保存済み実行から復元。iku の state には置かない。
+    _error_observer = None
+    try:
+        from core.metrics import ErrorPredictionObserver
+        _error_observer = ErrorPredictionObserver(state["run_id"])
+        _error_observer.rebuild()
+    except Exception as e:
+        print(f"  [error_prediction] startup skip: {e}")
+    # F-005: subjective_entries.jsonl は materialized view (raw_events.jsonl が
+    # source of truth)、compaction / retro e2 mutation で mark_view_dirty が発火、
+    # 以降の save_state() で atomic rewrite + index.json 同期。
+    # 将来の同パターン view (goal_shadows / trajectories 等) はここに追加 register。
+    from core.view_persistence import register_view
+    from core.config import MEMORY_DIR as _MEMORY_DIR_F005
+    register_view(
+        "subjective_entries",
+        _MEMORY_DIR_F005 / "subjective_entries.jsonl",
+        "subjective_entries",
+        index_path=_MEMORY_DIR_F005 / "index.json",
+    )
     # 段階10.5 Fix 1: chain 連結キー entry (tool_A+tool_B 形式) を drop し、
     # tool 単位 entry のみ残す。新 smoke 起点で predictor_confidence をリセット。
     from core.predictor import migrate_chain_keys
@@ -220,17 +251,47 @@ def main():
     if _p_dropped:
         print(f"  [migration] 段階10.5 Fix 2: 旧形式 pending {_p_dropped} 個を drop (content_observable 欠落)")
     save_state(state)
+    # 段階13 Phase 0.2: event_emitter observer pattern。default observer として
+    # _record_entry (jsonl emit + state view sync) を subscribe。
+    event_emitter.subscribe(_record_entry)
+    # 段階13 Phase 0.4: raw event vs subjective entry の意味的 gap 検出 observer。
+    # subscribe 順序 snapshot で _record_entry 後に発火、in-memory view 更新済の状態
+    # で同 id の raw_part / subj_part を比較、gap >= 0.30 (entity_resolver 閾値流用)
+    # で record_ec_prediction_error(source="raw_subj_gap") に流す (check_on_write sibling)。
+    from core.reconciliation import check_raw_subjective_gap
+    event_emitter.subscribe(check_raw_subjective_gap)
+    # 段階13 Phase 2: Layer C JEPA 流予測 observer。subscribe 順序 snapshot で
+    # check_raw_subjective_gap 後に発火、subj_part に embedding が enrich 済の
+    # 状態で「前回 predicted vs 今回 actual」cosine 距離計算 + 次 predict_next
+    # 計算 + train trigger を行う。Phase 0.4 check_raw_subjective_gap と同型の
+    # post-write subscriber pattern (entry mutate しない、判断 5 確定)。
+    # torch 未 install / sequence 不足 / 例外時は全 graceful skip (Phase 0/1
+    # 影響ゼロ保証、判断 4 案 Y 完全独立 module の boundary 維持)。
+    # link 接続 (prediction_error → update_link_strength_used) は Phase 3
+    # (TE + Bayesian) で「どの link を update するか」を意味的に確定させる
+    # 自然構造を壊さないため、Phase 2 では state history に蓄積するのみ
+    # (判断 8 案 a deferred、PLAN §4-3 「3 段重ね現実解」に着地)。
+    from core.jepa_runtime import jepa_observe_entry
+    event_emitter.subscribe(jepa_observe_entry)
     print(f"session: {state['session_id']}  cycle_id: {state['cycle_id']}")
     broadcast_state(state)
 
     # reflectツールをcall_llm付きで初期化
+    # F-005 完了後 hotfix (2026-05-09): 旧実装は `s = load_state()` で別 dict を
+    # 読んで mutate → save_state していたため、main scope の `state` には
+    # `reflection_cycle = 0` が反映されず、cycle 末 should_reflect(state) が
+    # 再 trigger → 自動 reflect 経路が同 cycle で二重発火していた。
+    # `reflect_and_persist` 経由で main の live を直接更新・保存する。
     def _tool_reflect(args):
-        s = load_state()
-        result = reflect(s, call_llm)
-        s["reflection_cycle"] = 0
-        save_state(s)
+        try:
+            result = reflect_and_persist(state, call_llm, strict=True)
+        except ToolError:
+            raise
+        except Exception as e:
+            raise ToolError(f"エラー: {e}", detail={"exception_type": type(e).__name__, "message": str(e)}) from e
         notes = result.get("notes", [])
-        return f"内省完了: {len(notes)}件の気づき"
+        from core.runtime.registry import ToolResult
+        return ToolResult(f"内省完了: {len(notes)}件の気づき", detail=result.get("parse_detail"))
     TOOLS["reflect"]["func"] = _tool_reflect
 
     # pref.json 初期化
@@ -270,13 +331,6 @@ def main():
     # ======================================================================
     # 重要: 以下の hook / approval_callback / runtime は main() の `state`
     # local 変数を closure で参照する。state は rebind せず **in-place mutate**
-    # で扱うこと (load_state() の戻り値を直接代入せず _refresh_state() で更新)。
-
-    def _refresh_state():
-        """state を in-place で disk から再読込 (rebind せず mutate)。"""
-        fresh = load_state()
-        state.clear()
-        state.update(fresh)
 
     # Provider 選択
     _provider_name_raw = (llm_cfg.get("provider") or "").lower()
@@ -305,17 +359,17 @@ def main():
     # 登録順: claw → bridge (SNS 等のみ) → noetic_ext (Noetic 固有 17)
     #   1. claw: file_ops / shell / web / task / … の汎用 tool 50 個
     #   2. bridge: noetic_ext がカバーする 17 tool を skip し、それ以外 (SNS
-    #      14 + create_tool / exec_code / http_request = 17、段階12 Step 7 で self_modify 撤廃)
-    #      のみ loose schema で登録
+    #      14 + http_request = 15、段階12 Step 7 で self_modify 撤廃 +
+    #      段階13 Phase 6.1 で create_tool / exec_code 撤廃) のみ loose schema で登録
     #   3. noetic_ext: Noetic 固有 17 tool の claw 文法準拠厳密 ToolSpec
     register_claw_tools(_rt_registry, workspace_root=BASE_DIR)
     register_legacy_bridge(_rt_registry, TOOLS, skip_names=NOETIC_TOOL_NAMES)
     register_noetic_tools(_rt_registry, TOOLS)
-    # claw ネイティブ tool (file_ops/web/shell/task/...) は元々承認 3 層なし。
+    # claw ネイティブ tool (file_ops/web/shell/task/...) は元々理由・予想・note なし。
     # Noetic 固有要件として registry 登録後に input_schema へ一括注入する。
     _approval_injected = ensure_approval_props(_rt_registry)
     if _approval_injected:
-        print(f"  [approval] 承認 3 層注入: {_approval_injected} tool")
+        print(f"  [approval] 理由・予想・note 注入: {_approval_injected} tool")
 
     # claw ネイティブ file 系 tool の description に Noetic 固有制約 (sandbox/
     # 外書込禁止、secrets 保護) を hint として追記。LLM が事前に制約を知れる。
@@ -329,7 +383,7 @@ def main():
         print(f"  [bash_hint] Level-aware 制約 hint 注入: bash")
 
     # hook context (state_before snapshot, fire 毎に更新)
-    _hook_ctx = {"state_before": {}}
+    _hook_ctx = {"state_before": {}, "evaluations": []}
 
     # hook runner 初期化 (file guard + approval 3 層 + post eval + failure)
     _hook_runner = HookRunner()
@@ -357,8 +411,24 @@ def main():
     # 存在しない pkg は deny (LLM hallucination 抑止)、人気 pkg と Levenshtein
     # 1-2 は typosquatting 警告。1 時間 in-memory cache、不通時 warning + 続行。
     _hook_runner.register_pre(make_install_command_check_hook())
+    # Approval callback (pause_on_await + 3 層 UI + smoke auto_approve_all
+    # + 段階13 Phase 6.2 AgentSpec DSL policy_fn)
+    # PLAN §5-4: settings.json approval.rules から policy_fn を生成、
+    # tool_name + path のみで approval 要否を判定 (LLM 由来 field 影響ゼロ)
+    from core.runtime.approval_rules import make_policy_fn
+    # ★ workspace_root=BASE_DIR は **本番運用必須** (Codex rescue 7 周目
+    # RISK-6 評価): None だと path_resolver が raw fallback で canonical 化
+    # されず、path traversal / Windows case / whitespace 等 path quirk family
+    # で bypass 発生。test 後方互換 (None) は単体 test 限定。
+    _policy_fn = make_policy_fn(
+        rules=_approval_cfg.get("rules", []),
+        default_action=_approval_cfg.get("default", "approve"),
+        workspace_root=BASE_DIR,
+    )
     _hook_runner.register_pre(make_pre_tool_use_approval_check(
         missing_field_policy=_approval_cfg.get("missing_field_policy", "deny"),
+        auto_approve_all=_approval_cfg.get("auto_approve_all", False),
+        policy_fn=_policy_fn,
     ))
 
     # eval (LLM3 / E 値評価) は claude_code provider 経由なら settings.json
@@ -372,23 +442,27 @@ def main():
         get_state_before=lambda: _hook_ctx["state_before"],
         call_llm_fn=partial(call_llm, role="llm3"),
         get_cycle_id=lambda: state.get("cycle_id", 0),
+        # 段階13 Phase 1: filter 順序 (filter → slice) を non_empty_subjective_entries
+        # 経由で集約 (raw event 起源 blank subj 混入時に LLM3 post 評価 context が空に
+        # なる同型 bug fix、Codex review 2 周目指摘 + 横断 grep 発見)。
         get_recent_intents=lambda: [
-            e.get("intent", "") for e in state.get("log", [])[-3:]
-            if e.get("intent")
+            e["intent"] for e in non_empty_subjective_entries(
+                state.get("subjective_entries", [])
+            )[-3:] if e.get("intent")
         ],
     )
 
-    def _post_hook_with_sync(tool_name, tool_input, output):
-        """tool 実行直後: disk から fresh state を in-place 取込 →
-        base_post_hook で mutation → save_state で永続化。
-        tool handler が内部で save_state した変更と hook の E 値等の
-        mutation を正しくマージする。"""
-        _refresh_state()
+    def _post_hook(tool_name, tool_input, output, tool_id=None):
         result = _base_post_hook(tool_name, tool_input, output)
         save_state(state)
+        if (not result.failed and not result.denied
+                and state.get("e_values", {}).get("scored") is True):
+            _hook_ctx["evaluations"].append(
+                (tool_id, tool_name, copy.deepcopy(state.get("e_values", {})))
+            )
         return result
 
-    _hook_runner.register_post(_post_hook_with_sync)
+    _hook_runner.register_post(_post_hook, with_tool_id=True)
     # 段階12 Step 5 (PLAN §9): 身体改変反映待ち pending 自動追加。
     # write_file / edit_file が core/* / tools/* / main.py / .mcp.json を
     # 成功書換えしたら「reboot で反映を完了する」内発的 intent を pending 化。
@@ -397,17 +471,21 @@ def main():
         state_getter=lambda: state,
         get_cycle_id=lambda: state.get("cycle_id", 0),
     ))
-    _hook_runner.register_failure(make_post_tool_use_failure_logger(
+    _base_failure_hook = make_post_tool_use_failure_logger(
         state=state,
         get_cycle_id=lambda: state.get("cycle_id", 0),
-    ))
+    )
 
-    # Approval callback (pause_on_await + 3 層 UI + smoke auto_approve_all)
+    _hook_runner.register_failure(_base_failure_hook)
+
     _approval_cb = make_approval_callback(
         pause_on_await=_approval_cfg.get("pause_on_await", True),
         auto_approve_all=_approval_cfg.get("auto_approve_all", False),
+        policy_fn=_policy_fn,
     )
 
+    from core.prompt_trace import TracingProvider
+    _rt_provider = TracingProvider(_rt_provider)
     # ConversationRuntime (system_prompt は fire 毎に assemble 差替)
     _runtime = ConversationRuntime(
         provider=_rt_provider,
@@ -430,8 +508,118 @@ def main():
     # 3 箇所書込 (Session + UPS + archive) の Session 経路の実装。
     _pending_observations: list = []
 
+    # 観察者専用。state / prompt / 次回 G 用 snapshot には載せない。
+    _outward_seq = 0
+    _outward_fire_no = 0
+    _outward_pending_inputs = []
+
+    def _record_outward_input(channel, source):
+        nonlocal _outward_seq
+        try:
+            _outward_seq += 1
+            _outward_pending_inputs.append({
+                "seq": _outward_seq, "channel": channel, "source": source,
+                "cycle_at_record": state.get("cycle_id", 0),
+            })
+        except Exception as e:
+            print(f"  [outward] input observation skip: {e}")
+
+    def _observe_outward(event, phase, payload=None):
+        """観察失敗は本体に伝播させない。発話と入力は同じ seq を使う。"""
+        nonlocal _outward_seq
+        try:
+            from core.metrics import (
+                observe_outward_candidates, observe_outward_selection,
+                build_outward_execution, OUTWARD_UTTERANCE_TOOLS,
+            )
+            if phase == "candidates":
+                observe_outward_candidates(event, payload)
+            elif phase == "selection":
+                observe_outward_selection(event)
+            elif phase == "executions":
+                planned_tool, invocations = payload
+                for rec in invocations:
+                    observed = build_outward_execution(
+                        rec.tool_name, rec.tool_input or {}, rec.output,
+                        rec.is_error, _get_channel(rec.tool_name),
+                        error_kind=rec.error_kind, detail=rec.detail,
+                        detail_error=rec.detail_error,
+                    )
+                    event["exec"].append(observed)
+                    if observed["status"] == "ok" and rec.tool_name in OUTWARD_UTTERANCE_TOOLS:
+                        _outward_seq += 1
+                        event["utterances"].append({
+                            "seq": _outward_seq, "channel": observed["channel"],
+                            "tool": rec.tool_name,
+                        })
+                if not any(rec.tool_name == planned_tool for rec in invocations):
+                    event["exec"].append({"tool": planned_tool, "channel": _get_channel(planned_tool),
+                                          "status": "not_invoked", "connected_at_enqueue": None})
+                if not invocations:
+                    event["end"] = "not_invoked"
+            elif phase in ("runtime_error", "not_invoked"):
+                event["end"] = phase
+                event["exec"].append({"tool": payload, "channel": _get_channel(payload),
+                                      "status": phase, "connected_at_enqueue": None})
+        except Exception as e:
+            print(f"  [outward] observation skip ({phase}): {e}")
+
+    def _run_observed_fire(*args, **kwargs):
+        """fire 出口で1回だけ emit。入力バッファは書き出し成功時だけ消費する。"""
+        nonlocal _outward_fire_no
+        _outward_fire_no += 1
+        event = {
+            "event_type": "outward_attempt", "run_id": state.get("run_id", ""),
+            "attempt_id": f"{state.get('run_id', '')}_{_outward_fire_no}",
+            "cycle_id": state.get("cycle_id", 0),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "end": "error", "proposed_act": False, "proposed_sense": False,
+            "proposed_undetermined": 0, "selected_act": False,
+            "best_outward_g_minus_selected_g": None,
+            "exec": [], "utterances": [], "inputs": list(_outward_pending_inputs),
+        }
+        # 0d-1: 全実行の理由・引数・結果の観察バッファ。entry_id は entry 成立後に入る。
+        invocations = {"records": [], "entry_id": None, "cycle_id": None}
+        try:
+            from core.prompt_trace import trace_fire
+            with trace_fire(event):
+                result = _run_one_fire(*args, **kwargs, _outward_event=event,
+                                       _invocation_buf=invocations)
+            if isinstance(result, dict) and result.get("llm1_error"):
+                event["end"] = "llm1_error"
+            elif event["end"] == "error":
+                event["end"] = "completed" if result and result.get("executed") else "not_invoked"
+            return result
+        finally:
+            try:
+                from core.metrics import emit_outward_attempt
+                emit_outward_attempt(event)
+                del _outward_pending_inputs[:len(event["inputs"])]
+            except Exception as e:
+                print(f"  [outward] emit skip: {e}")
+            try:
+                if invocations["records"]:
+                    from core.metrics import (
+                        build_tool_invocation_events, emit_tool_invocations, InvocationAppendError,
+                    )
+                    invocation_events = build_tool_invocation_events(
+                        invocations["records"], run_id=event["run_id"],
+                        attempt_id=event["attempt_id"],
+                        entry_id=invocations["entry_id"], cycle_id=invocations["cycle_id"],
+                        time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                    try:
+                        written = emit_tool_invocations(invocation_events)
+                    except InvocationAppendError as e:
+                        written = e.written
+                    if _error_observer is not None:
+                        _error_observer.observe(invocation_events[:written])
+            except Exception as e:
+                print(f"  [invocation] emit skip: {e}")
+
     def _run_one_fire(fire_cause, _tunnel_fire, pp, threshold, tick_dt,
-                      _micro_iter=0):
+                      _micro_iter=0, fire_candidates=None, _outward_event=None,
+                      _invocation_buf=None):
         """1 fire iteration 本体。micro-loop から複数回呼ばれる可能性。
 
         state / _runtime / _hook_ctx / _pending_observations / TOOLS /
@@ -440,11 +628,11 @@ def main():
         pressure は nonlocal で main() のものを直接 mutate。
 
         Returns:
-            dict {"executed": bool, "e1"-"e4": str ("N%"), "sc_bonus": float,
+            dict {"executed": bool, "e_available": bool,
+                  "e1"-"e4": str ("N%") or None, "sc_bonus": float,
                   "cid": int, "llm1_error": bool} または None (tool 未実行)。
         """
         nonlocal pressure
-        _refresh_state()
         # サイクル先頭で LLM 設定と secrets を再読み込み（次サイクルからのプロバイダ切替を反映）
         from core.llm import _reload_active_config
         from core.auth import reload_secrets
@@ -472,7 +660,7 @@ def main():
         broadcast_self(state)
 
         # Controller
-        ctrl = controller(state, TOOLS, LEVEL_TOOLS, AI_CREATED_TOOLS, _DANGEROUS_PATTERNS, _run_ai_tool)
+        ctrl = controller(state, TOOLS, LEVEL_TOOLS)
         allowed = ctrl["allowed_tools"]
         # 動的フィルタ: camera_stream_stop はストリームがアクティブな時のみ見せる
         if not state.get("stream_active"):
@@ -503,10 +691,12 @@ def main():
                 else:
                     print("  [X] スキップ。X系ツールはセッションなしで動作しません。")
                 print()
-        print(f"  ctrl: level={new_lv} tools={sorted(allowed)} log={len(state['log'])}件(全件)")
+        print(f"  ctrl: level={new_lv} tools={sorted(allowed)} subj={len(state['subjective_entries'])}件(全件)")
 
         # ① LLM: 候補提案
-        propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause, registry=_rt_registry)
+        propose_prompt = build_prompt_propose(state, ctrl, TOOLS, fire_cause,
+                                               fire_candidates=fire_candidates,
+                                               registry=_rt_registry)
 
         # 画像入力の決定
         from core.ws_server import get_stream_snapshot
@@ -603,12 +793,13 @@ def main():
                 ),
                 "perspective": make_perspective(),  # 段階11-A: system 処理は self/actual
             }
-            _archive_entries([_sys_end_entry])
-            state["log"].append(_sys_end_entry)
+            event_emitter.fire_event(state, _sys_end_entry)
             save_state(state)
 
         try:
-            propose_resp = call_llm(propose_prompt, max_tokens=prompt_budget["completion_reserve"], temperature=1.0,
+            from core.prompt_trace import trace_llm1
+            propose_resp = trace_llm1(call_llm, propose_prompt, cycle_id=state.get("cycle_id", 0),
+                                    max_tokens=prompt_budget["completion_reserve"], temperature=1.0,
                                     image_paths=_pending_img_paths if _pending_img_paths else None)
             append_debug_log("LLM1 (Propose)", propose_resp)
         except Exception as e:
@@ -628,6 +819,8 @@ def main():
             _src = "stream" if _is_stream else "pending"
             print(f"  [vision] 画像を認識: {len(_pending_img_paths)}枚 ({_src}: {_first_pending_rel})")
         candidates = parse_candidates(propose_resp, ctrl["allowed_tools"])
+        if _outward_event is not None:
+            _observe_outward(_outward_event, "candidates", candidates)
         print(f"  LLM①raw: {propose_resp.strip()[:300]}")
         print(f"  候補({len(candidates)}件): {[(c['tool'], c['reason'][:40]) for c in candidates]}")
 
@@ -645,8 +838,18 @@ def main():
             ics_v = round(ics_debug[ci], 1)
             if ics_v != 50.0:
                 print(f"    ics: {c['tool']}({c['reason'][:30]}) = {ics_v}")
-        selected = controller_select(candidates, ctrl, state)
+        if _outward_event is None:
+            selected = controller_select(candidates, ctrl, state)
+        else:
+            selected = controller_select(candidates, ctrl, state, observe=_outward_event)
+            _observe_outward(_outward_event, "selection")
         _sel_line = f"  選択: {selected['tool']} - {selected['reason'][:60]}"
+        # 段階14 Step C: penalty (β 値含む) を smoke raw_log で観察可能化
+        # (memo line 142-144 「β を第一級観測量として扱う」literal 整合、
+        # Codex review P2-2 fix)
+        _sel_penalties = selected.get("penalties") or []
+        if _sel_penalties:
+            _sel_line += f" [{', '.join(_sel_penalties)}]"
         print(_sel_line)
         broadcast_log(_sel_line)
 
@@ -679,6 +882,7 @@ def main():
             state=state,
             tools_dict=TOOLS,
             fire_cause=fire_cause,
+            fire_candidates=fire_candidates,
             # Step 0.4 hotfix: prompt 用は displayed_tools (affordance 前)、
             # parser 用は allowed_tools (affordance 後)。description は表示、選択は弾く。
             allowed_tools=ctrl.get("displayed_tools", ctrl["allowed_tools"]),
@@ -692,6 +896,7 @@ def main():
         _pending_observations.clear()
 
         chain_tools = selected.get("tools", [selected["tool"]])
+        from core.metrics import tool_execution_status
         all_results = []
         all_tool_names = []
         intent = ""
@@ -702,13 +907,18 @@ def main():
         _executed_targets = set()
         _last_llm_text = ""
         first_args: dict = {}  # 段階8 改善1: 先頭 tool の args を log entry に保存
-        # 段階10.5 Fix 1: chain 内の各 tool 実行直後に state["e_values"] snapshot +
-        # selected["chain"][chain_idx] の個別 pe2/pec を紐付けて per_tool metadata を蓄積。
+        # 採点 hook が実行ごとに保存した E を per_tool に対応づける。
         # 1 cycle = 1 log entry + entry["per_tool"] に tool 単位 metadata (Y 方式)。
         per_tool_entries: list = []
+        invocation_entries: list = []
+        _successful_tools = set()
+        _cycle_ev = None
+        _cycle_pt = None
 
         for chain_idx, chain_tool in enumerate(chain_tools):
             if chain_tool not in ctrl["allowed_tools"]:
+                if _outward_event is not None:
+                    _observe_outward(_outward_event, "not_invoked", chain_tool)
                 print(f"  (Controller却下: {chain_tool})")
                 parse_failed = f"却下: {chain_tool}"
                 break
@@ -729,12 +939,16 @@ def main():
             # default system_prompt (全 tool 視界) で LLM が自由に判断するため、
             # forced_sp 生成も chain 0 のみで十分。
             # memory/feedback_llm2_iter0_forced_contract.md 参照。
+            _hook_ctx["evaluations"] = []
             try:
+                from core.prompt_trace import set_chain_position
+                set_chain_position(chain_idx, state.get("cycle_id", 0))
                 if chain_idx == 0:
                     forced_sp = assemble_system_prompt(
                         state=state,
                         tools_dict=TOOLS,
                         fire_cause=fire_cause,
+                        fire_candidates=fire_candidates,
                         allowed_tools={chain_tool},
                         world_model=state.get("world_model"),
                         registry=_rt_registry,
@@ -749,8 +963,32 @@ def main():
                     summary = _runtime.run_turn(user_input=user_input)
             except Exception as e:
                 print(f"  LLM② run_turn エラー (chain {chain_idx+1}): {e}")
+                if _outward_event is not None:
+                    _observe_outward(_outward_event, "runtime_error", chain_tool)
                 parse_failed = f"runtime error: {e}"
                 break
+
+            if _outward_event is not None:
+                _observe_outward(_outward_event, "executions", (chain_tool, summary.tool_invocations))
+            _inv_last = None
+            if _invocation_buf is not None:
+                try:
+                    for _i, _r in enumerate(summary.tool_invocations):
+                        _inv_last = {
+                            "chain_position": chain_idx, "invocation_position": _i,
+                            "tool_id": _r.tool_id, "tool": _r.tool_name,
+                            "mode": "forced" if chain_idx == 0 else "free",
+                            "tool_input": copy.deepcopy(_r.tool_input or {}),
+                            "output": str(_r.output), "is_error": _r.is_error,
+                            "error_kind": _r.error_kind,
+                            "detail": copy.deepcopy(_r.detail),
+                            "detail_error": _r.detail_error,
+                            "in_cycle_result": False,
+                        }
+                        _invocation_buf["records"].append(_inv_last)
+                except Exception as e:
+                    _inv_last = None
+                    print(f"  [invocation] observation skip: {e}")
 
             # 段階9 Step 0: LLM② debug log を拡充。
             # 従来は finish_reason だけ。assistant_messages (LLM② 思考) と
@@ -780,6 +1018,68 @@ def main():
                 parse_failed = f"no_tool: {summary.finish_reason}"
                 break
 
+            # 各段の先頭だけを chain[i] に対応させる。名前一致かつ採点完了が必要。
+            # 追加実行は E のみ保存し、先頭の失敗・拒否・別名・欠測を繰り上げない。
+            for invocation_idx, invocation in enumerate(summary.tool_invocations):
+                _input = invocation.tool_input or {}
+                invocation_entries.append({
+                    "tool": invocation.tool_name, "tool_id": invocation.tool_id,
+                    "chain_position": chain_idx, "invocation_position": invocation_idx,
+                    "args": copy.deepcopy({k: v for k, v in _input.items()
+                                           if k not in ("tool_intent", "tool_expected_outcome", "note")}),
+                    "status": tool_execution_status(str(invocation.output), invocation.is_error, invocation.error_kind),
+                    "in_cycle_result": False,
+                    "result": cap_tool_result(str(invocation.output)),
+                })
+                _matches = [ev for tid, name, ev in _hook_ctx["evaluations"]
+                            if tid == invocation.tool_id and name == invocation.tool_name]
+                _unique_id = (bool(invocation.tool_id) and
+                              sum(r.tool_id == invocation.tool_id
+                                  for r in summary.tool_invocations) == 1)
+                _ok = not invocation.is_error
+                _tool_ev = _matches[0] if _ok and _unique_id and len(_matches) == 1 else None
+                pt_entry = {
+                    "tool": invocation.tool_name,
+                    "tool_id": invocation.tool_id,
+                    "chain_position": chain_idx,
+                    "invocation_position": invocation_idx,
+                    "is_error": invocation.is_error,
+                    "intent": str(_input.get("tool_intent", "") or ""),
+                    "expect": str(_input.get("tool_expected_outcome", "") or ""),
+                    **{k: _tool_ev.get(k) if _tool_ev is not None else None
+                       for k in ("e1", "e2", "e2_raw", "e3", "e4", "eff")},
+                }
+                _chain_list = selected.get("chain")
+                _chain_item = (_chain_list[chain_idx]
+                               if isinstance(_chain_list, list) and chain_idx < len(_chain_list)
+                               else None)
+                if (invocation_idx == 0 and _tool_ev is not None
+                        and isinstance(_chain_item, dict)
+                        and _chain_item.get("tool") == invocation.tool_name):
+                    _tool_pe2 = _chain_item.get("predicted_e2")
+                    _tool_pec = _chain_item.get("predicted_ec")
+                    if isinstance(_tool_pe2, int):
+                        pt_entry["predicted_e2"] = _tool_pe2
+                        _pt_e2_m = re.search(r'\d+', str(_tool_ev.get("e2", "")))
+                        if _pt_e2_m:
+                            _pt_actual_e2 = max(0, min(100, int(_pt_e2_m.group(0))))
+                            pt_entry["actual_e2"] = _pt_actual_e2
+                            pt_entry["prediction_error"] = abs(_tool_pe2 - _pt_actual_e2)
+                    if isinstance(_tool_pec, (int, float)):
+                        from core.predictor import clamp_ec as _clamp_ec
+                        pt_entry["predicted_ec"] = float(_tool_pec)
+                        pt_entry["actual_ec"] = _clamp_ec(_tool_ev.get("eff", 0.0))
+                        if "prediction_error" in pt_entry:
+                            pt_entry["prediction_error_ec"] = abs(
+                                float(_tool_pec) - pt_entry["actual_ec"]
+                            )
+                per_tool_entries.append(pt_entry)
+                if _ok:
+                    _successful_tools.add(invocation.tool_name)
+                    # 最後の成功が採点未完了なら代表 E も欠測。前の採点を流用しない。
+                    _cycle_ev = _tool_ev
+                    _cycle_pt = pt_entry
+
             rec = summary.tool_invocations[-1]
             ti = rec.tool_input or {}
 
@@ -790,7 +1090,7 @@ def main():
                 # 段階8 改善1: 承認 3 層フィールドを除いた tool 固有 args を保存
                 first_args = {
                     k: v for k, v in ti.items()
-                    if k not in ("tool_intent", "tool_expected_outcome", "message")
+                    if k not in ("tool_intent", "tool_expected_outcome", "note")
                 }
 
             _target_id = (ti.get("reply_to_id") or ti.get("post_id")
@@ -803,7 +1103,16 @@ def main():
                 _executed_targets.add(_exec_key)
 
             prev_result = str(rec.output)[:500]
-            all_results.append(f"[{rec.tool_name}]\n{str(rec.output)[:20000]}")
+            # 参照は JSON のバイト位置ではなく、結合した Python 文字列内の位置。
+            _result_start = sum(len(part) for part in all_results) + len("\n---\n") * len(all_results)
+            _result_start += len(f"[{rec.tool_name}]\n")
+            all_results.append(f"[{rec.tool_name}]\n{cap_tool_result(str(rec.output))}")
+            invocation_entries[-1]["in_cycle_result"] = True
+            invocation_entries[-1]["result_ref"] = {
+                "start": _result_start, "length": len(invocation_entries[-1]["result"]),
+            }
+            if _inv_last is not None:
+                _inv_last["in_cycle_result"] = True
             all_tool_names.append(rec.tool_name)
             _exec_line = f"  実行: {rec.tool_name} → {str(rec.output)[:100]}"
             print(_exec_line)
@@ -812,17 +1121,16 @@ def main():
             # master L678-692 の files_read/written tracking を ConversationRuntime
             # 経由へ移植 (Step E-2d での移植漏れ)。controller.py:65 の tool_level
             # 遷移 (lv 0→1 は read_file 1 回成功) を機能させるために必須。
-            _out_str = str(rec.output)
             if rec.tool_name == "read_file":
                 _p = ti.get("path", "")
-                if _p and not _out_str.startswith(("Error", "エラー", "該当なし")):
+                if _p and not rec.is_error:
                     fr = state.setdefault("files_read", [])
                     if _p not in fr:
                         fr.append(_p)
                     save_state(state)
             elif rec.tool_name == "write_file":
                 _p = ti.get("path", "")
-                if _p and not _out_str.startswith(("Error", "エラー")):
+                if _p and not rec.is_error:
                     fw = state.setdefault("files_written", [])
                     if _p not in fw:
                         fw.append(_p)
@@ -831,7 +1139,7 @@ def main():
             # 自発 memory_store ≥ 1 経験で memory_graph candidate 解除 (controller.py で gate)
             # 失敗 memory_store は count しない (Z2 確定、森のたとえ整合性)
             elif rec.tool_name == "memory_store":
-                if not _out_str.startswith(("Error", "エラー")):
+                if not rec.is_error:
                     state["voluntary_memory_store_count"] = (
                         state.get("voluntary_memory_store_count", 0) + 1
                     )
@@ -844,57 +1152,19 @@ def main():
             if _tool_ch:
                 observe_channel_activity(state.get("world_model"), _tool_ch)
 
-            # 段階10.5 Fix 1 追補: approval reject された tool は post hook が走らず
-            # state["e_values"] が前 tool の値のまま残るため、per_tool に記録すると
-            # 学習が bias する。該当 entry を skip して chain ループの次 iter へ。
-            if str(rec.output).startswith("[REJECTED]"):
-                continue
-
-            # --- 段階10.5 Fix 1: per_tool snapshot ---
-            # post tool hook (hooks.py:231) が state["e_values"] を書き込んだ直後。
-            # ここで snapshot を取らないと chain 次 tool の hook で上書きされて消える。
-            # selected["chain"][chain_idx] から tool 単位 predicted_e2/predicted_ec を引く。
-            _tool_ev = dict(state.get("e_values", {}))
-            _chain_list = selected.get("chain") if isinstance(selected, dict) else None
-            _tool_pe2 = None
-            _tool_pec = None
-            if isinstance(_chain_list, list) and chain_idx < len(_chain_list):
-                _chain_item = _chain_list[chain_idx]
-                if isinstance(_chain_item, dict):
-                    _tool_pe2 = _chain_item.get("predicted_e2")
-                    _tool_pec = _chain_item.get("predicted_ec")
-            pt_entry = {
-                "tool": rec.tool_name,
-                "chain_position": chain_idx,
-                "e1": _tool_ev.get("e1", ""),
-                "e2": _tool_ev.get("e2", ""),
-                "e2_raw": _tool_ev.get("e2_raw", ""),
-                "e3": _tool_ev.get("e3", ""),
-                "e4": _tool_ev.get("e4", ""),
-                "eff": float(_tool_ev.get("eff", 0.0) or 0.0),
-            }
-            if isinstance(_tool_pe2, int):
-                pt_entry["predicted_e2"] = _tool_pe2
-                _pt_e2_m = re.search(r'\d+', str(_tool_ev.get("e2", "")))
-                if _pt_e2_m:
-                    _pt_actual_e2 = max(0, min(100, int(_pt_e2_m.group(0))))
-                    pt_entry["actual_e2"] = _pt_actual_e2
-                    pt_entry["prediction_error"] = abs(_tool_pe2 - _pt_actual_e2)
-            if isinstance(_tool_pec, (int, float)):
-                from core.predictor import clamp_ec as _clamp_ec
-                pt_entry["predicted_ec"] = float(_tool_pec)
-                pt_entry["actual_ec"] = _clamp_ec(_tool_ev.get("eff", 0.0))
-                if "prediction_error" in pt_entry:
-                    pt_entry["prediction_error_ec"] = abs(
-                        float(_tool_pec) - pt_entry["actual_ec"]
-                    )
-            per_tool_entries.append(pt_entry)
 
         if not all_tool_names:
             return None
 
         tool_name = "+".join(all_tool_names)
         result_str = ("\n---\n".join(all_results))[:50000]
+        for invocation in invocation_entries:
+            ref = invocation.get("result_ref")
+            if ref is not None:
+                if ref["start"] + ref["length"] <= len(result_str):
+                    del invocation["result"]
+                else:
+                    del invocation["result_ref"]
 
         if intent:
             print(f"  intent: {intent}")
@@ -903,8 +1173,7 @@ def main():
 
         sc_bonus = calc_state_change_bonus(_hook_ctx["state_before"], state)
 
-        _executed_tools = set(all_tool_names)
-        if "output_display" in _executed_tools:
+        if "output_display" in _successful_tools:
             _uec = state.get("unresponded_external_count", 0)
             if _uec > 0:
                 state["unresponded_external_count"] = _uec - 1
@@ -913,11 +1182,11 @@ def main():
                 state["unresponded_external_count"] = 0
             save_state(state)
 
-        _ev = state.get("e_values", {})
-        e1 = _ev.get("e1", "")
-        e2 = _ev.get("e2", "")
-        e3 = _ev.get("e3", "")
-        e4 = _ev.get("e4", "")
+        _ev = _cycle_ev if _cycle_ev is not None else {}
+        e1 = _ev.get("e1")
+        e2 = _ev.get("e2")
+        e3 = _ev.get("e3")
+        e4 = _ev.get("e4")
         eff_change = float(_ev.get("eff", 0.0) or 0.0)
         _target_for_ec = _chain_action_key.split(":", 1)[1] if ":" in _chain_action_key else ""
 
@@ -925,18 +1194,47 @@ def main():
             _ec_str = f" ec={eff_change:.2f}" if eff_change < 0.5 else ""
             print(f"  E1={e1} E2={e2} E3={e3} E4={e4}{_ec_str}")
 
-        delta = _update_energy(state, e2, e3, e4)
-        if delta != 0:
-            print(f"  energy: {round(state['energy'], 1)} (delta={delta:+.2f})")
+        if _cycle_ev is not None:
+            delta = _update_energy(state, e2, e3, e4)
+            if delta != 0:
+                print(f"  energy: {round(state['energy'], 1)} (delta={delta:+.2f})")
 
-        _FLAG_TERMS = ["AIアシスタント", "AI assistant", "AIAssistant"]
-        detected = [t for t in _FLAG_TERMS if t in propose_resp or t in _last_llm_text]
-        if detected:
-            flag_msg = f"[SYSTEM] 検出: {' / '.join(f'「{t}」' for t in detected)} という自己定義が検出・記録されました。"
-            print(f"  {flag_msg}")
-            result_str += f"\n{flag_msg}"
+        try:
+            from core.metrics import emit_identity_term_detected
+            emit_identity_term_detected(
+                run_id=state.get("run_id", ""), cycle_id=state.get("cycle_id", 0) + 1,
+                llm1_text=propose_resp, llm2_text=_last_llm_text,
+            )
+        except Exception as exc:
+            print(f"  [identity] term observation skip: {exc}")
         if lv_msg:
             result_str += f"\n{lv_msg}"
+
+        # 段階14 Step D: basin migration 検知 (reflect 経路 / 非 reflect 経路両対応、
+        # PLAN §6-2 literal、memo line 56「basin_id 流用元」整合)。
+        # reflect 発火時 reflection.py が state に snapshot 保存、ここで pop で消費
+        # (1 cycle 限定、永続化しない、Phase 5「非永続 posterior」整合)。
+        from core.world_model import update_basin_state
+        _clusters_snap = state.pop("last_clusters_snapshot", None)
+        _subject_id = state.pop("last_subject_memory_id", None)
+        update_basin_state(
+            state,
+            current_subject_id=_subject_id,
+            clusters_snapshot=_clusters_snap,
+        )
+        # Codex review P1-2 fix: basin migration を smoke raw_log で観察可能化
+        # (PLAN §7 K6「basin_state log」literal)。basin 切替 (dwell=1) or pending=True
+        # の状態のみ log (毎 cycle 出力じゃなく観察 trigger、smoke noise 抑制)。
+        _bs = state.get("basin_state", {})
+        _bid = _bs.get("current_basin_id", "")
+        _bdwell = _bs.get("current_basin_dwell", 0)
+        _bpending = _bs.get("phase_transition_pending", False)
+        if _bid and (_bpending or _bdwell == 1):
+            _basin_line = (
+                f"  [basin] id={_bid[:8]} dwell={_bdwell} pending={_bpending}"
+            )
+            print(_basin_line)
+            broadcast_log(_basin_line)
 
         cid = state.get("cycle_id", 0) + 1
         state["cycle_id"] = cid
@@ -946,6 +1244,7 @@ def main():
             "tool": tool_name,
             "channel": _get_channel(tool_name),
             "result": result_str,
+            "invocations": invocation_entries,
             "perspective": make_perspective(),  # 段階11-A: iku 自身の tool 行動 → self/actual
         }
         if parse_failed:
@@ -973,29 +1272,14 @@ def main():
             entry["e3"] = e3
         if e4:
             entry["e4"] = e4
-        # 段階9: 予測誤差記録 (chain 全体 = chain[0] 由来、後方互換)。
-        # MediumPredictor の "second half" — pressure 加算 + confidence 自己学習に
-        # 繋げて Active Inference epistemic signal 化する。
-        _pe2 = selected.get("_predicted_e2") if isinstance(selected, dict) else None
-        if isinstance(_pe2, int):
-            entry["predicted_e2"] = _pe2
-            _actual_e2_m = re.search(r'\d+', str(e2)) if e2 else None
-            if _actual_e2_m:
-                _actual_e2 = max(0, min(100, int(_actual_e2_m.group(0))))
-                entry["actual_e2"] = _actual_e2
-                entry["prediction_error"] = abs(_pe2 - _actual_e2)
-                # 段階10 柱 A: state 直下にも書き込み。
-                # reflection.py:15 で参照されてたが誰も書いてなかった既存 bug の副次修復。
-                # entropy.py の calc_pressure_signals で pe signal として pressure 加算にも使う。
+        # cycle の E と同じ実行の予測だけを使用する。先頭の予測で代用しない。
+        if _cycle_ev is not None and _cycle_pt is not None:
+            for key in ("predicted_e2", "actual_e2", "prediction_error",
+                        "predicted_ec", "actual_ec", "prediction_error_ec"):
+                if key in _cycle_pt:
+                    entry[key] = _cycle_pt[key]
+            if "prediction_error" in entry:
                 state["last_prediction_error"] = entry["prediction_error"]
-                # 段階10 柱 C: predicted_ec の実測誤差 (chain 全体、後方互換)。
-                _pec = selected.get("_predicted_ec") if isinstance(selected, dict) else None
-                if isinstance(_pec, (int, float)):
-                    from core.predictor import clamp_ec
-                    entry["predicted_ec"] = float(_pec)
-                    # 段階10.5 Bug fix: actual_ec を 0.0-1.0 に clamp (従来は生値)
-                    entry["actual_ec"] = clamp_ec(eff_change)
-                    entry["prediction_error_ec"] = abs(float(_pec) - entry["actual_ec"])
 
         # 段階10.5 Fix 1: 1 cycle = 1 entry + per_tool に tool 単位 metadata (Y 方式)。
         # update_predictor_confidence を chain ループ後の per_tool loop で tool 単位 call。
@@ -1011,13 +1295,25 @@ def main():
                         pt.get("prediction_error_ec"),
                     )
 
-        _archive_entries([entry])
-        state["log"].append(entry)
+        event_emitter.fire_event(state, entry)
+        if _invocation_buf is not None:
+            _invocation_buf["entry_id"] = entry["id"]
+            _invocation_buf["cycle_id"] = cid
 
         maybe_compress_log(state, set(TOOLS.keys()))
 
         # UPS v2 pending 淘汰
         pending_prune(state, current_cycle=cid)
+
+        # 段階13 Phase 3: TE + Bayesian maintenance (経路 B、毎 cycle 自動実行)
+        # graph 全 link の transfer entropy + Beta posterior 更新。
+        # PLAN §4-6 重畳: 既存 EMA + 新 Bayesian_TE (α_old/α_new = 0.5/0.5)。
+        # reflect 継続原則で例外は catch、メイン処理を止めない。
+        try:
+            from core.transfer_entropy import maybe_te_maintenance
+            maybe_te_maintenance(state, current_cycle=cid)
+        except Exception as e:
+            print(f"  [transfer_entropy] maintenance skip (error: {e})")
 
         # 段階11-D Phase 3 Step 3.5: 弱 link の prune (Physarum rule、cycle 終端 batch)
         # idle >= β 半減期 × 4 (≒56 cycle) かつ strength < initial × 0.15 で削除。
@@ -1028,10 +1324,20 @@ def main():
         except Exception as e:
             print(f"  [memory_links] prune skip (error: {e})")
 
+        # Slice 2: cycle metrics emit (cycle 末、save_state 直前)
+        # orchestration §② ゆう確定 emit timing。controller 不変、測定のみ。
+        # reflect 継続原則: 例外で metrics 失敗しても cycle 全体は止めない。
+        try:
+            from core.metrics import emit_cycle_metrics
+            emit_cycle_metrics(state, llm_cfg, load_pref())
+        except Exception as e:
+            print(f"  [metrics] emit skip (error: {e})")
+
         save_state(state)
 
         return {
             "executed": True,
+            "e_available": _cycle_ev is not None,
             "e1": e1, "e2": e2, "e3": e3, "e4": e4,
             "sc_bonus": sc_bonus,
             "cid": cid,
@@ -1066,11 +1372,14 @@ def main():
             _tick_count = getattr(main, '_tick_count', 0) + 1
             main._tick_count = _tick_count
             if _tick_count % 10 == 0:
-                main._cached_measured = calc_measured_entropy(state, state.get("log", []))
-                main._cached_spiral = calc_spiral_vector(state, state.get("log", []))
-                # behavioral_entropy: ツール使用分布の情報エントロピー（パターン化検出用）
+                # 段階13 Phase 0.1.D: entropy/spiral は tool (raw) + intent (subj) 両層 = merge
+                from core.state import merge_log_view as _merge_log_view
+                _merged_log = _merge_log_view(state)
+                main._cached_measured = calc_measured_entropy(state, _merged_log)
+                main._cached_spiral = calc_spiral_vector(state, _merged_log)
+                # behavioral_entropy: ツール使用分布の情報エントロピー（tool は raw 直読みで OK）
                 from collections import Counter as _Counter
-                _recent_tools = [e.get("tool", "unknown") for e in state.get("log", [])[-20:]]
+                _recent_tools = [e.get("tool", "unknown") for e in state.get("raw_events", [])[-20:]]
                 if len(_recent_tools) >= 2:
                     _counts = _Counter(_recent_tools)
                     _total = sum(_counts.values())
@@ -1086,17 +1395,24 @@ def main():
             tick_entropy(state, measured_entropy=_measured, behavioral_entropy=_behavioral)
             signals = calc_pressure_signals(state, spiral=_spiral)
             signal_total = sum(signals.values())
-            pressure = pressure * pp.get("decay", 0.97) + signal_total
+            # hotfix 2026-05-12 (Slice 6.5 と独立): clock_base 配線。config.py:71 で
+            # DEFAULT_PRESSURE_PARAMS に "clock_base": 0.15 が定義されてたが、本 pressure 更新式に
+            # 配線されていなかった (git log -S "clock_base" で 822c0cd commit が定義追加のみ、
+            # main.py への配線 commit 0 件確認、= 最初から未配線の placeholder)。
+            # 「時間経過だけでも少しずつ圧が溜まる」internal drive baseline として配線、
+            # E2=E3=100% 連発などで signal 弱化 (s/u/n 軸ゼロ化) しても pressure が threshold に
+            # 到達する path を保証する (feedback_internal_drive literal「外部刺激なしでも動く」整合)。
+            pressure = pressure * pp.get("decay", 0.97) + signal_total + pp.get("clock_base", 0.0)
             threshold = calc_dynamic_threshold(state, base_threshold)
 
             # 外部入力チェック（chatキューからstate.logに注入 + pressure加算 + archive）
             # WM 段階6-C v3: channel spec を channel_registry から引き、spec["tools_in"][0] を tool tag に
             for chat_text in get_pending_chats():
-                _refresh_state()
                 from core.channel_registry import channel_from_device_input
                 from core.world_model import ensure_channel, observe_channel_activity
                 _spec = channel_from_device_input()
                 _channel_id = _spec["id"]
+                _record_outward_input(_channel_id, "chat")
                 _input_tag = _spec["tools_in"][0] if _spec["tools_in"] else f"[{_channel_id}_input]"
 
                 _wm = state.get("world_model")
@@ -1116,8 +1432,7 @@ def main():
                     # Noetic 主体で決定済の中立 id、feedback_no_user_assistant_frame 整合)
                     "perspective": make_perspective(viewer=_channel_id, viewer_type="actual"),
                 }
-                _archive_entries([_ext_entry])
-                state["log"].append(_ext_entry)
+                event_emitter.fire_event(state, _ext_entry)
                 # 未応答カウンター (pressure 経路で AI に応答を促す)
                 state["unresponded_external_count"] = state.get("unresponded_external_count", 0) + 1
                 # 段階8 改善5 (案 5-A): 外部入力 → iku 内部応答意図 pending 化。
@@ -1153,7 +1468,6 @@ def main():
                     for _line in _lines:
                         if not _line.strip():
                             continue
-                        _refresh_state()
                         _rec = _json.loads(_line)
                         # channel_spec 決定 (server 判定優先、なければ registry で生成)
                         from core.channel_registry import channel_from_mcp_client
@@ -1161,6 +1475,7 @@ def main():
                         _spec = _rec.get("channel_spec") or channel_from_mcp_client(
                             _rec.get("client_name", ""))
                         _channel_id = _spec["id"]
+                        _record_outward_input(_channel_id, "mcp")
                         _input_tag = _spec["tools_in"][0] if _spec["tools_in"] else f"[{_channel_id}_input]"
 
                         _wm = state.get("world_model")
@@ -1185,8 +1500,7 @@ def main():
                             # device_input 側と同じ方針で対称性維持。
                             "perspective": make_perspective(viewer=_channel_id, viewer_type="actual"),
                         }
-                        _archive_entries([_ext_entry])
-                        state["log"].append(_ext_entry)
+                        event_emitter.fire_event(state, _ext_entry)
                         state["unresponded_external_count"] = (
                             state.get("unresponded_external_count", 0) + 1
                         )
@@ -1229,13 +1543,13 @@ def main():
                 print(_tline)
                 broadcast_log(_tline)
                 try:
-                    _tres = TOOLS[_tn]["func"](_ta)
+                    with STATE_LOCK:
+                        _tres = TOOLS[_tn]["func"](_ta)
                     _rline = f"  [test] → {str(_tres)[:200]}"
                     print(_rline)
                     broadcast_log(_rline)
                     # テストタブ経由でも結果を state.log に積む（AI のコンテキストに入れる）
                     # type="test" でマーク、intent には [test] プレフィックスを付けて出処を明示
-                    _refresh_state()
                     _test_id = f"{state.get('session_id','?')}_test{int(time.time()*1000)%100000}"
                     _test_intent = _ta.get("intent", "").strip()
                     _test_entry = {
@@ -1247,8 +1561,7 @@ def main():
                         "result": str(_tres),
                         "perspective": make_perspective(),  # 段階11-A: test タブ実行も Noetic 内部扱いで self/actual
                     }
-                    _archive_entries([_test_entry])
-                    state["log"].append(_test_entry)
+                    event_emitter.fire_event(state, _test_entry)
                     save_state(state)
                 except Exception as _te:
                     _eline = f"  [test] エラー: {_te}"
@@ -1292,6 +1605,34 @@ def main():
             time.sleep(max(0.0, 1.0 - elapsed))
 
         # --- 閾値超過 or トンネル発火: 認知層起動 ---
+        # 段階13 Phase 4 commit 4 (PLAN §3-1 + §5-5 同時発火階層 literal):
+        # pressure 軸 + graph 軸の両軸並走 fire_candidates list を生成、LLM② に
+        # selection 委譲 (PLAN §5-5「selection = △ 1 cycle 1 つ、LLM② 判断」literal)。
+        # scalar fire_cause は既存 logic 維持 (PLAN spec 対象外、log line / state 用)。
+        try:
+            from core.dynamic_composition import (
+                compute_graph_maturity,
+                compute_graph_axis_candidates,
+                W_PRESSURE,
+            )
+            # PLAN §3-1 literal: pressure_axis.candidates(weight=w_pressure)
+            pressure_candidates = [
+                {"name": k, "score": float(v) * W_PRESSURE, "kind": "pressure"}
+                for k, v in (signals or {}).items()
+            ]
+            w_graph = compute_graph_maturity(state)
+            graph_candidates = compute_graph_axis_candidates(state, w_graph)
+            fire_candidates = pressure_candidates + graph_candidates
+        except Exception as e:
+            print(f"  [graph_axis] skip (error: {e})")
+            fire_candidates = [
+                {"name": k, "score": float(v), "kind": "pressure"}
+                for k, v in (signals or {}).items()
+            ]
+
+        # primary scalar fire_cause: 既存 logic 維持 (pressure 軸内 max のみ)。
+        # selection は LLM② が fire_candidates list を見て判断 (PLAN §5-5 literal)。
+        # scalar は log line / state["fire_cause"] 用 metadata のみ、selection の代理ではない。
         fire_cause = max(signals, key=signals.get) if signals else "entropy"
         if _tunnel_fire:
             fire_cause = "tunnel"
@@ -1311,8 +1652,12 @@ def main():
                       f"entropy={state.get('entropy', 0.65):.2f})")
                 break
 
-            _fire_result = _run_one_fire(fire_cause, _tunnel_fire, pp,
-                                          threshold, tick_dt, _micro_iter)
+            # tunnel 発火時は fire_candidates=None で渡す: 既存 scalar 経路
+            # [発火原因: tunnel] が prompt 表示される (Codex review P2-1 fix、tunnel
+            # は PLAN STAGE13 対象外の既存 Noetic 特殊 trigger、backward compat 維持)。
+            _fire_result = _run_observed_fire(fire_cause, _tunnel_fire, pp,
+                                          threshold, tick_dt, _micro_iter,
+                                          fire_candidates=None if _tunnel_fire else fire_candidates)
 
             # LLM① エラーや tool 未実行なら break
             if not _fire_result or _fire_result.get("llm1_error"):
@@ -1338,31 +1683,32 @@ def main():
 
         # fire cycle 完了後の後処理 (最後の iter 結果を元に 1 回だけ実施)
         if _last_fire_result and _last_fire_result.get("executed"):
-            def _e_to_float(e_str):
-                m = re.search(r'(\d+)', str(e_str))
-                return int(m.group(1)) / 100.0 if m else 0.5
-            e1_val = _e_to_float(_last_fire_result["e1"])
-            e2_val = _e_to_float(_last_fire_result["e2"])
-            e3_val = _e_to_float(_last_fire_result["e3"])
-            e4_val = _e_to_float(_last_fire_result["e4"]) if _last_fire_result["e4"] else 0.5
-            _sc_bonus = _last_fire_result["sc_bonus"]
             pressure = max(0.0, pressure * pp.get("post_fire_reset", 0.3))
-            state["last_e1"] = e1_val
-            state["last_e2"] = e2_val
-            state["last_e3"] = e3_val
-            state["last_e4"] = e4_val
+            if _last_fire_result.get("e_available", False):
+                def _e_to_float(e_str):
+                    m = re.search(r'(\d+)', str(e_str))
+                    return int(m.group(1)) / 100.0 if m else 0.5
+                e1_val = _e_to_float(_last_fire_result["e1"])
+                e2_val = _e_to_float(_last_fire_result["e2"])
+                e3_val = _e_to_float(_last_fire_result["e3"])
+                e4_val = _e_to_float(_last_fire_result["e4"]) if _last_fire_result["e4"] else 0.5
+                _sc_bonus = _last_fire_result["sc_bonus"]
+                state["last_e1"] = e1_val
+                state["last_e2"] = e2_val
+                state["last_e3"] = e3_val
+                state["last_e4"] = e4_val
 
-            _spiral = getattr(main, '_cached_spiral', None)
-            _consistency = _spiral.get("consistency", 0) if _spiral else 0
+                _spiral = getattr(main, '_cached_spiral', None)
+                _consistency = _spiral.get("consistency", 0) if _spiral else 0
 
-            ent_before = state.get("entropy", 0.65)
-            apply_negentropy(state, e1_val, e2_val, e3_val, e4_val,
-                            state_change_bonus=_sc_bonus, consistency_bonus=_consistency)
-            ent_after = state.get("entropy", 0.65)
-            print(f"  entropy: {ent_after:.3f} (neg={ent_before - ent_after:.4f} "
-                  f"sc={_sc_bonus:.1f} con={_consistency:.2f})")
-            broadcast_e_values(state.get("cycle_id", 0), e1_val, e2_val, e3_val,
-                               e4_val, ent_before - ent_after)
+                ent_before = state.get("entropy", 0.65)
+                apply_negentropy(state, e1_val, e2_val, e3_val, e4_val,
+                                state_change_bonus=_sc_bonus, consistency_bonus=_consistency)
+                ent_after = state.get("entropy", 0.65)
+                print(f"  entropy: {ent_after:.3f} (neg={ent_before - ent_after:.4f} "
+                      f"sc={_sc_bonus:.1f} con={_consistency:.2f})")
+                broadcast_e_values(state.get("cycle_id", 0), e1_val, e2_val, e3_val,
+                                   e4_val, ent_before - ent_after)
             broadcast_state(state)
             state["pressure"] = round(pressure, 2)
             save_state(state)
@@ -1370,22 +1716,17 @@ def main():
 
             # === Reflection (cycle 境界で 1 回) ===
             state["reflection_cycle"] = state.get("reflection_cycle", 0) + 1
-            # 段階11-C hotfix (2026-04-24): 段階11-C smoke 3 段目 baseline で
-            # reflect 自動発火ゼロを観察、root cause は「incremented 値が disk
-            # に書かれず、次 tool 実行の _refresh_state() で memory 上の +1
-            # が毎回消えて reflection_cycle が永遠に 1 止まり」だった。
-            # reflect 発火時のみ save (L1274 reset 時) に依存していた race 条件
-            # (LLM が reflect tool chain を選ぶ偶発起動が初回書込契機として必要)。
-            # 累積値を increment 直後に永続化、reflect tool chain 選択の運に
-            # 独立して自動発火経路が機能するようにする。副作用: disk I/O が
-            # cycle あたり 1 回増える (同 state object で実害なし)。
+            # 再起動後も自動 reflect の累積回数を引き継ぐ。
             save_state(state)
             _refl_interval = load_pref().get("reflection_interval", 10)
             if should_reflect(state, _refl_interval):
                 print("  [reflection] 内省開始...")
-                reflect(state, call_llm)
-                state["reflection_cycle"] = 0
-                save_state(state)
+                # F-005 完了後 hotfix (2026-05-09): tool 経路と同 helper に集約
+                # して reflection_cycle リセット + save_state を 1 経路化。
+                # tool 経路で reflect 走った後の同 cycle で should_reflect が
+                # True になることはない (state["reflection_cycle"] = 0 が直接
+                # 反映されるため) → 二重発火構造的に起きない。
+                reflect_and_persist(state, call_llm)
 
             # 段階11-B Phase 5 Step 5.4: cycle 境界で emergence metric 記録 (reflection 後 state snapshot)
             try:

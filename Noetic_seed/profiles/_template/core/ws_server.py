@@ -290,16 +290,18 @@ def stop_ws_server():
     # 呼び出し元で少し sleep して確実に解放を待つこと
 
 
-def broadcast(msg: dict):
-    """全接続クライアントにメッセージを送信（スレッドセーフ）"""
-    if not _ws_clients:
-        return
+def broadcast(msg: dict) -> int:
+    """送信キューに登録し、受付時の接続数を返す。到達数ではない。0 件なら登録しない。"""
+    client_count = len(_ws_clients)
+    if client_count == 0:
+        return 0
     text = json.dumps(msg, ensure_ascii=False)
     if msg.get("type") in ("log", "state", "e_values"):
         _ws_log_buffer.append(msg)
         if len(_ws_log_buffer) > _LOG_BUFFER_MAX:
             _ws_log_buffer.pop(0)
     _send_queue.put(text)
+    return client_count
 
 
 def broadcast_log(text: str):
@@ -490,13 +492,16 @@ def send_device(action: str, params: dict = None) -> str:
     戻り値: 生成した device request id（必要なら応答追跡に使える）"""
     import time as _time
     dr_id = f"dr_{int(_time.time() * 1000) % 1000000}"
-    broadcast({
+    client_count = broadcast({
         "type": "device_request",
         "id": dr_id,
         "action": action,
         "params": params or {},
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     })
+    if client_count == 0:
+        from core.runtime.registry import ToolError
+        raise ToolError("No client connected", detail={"action": action, "client_count": 0})
     print(f"  [ws] device send (async): {dr_id} ({action})")
     return dr_id
 

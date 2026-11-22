@@ -67,8 +67,9 @@ class HookRunner:
     def register_pre(self, handler: PreHandler) -> None:
         self._pre.append(handler)
 
-    def register_post(self, handler: PostHandler) -> None:
-        self._post.append(handler)
+    def register_post(self, handler: Callable, *, with_tool_id: bool = False) -> None:
+        """with_tool_id=True の handler にだけ、実行識別子を第4引数で渡す。"""
+        self._post.append((handler, with_tool_id))
 
     def register_failure(self, handler: FailureHandler) -> None:
         self._fail.append(handler)
@@ -95,11 +96,12 @@ class HookRunner:
         return acc
 
     def run_post_tool_use(self, tool_name: str, tool_input: dict,
-                          output: str) -> HookRunResult:
+                          output: str, *, tool_id: Optional[str] = None) -> HookRunResult:
         acc = HookRunResult.allow()
-        for handler in self._post:
+        for handler, with_tool_id in self._post:
             try:
-                r = handler(tool_name, tool_input, output)
+                r = (handler(tool_name, tool_input, output, tool_id) if with_tool_id
+                     else handler(tool_name, tool_input, output))
             except Exception as e:
                 return HookRunResult(
                     failed=True,
@@ -126,12 +128,12 @@ class HookRunner:
 # ============================================================
 # Noetic 固有 handler (Phase 4 追加)
 # ------------------------------------------------------------
-# 承認 3 層 (tool_intent / tool_expected_outcome / message) の欠損
+# 理由・予想と、確認時の note の欠損
 # チェックを PreToolUse hook として登録するための factory。
-# APPROVAL_PROMPT_SPEC.md §5 の仕様を実装する。
+# HUMAN_FRAME_PLAN.md §4-2 の仕様を実装する。
 # ============================================================
 
-_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome", "message")
+_APPROVAL_FIELDS = ("tool_intent", "tool_expected_outcome")
 _VALID_MISSING_POLICIES = ("deny", "warn", "auto_fill")
 
 
@@ -145,18 +147,21 @@ def _auto_fill_field(tool_name: str, field_name: str) -> str:
         return f"[auto_fill] {tool_name} 実行"
     if field_name == "tool_expected_outcome":
         return f"[auto_fill] {tool_name} の結果取得"
-    if field_name == "message":
+    if field_name == "note":
         return f"[auto_fill] {tool_name} を実行します"
     return "[auto_fill]"
 
 
 def make_pre_tool_use_approval_check(
     missing_field_policy: str = "deny",
+    *,
+    auto_approve_all: bool = False,
+    policy_fn=None,
 ) -> PreHandler:
-    """承認 3 層欠損チェッカーを生成。
+    """理由・予想は常に、note は確認が要る時だけ検査する。
 
-    tool_input が `tool_intent` / `tool_expected_outcome` / `message`
-    を揃えているか検証する PreToolUse hook を返す。
+    auto_approve_all=True なら policy は評価しない。欠損 note を
+    本来の用途の message で補うことはしない。
 
     factory にしている理由: hooks.py を claw-code 準拠の純粋インフラに
     保つため、settings 依存は factory 引数で注入する。main.py 側が
@@ -164,6 +169,9 @@ def make_pre_tool_use_approval_check(
 
     Args:
         missing_field_policy: 欠損時の動作。"deny" / "warn" / "auto_fill"
+        auto_approve_all: True なら理由・予想だけを検査。
+        policy_fn: make_policy_fn の戻り値。evaluate で判定と理由を取得。
+            None は callback と同じく全 tool を確認対象とする。
 
     Raises:
         ValueError: 未知の policy が渡された場合 (設定ミスは起動時に検出)
@@ -175,8 +183,17 @@ def make_pre_tool_use_approval_check(
         )
 
     def _check(tool_name: str, tool_input: dict) -> HookRunResult:
+        fields = _APPROVAL_FIELDS
+        reason = ""
+        if not auto_approve_all:
+            needs_approval, reason = (
+                policy_fn.evaluate(tool_name, tool_input)
+                if policy_fn is not None else (True, "default: approve")
+            )
+            if needs_approval:
+                fields += ("note",)
         missing = []
-        for field_name in _APPROVAL_FIELDS:
+        for field_name in fields:
             value = tool_input.get(field_name, "")
             if value is None or not str(value).strip():
                 missing.append(field_name)
@@ -185,10 +202,11 @@ def make_pre_tool_use_approval_check(
             return HookRunResult.allow()
 
         if missing_field_policy == "deny":
+            detail = (f"この操作は確認の対象 ({reason})。note が空。"
+                      if "note" in missing else "")
             return HookRunResult.deny([
                 f"[approval] tool_input 欠損: {', '.join(missing)}。"
-                "tool_intent / tool_expected_outcome / message の 3 層を"
-                "揃えて再生成してください。"
+                f"{detail}不足している欄を添えて再提出してください。"
             ])
 
         if missing_field_policy == "warn":
@@ -240,6 +258,9 @@ def make_post_tool_use_evaluation(
 
     内部は eval.py の既存関数を順次呼ぶ薄い wrapper。戻り値 state は
     factory に渡された参照を破壊的に更新する (Noetic 既存流儀)。
+    E1-E4 がすべて有限数値・0〜1 の時だけ scored=True とする。
+    欠測時は E2 cap と E3 由来 pending を止め、e_values を scored=False と
+    eff のみに置き換える。effective_change・ledger・減衰・観測判定は続ける。
 
     Args:
         state: メイン state への参照。hook 内で破壊的に更新される。
@@ -260,6 +281,7 @@ def make_post_tool_use_evaluation(
         (Step A の PreToolUse hook で存在が保証されている前提)。
         欠損 (policy=warn で抜けた等) 時も crash せず空文字で進む。
     """
+    import math
     from core import eval as _eval
 
     def _handler(tool_name: str, tool_input: dict,
@@ -271,14 +293,19 @@ def make_post_tool_use_evaluation(
         recent_intents = get_recent_intents() or []
         output_str = str(output)
 
-        # 1. E1-E4 評価 (LLM 0.7 + vec 0.3 ブレンド、失敗時 None)
+        # 1. LLM の E1-E4 がそろった時だけ採点完了。補完・ブレンドはしない。
         scores = _eval.eval_with_llm(
             intent, expect, output_str, recent_intents, call_llm_fn
         ) or {}
-        e1 = float(scores.get("e1", 0.5))
-        e2_raw = float(scores.get("e2", 0.5))
-        e3 = float(scores.get("e3", 0.5))
-        e4 = float(scores.get("e4", 0.5))
+        scored = all(
+            isinstance(scores.get(key), (int, float))
+            and not isinstance(scores[key], bool)
+            and 0 <= scores[key] <= 1
+            and math.isfinite(scores[key])
+            for key in ("e1", "e2", "e3", "e4")
+        )
+        if scored:
+            e1, e2_raw, e3, e4 = (float(scores[key]) for key in ("e1", "e2", "e3", "e4"))
 
         # 2. effective_change (5 層)
         target_id = ""
@@ -297,7 +324,8 @@ def make_post_tool_use_evaluation(
         )
 
         # 3. E2 cap: (0.3 + eff*0.7)
-        e2 = _eval.apply_effective_change_to_e2(e2_raw, eff)
+        if scored:
+            e2 = _eval.apply_effective_change_to_e2(e2_raw, eff)
 
         # 4. Action Ledger
         action_key = _eval._extract_action_key(tool_name, tool_input)
@@ -309,26 +337,28 @@ def make_post_tool_use_evaluation(
         # 5. unresolved_intent 更新 (rate-distortion 容量管理)
         # Step C-2 以降: UPS v2 形式で pending に追加 (source_action=tool_name,
         # lag_kind="cycles", semantic_merge=True)。内部ロジックは不変。
-        e3_str = _pct_str(e3)
-        _eval.update_unresolved_intents(
-            state=state, intent=intent, e3_str=e3_str, cycle_id=cycle_id,
-            source_action=tool_name, lag_kind="cycles",
-        )
+        if scored:
+            e3_str = _pct_str(e3)
+            _eval.update_unresolved_intents(
+                state=state, intent=intent, e3_str=e3_str, cycle_id=cycle_id,
+                source_action=tool_name, lag_kind="cycles",
+            )
 
         # 6. 既存 unresolved_intent の gap を relevance で減衰
         _eval.update_gaps_by_relevance(
             state=state, result_str=output_str, ec=eff,
         )
 
-        # 7. state["e_values"] に最新スコアを保存 (Noetic 既存慣習)
-        state["e_values"] = {
-            "e1": _pct_str(e1),
-            "e2": _pct_str(e2),
-            "e2_raw": _pct_str(e2_raw),
-            "e3": e3_str,
-            "e4": _pct_str(e4),
-            "eff": round(eff, 4),
-        }
+        # 7. 欠測時も置き換え、前回のスコアを残さない。
+        state["e_values"] = {"scored": scored, "eff": round(eff, 4)}
+        if scored:
+            state["e_values"].update({
+                "e1": _pct_str(e1),
+                "e2": _pct_str(e2),
+                "e2_raw": _pct_str(e2_raw),
+                "e3": e3_str,
+                "e4": _pct_str(e4),
+            })
 
         # 8. 段階8 v4: 全 pending の match_pattern で自己消化判定
         # tool 側に rules を持たせず、pending 側が「誰が自分を消化できるか」を
@@ -343,9 +373,13 @@ def make_post_tool_use_evaluation(
             cycle_id=cycle_id,
         )
 
+        score_message = (
+            f"e2={_pct_str(e2)} e3={e3_str} e4={_pct_str(e4)}"
+            if scored else "scored=False (採点欠測)"
+        )
         return HookRunResult.allow(messages=[
             f"[post_eval] tool={tool_name} "
-            f"e2={_pct_str(e2)} e3={e3_str} e4={_pct_str(e4)} "
+            f"{score_message} "
             f"eff={eff:.3f}"
         ])
 
@@ -435,46 +469,68 @@ def make_file_access_guard(
     """
     from pathlib import Path
 
+    # W3-min (PLAN §5-4 Codex rescue 提案): file_access_guard は path
+    # 評価を path_resolver helper と共有。secrets.json / sandbox/secrets/
+    # 判定も canonical な workspace 相対 POSIX で行うため、Windows case /
+    # traversal / whitespace / 等の path quirk が approval_rules / git_auto_stash
+    # / pending_body_modify と完全一致する。
+    import os
+    from core.runtime.path_resolver import path_resolve_for_policy
+
     root = Path(workspace_root).resolve()
-    secrets_dir = (root / sandbox_dir_name / secrets_subdir).resolve()
-    secrets_json = (root / secrets_json_name).resolve()
-
-    def _resolve(path_str: str):
-        if not path_str:
-            return None
-        try:
-            return (root / path_str).resolve()
-        except Exception:
-            return None
-
-    def _is_inside(target, base) -> bool:
-        try:
-            target.relative_to(base)
-            return True
-        except ValueError:
-            return False
+    # secrets.json / sandbox/secrets/ も canonical 相対 POSIX (Windows lowercase)
+    # で比較する基準値を pre-compile。
+    # Codex review 7 周目 P1 fix: secrets dir は **完全一致 + prefix 両方** で
+    # deny する必要 (`path: "sandbox/secrets"` 末尾 / なしも directory 自体への
+    # アクセスとして禁止、grep_search/glob_search で directory enumerate 防御)。
+    secrets_json_rel = secrets_json_name.lower() if os.name == "nt" else secrets_json_name
+    secrets_dir_rel = (
+        f"{sandbox_dir_name}/{secrets_subdir}".lower()
+        if os.name == "nt"
+        else f"{sandbox_dir_name}/{secrets_subdir}"
+    )
+    secrets_dir_rel_prefix = secrets_dir_rel + "/"
 
     def _check(tool_name: str, tool_input: dict) -> HookRunResult:
         if tool_name not in set(guarded_read_tools) | set(guarded_write_tools):
             return HookRunResult.allow()
 
-        # tool 別に path / pattern 引数を取得
+        # tool 別に path / pattern 引数を取得 (raw、resolver 内 strip)
         if tool_name in ("glob_search", "grep_search"):
-            path_arg = str(tool_input.get("path") or tool_input.get("pattern") or "").strip()
+            path_arg = str(tool_input.get("path") or tool_input.get("pattern") or "")
         else:
-            path_arg = str(tool_input.get("path") or "").strip()
+            path_arg = str(tool_input.get("path") or "")
 
-        if not path_arg:
+        if not path_arg.strip():
             return HookRunResult.allow()
-
-        target = _resolve(path_arg)
-        if target is None:
-            return HookRunResult.allow()  # claw 側の boundary check に委譲
 
         is_write = tool_name in guarded_write_tools
 
-        # 1. secrets.json 保護
-        if target == secrets_json:
+        # path_resolver 経由で canonical workspace 相対 POSIX 取得
+        # (workspace 外 / disallowed char / resolve error → None)
+        rel = path_resolve_for_policy(path_arg, root)
+
+        if rel == "memory/state_generations" or (rel and rel.startswith("memory/state_generations/")):
+            return HookRunResult.deny(["[file_guard] state generations are reserved for recovery"])
+
+        # workspace 外 path
+        if rel is None:
+            if is_write:
+                # 段階12 Step 2 (PLAN §3-2): write 系 tool は profile 境界内のみ。
+                # disallowed char (null byte / 制御 byte) も None になるため
+                # 同じ deny 経路に流れる (一律「profile 外」扱い、安全側)。
+                return HookRunResult.deny([
+                    f"[file_guard] {tool_name} はプロファイル境界外への書込みを"
+                    f"禁止しています (指定パス: {path_arg}, profile_root: {root})。"
+                    f"パスを profile 配下に変更してください "
+                    f"(例: sandbox/<file>, core/<file>, tools/<file>, etc.)。"
+                ])
+            return HookRunResult.allow()  # read は claw 側 boundary check に委譲
+
+        # Root search is allowed; file_ops filters protected candidates before reading.
+
+        # 1. secrets.json 保護 (canonical 相対 POSIX で比較、Windows case 対応)
+        if rel == secrets_json_rel:
             return HookRunResult.deny([
                 f"[file_guard] secrets.json は直接アクセスできません "
                 f"(tool={tool_name}, path={path_arg})。"
@@ -482,25 +538,14 @@ def make_file_access_guard(
                 f"(機密フィールドは隠されます)。"
             ])
 
-        # 2. sandbox/secrets/ 保護
-        if _is_inside(target, secrets_dir):
+        # 2. sandbox/secrets/ 保護 (Codex 7 周目 P1 fix: 完全一致 + prefix 両方)
+        if rel == secrets_dir_rel or rel.startswith(secrets_dir_rel_prefix):
             redirect = "secret_write" if is_write else "secret_read"
             action = "書き込む" if is_write else "読む"
             return HookRunResult.deny([
                 f"[file_guard] sandbox/{secrets_subdir}/ には直接アクセスできません "
                 f"(tool={tool_name}, path={path_arg})。"
                 f"{redirect} を使って {action} (引数は name=<secret名>)。"
-            ])
-
-        # 3. 段階12 Step 2 (PLAN §3-2): write 系 tool は profile 境界内のみ
-        #    許可。target は既に resolve() 済 (canonical 化されてる) ため、
-        #    symbolic link / .. / ジャンクション抜けも relative_to で網羅判定。
-        if is_write and not _is_inside(target, root):
-            return HookRunResult.deny([
-                f"[file_guard] {tool_name} はプロファイル境界外への書込みを"
-                f"禁止しています (指定パス: {path_arg}, profile_root: {root})。"
-                f"パスを profile 配下に変更してください "
-                f"(例: sandbox/<file>, core/<file>, tools/<file>, etc.)。"
             ])
 
         return HookRunResult.allow()
@@ -592,19 +637,18 @@ def make_git_auto_stash_hook(
         rel_profile = profile_name
     pathspec = rel_profile.rstrip("/") + "/"
 
+    # 段階13 Phase 6.2 W 案 (PLAN §5-4): 身体改変 path 判定は単一 helper
+    # (path_classifier.is_body_modify_path) に集約。Path.resolve() canonical
+    # 化 + Windows case 対応 + traversal 透過で、approval_rules / git_auto_stash
+    # / pending_body_modify の 3 hook が同じ判定を共有する。
+    from core.runtime.path_resolver import is_body_modify_path as _is_body_modify_helper
+
     def _is_body_modify(path_arg: str) -> bool:
-        if not path_arg:
-            return False
-        # Windows backslash → POSIX forward slash のみ正規化。
-        # `lstrip("./")` は ".mcp.json" の先頭 "." まで削るため使わない。
-        normalized = path_arg.replace("\\", "/")
-        for name in body_modify_filenames:
-            if normalized == name or normalized.endswith(f"/{name}"):
-                return True
-        for prefix in body_modify_dir_prefixes:
-            if normalized.startswith(prefix):
-                return True
-        return False
+        return _is_body_modify_helper(
+            path_arg, profile_root,
+            dir_prefixes=body_modify_dir_prefixes,
+            filenames=body_modify_filenames,
+        )
 
     def _drop_old_generations() -> None:
         try:
@@ -739,17 +783,27 @@ def make_post_body_modify_pending_hook(
     Returns:
         PostHandler — 該当時に pending 追加、失敗してもエラー伝播しない。
     """
+    # 段階13 Phase 6.2 W 案 (PLAN §5-4): 身体改変 path 判定は単一 helper
+    # (path_classifier.is_body_modify_path) に集約。git_auto_stash hook /
+    # approval_rules / pending_body_modify が全部同じ判定を共有する設計。
+    from core.runtime.path_resolver import is_body_modify_path as _is_body_modify_helper
+
+    # state_getter() で profile_root が取れる場合は使う、取れない場合は
+    # state["profile_root"] / fallback で None。state 構造に依存せず、
+    # path_classifier 側で None なら raw fallback (test 後方互換)。
+    def _get_profile_root():
+        try:
+            from core.config import BASE_DIR
+            return BASE_DIR
+        except Exception:
+            return None
+
     def _is_body_modify(path_arg: str) -> bool:
-        if not path_arg:
-            return False
-        normalized = path_arg.replace("\\", "/")
-        for name in body_modify_filenames:
-            if normalized == name or normalized.endswith(f"/{name}"):
-                return True
-        for prefix in body_modify_dir_prefixes:
-            if normalized.startswith(prefix):
-                return True
-        return False
+        return _is_body_modify_helper(
+            path_arg, _get_profile_root(),
+            dir_prefixes=body_modify_dir_prefixes,
+            filenames=body_modify_filenames,
+        )
 
     def _check(tool_name: str, tool_input: dict, output: str) -> HookRunResult:
         if tool_name not in target_tool_names:

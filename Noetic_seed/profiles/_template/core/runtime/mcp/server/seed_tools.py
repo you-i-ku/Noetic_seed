@@ -49,7 +49,9 @@ async def noetic_seed_get_state(
         tool_level / self を含む state スナップショット。
     """
     state = load_state()
-    log = state.get("log", [])
+    # 段階13 Phase 0.1.D: 外部 client 向け recent_log は両層 field 必要 = merge view
+    from core.state import merge_log_view
+    log = merge_log_view(state)
     return {
         "cycle_id": state.get("cycle_id", 0),
         "energy": state.get("energy", 50),
@@ -122,7 +124,9 @@ async def noetic_seed_get_recent_outputs(
         channel = channel_from_mcp_client(client_name)["id"]
 
     state = load_state()
-    log = state.get("log", [])
+    # 段階13 Phase 0.1.D: tool 名 filter + 出力内容両方参照 = merge view
+    from core.state import merge_log_view
+    log = merge_log_view(state)
 
     matched = []
     for entry in reversed(log):

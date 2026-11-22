@@ -19,6 +19,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.controller import _predicted_outcome_multiplier
+# 段階14 Step C: BETA_BASE で combined / β を割って multiplier 算出。
+# 既存 test の expected も β=BETA_BASE 想定で /BETA_BASE 化 (= * 2)。
+from core.predictor import BETA_BASE
 
 
 def _assert(cond, label):
@@ -37,34 +40,43 @@ CFG = {"predicted_e2_floor": 0.05}
 def test_weighted_both_present_default_conf():
     print("== pe2 + pec 併記、conf default (0.7/0.7) で正規化加重 ==")
     # default 0.7/0.7 → 等加重 (pe2 + pec) / 2
-    # pe2=80, pec=0.4 → (0.8 * 0.7 + 0.4 * 0.7) / 1.4 = (0.56 + 0.28) / 1.4 = 0.6
+    # pe2=80, pec=0.4 → combined = (0.8 * 0.7 + 0.4 * 0.7) / 1.4 = 0.6
+    # Step C: mult = combined / BETA_BASE = 0.6 / 0.5 = 1.2
     pred = {"predicted_e2": 80, "predicted_ec": 0.4}
     cand = {"tool": "output_display"}
-    state = {}  # predictor_confidence 未 init → default 0.7/0.7
+    state = {}  # predictor_confidence 未 init → default 0.7/0.7、cig 不在 → β=BETA_BASE
     mult = _predicted_outcome_multiplier(pred, cand, state, CFG)
-    return _assert(abs(mult - 0.6) < 1e-9, f"(0.8*0.7 + 0.4*0.7)/1.4 = 0.6 (actual: {mult})")
+    expected = 0.6 / BETA_BASE
+    return _assert(abs(mult - expected) < 1e-9,
+                   f"combined=0.6, β=BETA_BASE → {expected} (actual: {mult})")
 
 
 def test_weighted_e2_conf_dominant():
     print("== e2_conf 高 / ec_conf 低 → pe2 寄りに加重 ==")
     # e2_conf=0.9, ec_conf=0.1 → pe2 が支配的
-    # pe2=0.8, pec=0.3 → (0.8*0.9 + 0.3*0.1) / 1.0 = 0.75
+    # pe2=0.8, pec=0.3 → combined = (0.8*0.9 + 0.3*0.1) / 1.0 = 0.75
+    # Step C: mult = 0.75 / BETA_BASE = 1.5
     pred = {"predicted_e2": 80, "predicted_ec": 0.3}
     cand = {"tool": "tool_A"}
     state = {"predictor_confidence": {"tool_A": {"e2_conf": 0.9, "ec_conf": 0.1}}}
     mult = _predicted_outcome_multiplier(pred, cand, state, CFG)
-    return _assert(abs(mult - 0.75) < 1e-9, f"(0.72 + 0.03)/1.0 = 0.75 (actual: {mult})")
+    expected = 0.75 / BETA_BASE
+    return _assert(abs(mult - expected) < 1e-9,
+                   f"combined=0.75, β=BETA_BASE → {expected} (actual: {mult})")
 
 
 def test_weighted_ec_conf_dominant():
     print("== ec_conf 高 / e2_conf 低 → pec 寄りに加重 (E2 循環性緩和) ==")
     # e2_conf=0.2, ec_conf=0.8 → pec が支配的
-    # pe2=0.95, pec=0.3 → (0.95*0.2 + 0.3*0.8) / 1.0 = 0.19 + 0.24 = 0.43
+    # pe2=0.95, pec=0.3 → combined = (0.95*0.2 + 0.3*0.8) / 1.0 = 0.43
+    # Step C: mult = 0.43 / BETA_BASE = 0.86
     pred = {"predicted_e2": 95, "predicted_ec": 0.3}
     cand = {"tool": "tool_B"}
     state = {"predictor_confidence": {"tool_B": {"e2_conf": 0.2, "ec_conf": 0.8}}}
     mult = _predicted_outcome_multiplier(pred, cand, state, CFG)
-    return _assert(abs(mult - 0.43) < 1e-9, f"(0.19 + 0.24)/1.0 = 0.43 (actual: {mult})")
+    expected = 0.43 / BETA_BASE
+    return _assert(abs(mult - expected) < 1e-9,
+                   f"combined=0.43, β=BETA_BASE → {expected} (actual: {mult})")
 
 
 # ============================================================
@@ -73,11 +85,14 @@ def test_weighted_ec_conf_dominant():
 
 def test_no_pec_backward_compat():
     print("== predicted_ec 欠如 → pe2_ratio のみ (段階9 挙動) ==")
+    # combined = pe2_ratio = 0.7、Step C: mult = 0.7 / BETA_BASE = 1.4
     pred = {"predicted_e2": 70}  # predicted_ec なし
     cand = {"tool": "output_display"}
     state = {}
     mult = _predicted_outcome_multiplier(pred, cand, state, CFG)
-    return _assert(abs(mult - 0.7) < 1e-9, f"pe2=70 → 0.7 (actual: {mult})")
+    expected = 0.7 / BETA_BASE
+    return _assert(abs(mult - expected) < 1e-9,
+                   f"combined=0.7, β=BETA_BASE → {expected} (actual: {mult})")
 
 
 def test_no_pec_ignores_conf_weights():
@@ -86,8 +101,10 @@ def test_no_pec_ignores_conf_weights():
     cand = {"tool": "tool_C"}
     state = {"predictor_confidence": {"tool_C": {"e2_conf": 0.2, "ec_conf": 0.8}}}
     mult = _predicted_outcome_multiplier(pred, cand, state, CFG)
-    # conf が極端でも pec 無いなら pe2 のみ
-    return _assert(abs(mult - 0.7) < 1e-9, f"conf 無視、pe2=70 → 0.7 (actual: {mult})")
+    # conf が極端でも pec 無いなら pe2 のみ、Step C: mult = 0.7 / BETA_BASE = 1.4
+    expected = 0.7 / BETA_BASE
+    return _assert(abs(mult - expected) < 1e-9,
+                   f"conf 無視、combined=0.7, β=BETA_BASE → {expected} (actual: {mult})")
 
 
 # ============================================================
@@ -150,8 +167,11 @@ def test_invalid_pec_fallback():
     cand = {"tool": "output_display"}
     state = {}
     mult = _predicted_outcome_multiplier(pred, cand, state, CFG)
-    # pe2=50 (0.5), pec fallback=0.5, default 0.7/0.7 → (0.5*0.7 + 0.5*0.7)/1.4 = 0.5
-    return _assert(abs(mult - 0.5) < 1e-9, f"不正 pec → 0.5 fallback、combined=0.5 (actual: {mult})")
+    # pe2=50 (0.5), pec fallback=0.5, default 0.7/0.7 → combined=0.5
+    # Step C: mult = 0.5 / BETA_BASE = 1.0
+    expected = 0.5 / BETA_BASE
+    return _assert(abs(mult - expected) < 1e-9,
+                   f"不正 pec → 0.5 fallback、combined=0.5, β=BETA_BASE → {expected} (actual: {mult})")
 
 
 def test_invalid_pe2_fallback():
@@ -160,8 +180,11 @@ def test_invalid_pe2_fallback():
     cand = {"tool": "output_display"}
     state = {}
     mult = _predicted_outcome_multiplier(pred, cand, state, CFG)
-    # pe2 fallback=50 (0.5), pec=0.5, default → (0.35 + 0.35)/1.4 = 0.5
-    return _assert(abs(mult - 0.5) < 1e-9, f"不正 pe2 → neutral、combined=0.5 (actual: {mult})")
+    # pe2 fallback=50 (0.5), pec=0.5, default → combined=0.5
+    # Step C: mult = 0.5 / BETA_BASE = 1.0
+    expected = 0.5 / BETA_BASE
+    return _assert(abs(mult - expected) < 1e-9,
+                   f"不正 pe2 → neutral、combined=0.5, β=BETA_BASE → {expected} (actual: {mult})")
 
 
 # ============================================================

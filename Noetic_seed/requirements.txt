@@ -12,3 +12,9 @@ lmstudio>=1.1.0
 mcp>=1.0
 claude-agent-sdk>=0.1
 pytest
+
+# 段階13 Phase 2: Layer C JEPA 流予測 test 識別力の永続保証 (CLAUDE.md §5)。
+# test 環境 (Noetic_seed/.venv) でも実 PyTorch backward + optimizer.step が
+# 動かないと識別力ゼロの偽 green になるため、_template と同経路で CPU 版指定。
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch

@@ -316,7 +316,7 @@ def test_forced_tool_hooks_fired():
                                  input={"path": "x",
                                         "tool_intent": "",
                                         "tool_expected_outcome": "",
-                                        "message": ""})],
+                                        "note": ""})],
         stop_reason="tool_use",
     )
     provider = _FakeProvider(fake_msg)
@@ -564,7 +564,7 @@ def test_forced_tool_provider_completed_in_provider():
                 "tool_name": "read_file",
                 "tool_input": {
                     "path": "x", "tool_intent": "i",
-                    "tool_expected_outcome": "o", "message": "m",
+                    "tool_expected_outcome": "o", "note": "m",
                 },
                 "output": "ok",
                 "is_error": False,

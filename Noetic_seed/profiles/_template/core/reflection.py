@@ -17,11 +17,13 @@ NOTES (raw 気づき) と Disposition を更新。
 段階11-A Step 4 で導入された経路 (G3 log 分離 / G1 reflect_section) のうち、
 G3 (perspective ベース log 分離) は維持、G1 は Phase 5 で撤去。
 """
+from core.state import state_locked
 from datetime import datetime, timezone
+from core.runtime.registry import ToolError
 
 from core.cluster_estimation import estimate_clusters
 from core.memory import load_all_memories, memory_store
-from core.memory_links import list_links
+from core.memory_links import list_links, LINK_SCAN_LIMIT
 from core.tag_emergence_monitor import compute_cluster_mutual_information
 from core.perspective import (
     default_self_perspective,
@@ -29,6 +31,44 @@ from core.perspective import (
     make_perspective,
 )
 from core.state import append_debug_log
+
+
+# 段階14 Step D Codex review P1-1 fix: stale subject filter
+# read_file 等の non-memory action 後に reflect 発火すると memories[-1] は
+# 現 cycle と無関係な古い memory (stale subject) で、basin classify が誤判定
+# → false phase transition の危険。本 helper で「現 cycle で created な memory」
+# のみ subject 認定、stale なら set しない → main.py で None pop → 非 reflect
+# cycle 経路 fallback (basin 不変、dwell 単純カウント)。
+STALE_SUBJECT_THRESHOLD_SEC = 30  # smoke で tune 可 (PLAN §7 K6 観察対象)
+
+
+def _is_recent_memory(
+    memory: dict,
+    threshold_sec: int = STALE_SUBJECT_THRESHOLD_SEC,
+) -> bool:
+    """memory の created_at が現時刻から threshold_sec 以内なら True。
+
+    PLAN §6-2 「current_subject_embedding」の概念整合 = 「現 cycle の認知焦点」。
+    Codex review P1-1 fix (Area 1 + Area 2)。
+
+    Args:
+        memory: memory entry dict、"created_at" キー想定
+            ("YYYY-MM-DD HH:MM:SS" 形式)
+        threshold_sec: stale 判定閾値 (default STALE_SUBJECT_THRESHOLD_SEC)
+
+    Returns:
+        True: created_at が threshold_sec 以内 (現 cycle 認知焦点候補)
+        False: stale / parse 失敗 / created_at 不在
+    """
+    created_at = memory.get("created_at", "")
+    if not created_at:
+        return False
+    try:
+        created = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+        diff = (datetime.now() - created).total_seconds()
+        return 0 <= diff <= threshold_sec
+    except (ValueError, TypeError):
+        return False
 
 
 def should_reflect(state: dict, interval: int = 10) -> bool:
@@ -169,7 +209,7 @@ def _gather_dispositions_for_prompt(state: dict) -> tuple:
     return self_disp_values, attr_disps
 
 
-def reflect(state: dict, call_llm_fn) -> dict:
+def reflect(state: dict, call_llm_fn, *, strict=False) -> dict:
     """内省サイクル実行。LLM に直近の行動 + memory cluster 整理を振り返らせる。
 
     段階11-D Phase 5 Step 5.2: 入力に cluster 推定 (memory list 全体の
@@ -181,7 +221,9 @@ def reflect(state: dict, call_llm_fn) -> dict:
     import json
 
     # 段階11-A G3: 直近 log の材料分離 (self/observation)
-    recent_log = state.get("log", [])[-10:]
+    # 段階13 Phase 0.1.D: _split_log_by_perspective が perspective + 他 field 参照 = merge
+    from core.state import merge_log_view
+    recent_log = merge_log_view(state)[-10:]
     self_actions, observations = _split_log_by_perspective(recent_log)
     self_actions_text = _format_self_actions(self_actions)
     observations_text = _format_observations(observations)
@@ -199,23 +241,50 @@ def reflect(state: dict, call_llm_fn) -> dict:
     # 段階11-D Phase 5 Step 5.2: cluster 推定 (posterior、永続化しない)
     memories = load_all_memories()
     memory_index = {m.get("id", ""): m for m in memories if m.get("id")}
+    cluster_failures = []
+    def cluster_llm(*args, **kwargs):
+        try:
+            return call_llm_fn(*args, **kwargs)
+        except Exception as e:
+            cluster_failures.append(e)
+            raise
     clusters = estimate_clusters(
         memories,
         method="hybrid",
         n_clusters=None,
-        llm_call_fn=call_llm_fn,
+        llm_call_fn=cluster_llm if strict else call_llm_fn,
     )
+    if strict and cluster_failures:
+        error = cluster_failures[0]
+        if isinstance(error, ToolError):
+            raise error
+        raise ToolError(f"エラー: {error}", detail={"phase": "cluster_llm",
+                        "exception_type": type(error).__name__, "message": str(error)}) from error
     cluster_sections = _build_cluster_sections(clusters, memory_index)
 
     # 段階11-D Phase 6 Step 6.2: cluster MI 計算 (観察のみ、log_cycle_metrics 経由 jsonl 永続化)
     # state["phase6_metrics"] に書き、log_cycle_metrics 側が次 cycle 以降拾う
-    mi_metrics = compute_cluster_mutual_information(clusters, list_links(limit=10000))
+    mi_metrics = compute_cluster_mutual_information(clusters, list_links(limit=LINK_SCAN_LIMIT))
     if isinstance(state, dict):
         state.setdefault("phase6_metrics", {})
         state["phase6_metrics"]["cluster_mi"] = mi_metrics["cluster_mi"]
         state["phase6_metrics"]["cluster_inter_ratio"] = mi_metrics["cluster_inter_ratio"]
         state["phase6_metrics"]["last_cluster_link_pairs"] = mi_metrics["cluster_link_pairs"]
         state["phase6_metrics"]["last_reflect_cycle"] = state.get("cycle_id")
+
+        # 段階14 Step D: cluster snapshot + 直近 subject memory_id を state に
+        # 一時保存 (basin transition 検知用、main.py cycle 末尾で消費)。
+        # memo line 56「reflection.py / memory_graph_tool.py、cluster_estimation
+        # 流用元」literal、Phase 5「非永続 posterior cluster」整合 (snapshot は
+        # 1 cycle 限定で main.py 側 pop で消費、永続化しない)。
+        state["last_clusters_snapshot"] = clusters
+        # Codex review P1-1 fix: stale subject 判定で現 cycle 認知焦点のみ渡す。
+        # stale (read_file 後 reflect 等で memories[-1] が古い場合) なら set
+        # しない → main.py pop で None → 非 reflect cycle 経路 fallback。
+        if memories and _is_recent_memory(memories[-1]):
+            state["last_subject_memory_id"] = str(memories[-1].get("id", ""))
+        # else: stale or memory 不在で set しない、前 cycle 値があっても
+        # main.py 側 pop で消費されてるので残らない
 
     prompt = f"""あなたは自律AIシステムの内省モジュールです。以下の直近の行動 + memory cluster 整理を振り返り、各項目を出力してください。
 
@@ -263,16 +332,27 @@ ATTRIBUTED_DISPOSITION:
 
 短く、具体的に。各 NOTE / DISPOSITION は独立に。"""
 
+    phase = "llm"
     try:
         text = call_llm_fn(prompt, max_tokens=1000, temperature=0.3)
         append_debug_log("Reflection", text)
-        parsed = _parse_reflection(text, state)
+        phase = "parse"
+        if strict:
+            text, parse_detail = _validate_reflection_response(text)
+        parsed = _parse_reflection(text, state, strict=True) if strict else _parse_reflection(text, state)
+        if strict:
+            parsed["parse_detail"] = parse_detail
         # 段階11-D Phase 6 Step 6.2: 戻り値に MI 観察値を含める (新キー追加のみ、既存 test 影響なし)
         parsed.setdefault("cluster_mi", mi_metrics["cluster_mi"])
         parsed.setdefault("cluster_inter_ratio", mi_metrics["cluster_inter_ratio"])
         parsed.setdefault("cluster_link_pairs", mi_metrics["cluster_link_pairs"])
         return parsed
     except Exception as e:
+        if strict:
+            if isinstance(e, ToolError):
+                raise
+            raise ToolError(f"エラー: {e}", detail={"phase": phase,
+                            "exception_type": type(e).__name__, "message": str(e)}) from e
         print(f"  [reflection] エラー: {e}")
         return {
             "notes": [],
@@ -283,7 +363,124 @@ ATTRIBUTED_DISPOSITION:
         }
 
 
-def _parse_reflection(text: str, state: dict) -> dict:
+@state_locked
+def reflect_and_persist(
+    state: dict,
+    call_llm_fn,
+    save_state_fn=None,
+    reflect_fn=None,
+    *, strict=False,
+) -> dict:
+    """reflect 実行 + reflection_cycle リセット + 永続化を 1 経路に集約。
+
+    F-005 完了後 hotfix (2026-05-09): 旧 main.py:_tool_reflect は
+    `s = load_state()` で別 dict を読み込んで mutate していたため、main scope
+    の ``state["reflection_cycle"]`` が更新されず、cycle 末
+    ``should_reflect(state)`` が再 trigger して二重発火する bug があった。
+
+    本 helper は **受け取った state を in-place mutate する** (main 規約「state
+    は rebind せず in-place mutate」整合、`main.py:305-307` コメント参照)。
+    tool 経路 / auto 経路の両方が同 helper を通すことで、`reflection_cycle`
+    のリセットが必ず main scope の state に反映され、二重発火が構造的に
+    起きない。
+
+    たとえ:
+      旧設計: 部署 A が独自コピーの帳簿を更新して提出、main の帳簿は
+              更新されないので部署 B (cycle 末判定) が「まだやってない」と
+              再度実行
+      新設計: 部署 A も B も同じ帳簿を更新、相互に状態が見える
+
+    Args:
+        state: main scope の state dict (in-place mutate される)
+        call_llm_fn: LLM 呼出 callable
+        save_state_fn: state 永続化関数。``None`` なら ``core.state.save_state``
+            を遅延 import (循環 import 回避 + test 注入兼用)
+        reflect_fn: reflect 本体関数。``None`` なら本 module の ``reflect``
+            (test 時に mock 注入可能)
+
+    Returns:
+        ``reflect()`` の結果 dict (notes / self_disp_delta / attr_disp_delta 等)
+    """
+    if save_state_fn is None:
+        from core.state import save_state as _default_save
+        save_state_fn = _default_save
+    if reflect_fn is None:
+        reflect_fn = reflect
+    result = reflect_fn(state, call_llm_fn, strict=True) if strict else reflect_fn(state, call_llm_fn)
+    state["reflection_cycle"] = 0
+    save_state_fn(state)
+    return result
+
+
+def _validate_reflection_response(text):
+    """Manual only: retain readable items and count skipped lines before any writes.
+
+    Automatic reflection keeps its historical parser and fallback. Diagnostics
+    contain counts/types only, never discarded text or a model interpretation.
+    """
+    import re
+    import math
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("empty reflection response")
+    section = None
+    accepted = []
+    readable = 0
+    skipped = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        upper = stripped.strip("#* :").upper()
+        for name in ("SELF_DISPOSITION", "ATTRIBUTED_DISPOSITION", "NOTES"):
+            if not stripped.startswith("-") and name in upper:
+                section = name
+                accepted.append(name + ":")
+                break
+        else:
+            if not stripped or stripped.startswith("```"):
+                continue
+            kind = "unparsed_line"
+            try:
+                if section is None or not stripped.startswith("-"):
+                    raise ValueError()
+                body = stripped.lstrip("- ").strip()
+                kind = "empty_item"
+                if not body:
+                    raise ValueError()
+                if section == "NOTES":
+                    kind = "invalid_note_confidence"
+                    match = re.search(r'confidence:\s*([\d.]+)', body, re.I)
+                    if match:
+                        if not math.isfinite(float(match.group(1))):
+                            raise ValueError()
+                        body = re.sub(r'\(?\s*confidence:\s*[\d.]+\s*\)?', '', body).strip()
+                    kind = "empty_item"
+                    if not body:
+                        raise ValueError()
+                elif section == "SELF_DISPOSITION":
+                    kind = "invalid_self_disposition"
+                    match = re.search(r'(\w+)_delta:\s*([-+]?[\d.]+)', body)
+                    if not match or not math.isfinite(float(match.group(2))):
+                        raise ValueError()
+                else:
+                    kind = "invalid_attributed_disposition"
+                    match = re.search(r'viewer:\s*([^,]+?),\s*key:\s*([^,]+?),\s*delta:\s*([-+]?[\d.]+)(?:,\s*confidence:\s*([\d.]+))?', body)
+                    if (not match or not match.group(1).strip() or not match.group(2).strip()
+                            or not math.isfinite(float(match.group(3)))):
+                        raise ValueError()
+                    kind = "invalid_attributed_confidence"
+                    if match.group(4) and not math.isfinite(float(match.group(4))):
+                        raise ValueError()
+            except ValueError:
+                skipped[kind] = skipped.get(kind, 0) + 1
+                continue
+            accepted.append(line)
+            readable += 1
+    detail = {"unparsed_lines": sum(skipped.values()), "unparsed_line_types": skipped}
+    if not readable:
+        raise ToolError("エラー: no readable reflection items", detail={"phase": "parse", **detail})
+    return "\n".join(accepted), detail
+
+
+def _parse_reflection(text: str, state: dict, *, strict=False) -> dict:
     """内省結果をパースして記憶・dispositionに反映。
 
     段階11-D Phase 5 Step 5.2: NOTES 単一枠 (raw 気づき自由形式) で memory_store
@@ -306,16 +503,16 @@ def _parse_reflection(text: str, state: dict) -> dict:
     for line in text.splitlines():
         stripped = line.strip()
         # ヘッダ判定 (大文字化で順序問題なく)
-        upper = stripped.upper()
-        if "SELF_DISPOSITION" in upper:
+        upper = stripped.strip("#* :").upper() if strict else stripped.upper()
+        if (upper == "SELF_DISPOSITION" if strict else "SELF_DISPOSITION" in upper):
             in_notes = False
             in_self_disp, in_attr_disp = True, False
             continue
-        elif "ATTRIBUTED_DISPOSITION" in upper:
+        elif (upper == "ATTRIBUTED_DISPOSITION" if strict else "ATTRIBUTED_DISPOSITION" in upper):
             in_notes = False
             in_self_disp, in_attr_disp = False, True
             continue
-        elif "NOTES" in upper:
+        elif (upper == "NOTES" if strict else "NOTES" in upper):
             in_notes = True
             in_self_disp, in_attr_disp = False, False
             continue

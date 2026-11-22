@@ -284,7 +284,7 @@ def pending_observe(
     pending が並立する場合の誤消化を防ぐ)。
 
     §6 "pending_feedback 遅延 E2 遡及" の吸収: observe 対象 pending が
-    `retro_log_entry_id` を持つ場合、state.log 中の該当 entry の `e2` を
+    `retro_log_entry_id` を持つ場合、state.subjective_entries 中の該当 entry の `e2` を
     +retro_e2_bonus% 上方修正 (上限 100%)。
 
     Args:
@@ -342,7 +342,8 @@ def _apply_retro_e2(state: dict, log_entry_id: str, bonus_pct: int) -> bool:
         修正を実行した場合 True、対象 entry 無し or e2 未設定の場合 False。
     """
     import re
-    for entry in state.get("log", []):
+    # 段階13 Phase 0.1.D: e2 mutate 先は subjective_entries (e2 = LLM 解釈の subj field)
+    for entry in state.get("subjective_entries", []):
         if entry.get("id") != log_entry_id:
             continue
         old_e2 = entry.get("e2", "")
@@ -351,6 +352,10 @@ def _apply_retro_e2(state: dict, log_entry_id: str, bonus_pct: int) -> bool:
             return False
         new_val = min(100, int(m.group(1)) + int(bonus_pct))
         entry["e2"] = f"{new_val}%"
+        # F-005: retro e2 修正は subjective_entries.jsonl (materialized view) の
+        # mutation。dirty 立てて cycle 末で atomic rewrite。
+        from core.view_persistence import mark_view_dirty
+        mark_view_dirty("subjective_entries")
         return True
     return False
 
@@ -430,7 +435,8 @@ def pending_prune(
             dynamic_candidates.append(p)
 
     if dynamic_n is None:
-        log_count = len(state.get("log", []))
+        # 段階13 Phase 0.1.D: dynamic_n は iku の経験量 = subjective_entries 件数で算出
+        log_count = len(state.get("subjective_entries", []))
         dynamic_n = max(3, min(20, log_count // 5))
 
     dynamic_candidates.sort(key=lambda p: -float(p.get("gap", 0.0)))
@@ -481,6 +487,24 @@ def pending_add_response_intent(
     応答しない自由は iku の wait(dismiss=p_xxx) 明示行使で実現
     (feedback_freedom_to_die 整合)。
 
+    段階14.8 merge logic (2026-05-08): 同 channel に未消化の
+    response_to_external pending が既にあれば、新規作成せず既存 entry に
+    マージ追記する。Claude Code がエージェントループ進行中の追加発話を
+    1 ターンに統合する挙動と同型 (action_observation_unified 整合)。
+
+    merge 条件 (4 条件 AND、過剰 merge 防止のため全部明示):
+        - type == "pending"
+        - source_action == "response_to_external"  ← 他 source_action と混ぜない
+        - expected_channel == channel              ← 別 channel と混ぜない
+        - observed_content is None                 ← 消化済とは混ぜない
+
+    merge 時の更新:
+        - content_intent: 末尾に "(+ '<新規 snippet>')" を追記
+        - attempts: +1 (累積予測誤差として表現)
+        - last_cycle / timestamp: 最新化
+        - gap: 1.0 にリセット (新規応答待ち再開)
+        - priority: calc_priority で再算
+
     Args:
         state: 認知状態 dict。
         channel: 外部入力の channel ("device" / "claude" 等、応答先)。
@@ -488,9 +512,27 @@ def pending_add_response_intent(
         cycle_id: 現在 cycle。
 
     Returns:
-        生成された PendingEntry。
+        生成された or マージ更新された PendingEntry。
     """
     snippet = str(text)[:50]
+    pending_list = state.get("pending", [])
+
+    # 段階14.8: 同 channel 未消化 response_to_external pending を検出 → merge
+    for p in pending_list:
+        if (p.get("type") == "pending"
+                and p.get("source_action") == "response_to_external"
+                and p.get("expected_channel") == channel
+                and p.get("observed_content") is None):
+            existing_intent = str(p.get("content_intent", ""))
+            p["content_intent"] = f"{existing_intent} (+ '{snippet}')"[:500]
+            p["attempts"] = p.get("attempts", 1) + 1
+            p["last_cycle"] = cycle_id
+            p["timestamp"] = _now_ts()
+            p["gap"] = 1.0
+            p["priority"] = calc_priority(p)
+            return p
+
+    # 同 channel 未消化 response pending なし → 従来通り新規作成
     return pending_add(
         state=state,
         source_action="response_to_external",
@@ -549,10 +591,15 @@ def _matches(
     if mp.get("source_action") is None and mp.get("expected_channel") is None:
         return False
 
-    # 1. source_action: 消化できる tool 名 (単一) と一致するか
+    # 1. source_action: 消化できる tool 名 と一致するか。
+    # main.py:964 で chain 実行時 tool_name は "+".join(...) で combined 形式
+    # (例: "memory_store+output_display") になる。1 cycle = 1 entry の凝集性は
+    # 保存側で維持し、観測側で split して構成要素を判定する設計 (2026-05-16 ゆう gut)。
+    # 空文字フィルタは将来の防衛 (先頭/末尾 `+` 等の edge case 対策、Codex review WARN 反映)。
     required_source = mp.get("source_action")
     if required_source is not None:
-        if tool_name != required_source:
+        parts = [p for p in tool_name.split("+") if p]
+        if required_source not in parts:
             return False
 
     # 2. expected_channel: 消化時 channel と一致するか (構造 match)

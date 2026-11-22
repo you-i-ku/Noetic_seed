@@ -228,46 +228,37 @@ def _calc_log_budget() -> int:
     return max(1000, total - reserved)
 
 
-def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: str = "", registry=None) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    self_text = json.dumps(state["self"], ensure_ascii=False) if state["self"] else "(なし)"
-    energy = round(state.get("energy", 50), 1)
-    e_trend = _calc_e_trend(state["log"][-10:])
-    # 鮮度勾配で log 部を pack（全件維持、tier ごとに result を cap）
-    log_text = _pack_log_block(state["log"], _calc_log_budget(), with_evals=False)
-    allowed = ctrl.get("allowed_tools", set(tools_dict.keys()))
-    tool_lines = _build_tool_lines(allowed, tools_dict, registry=registry)
-    summaries = state.get("summaries", [])
-    summary_lines = [
-        f"  [{s.get('label','')} {s.get('covers_from','').split(' ')[0]}〜{s.get('covers_to','').split(' ')[0]}] {s.get('text','')[:300]}"
-        for s in summaries
-    ]
-    summary_text = "\n".join(summary_lines)
+def _build_pending_block(state: dict) -> str:
+    """V07 Phase 1 hotfix (Codex audit AUD-P1-01 fix): <pending> XML block helper。
 
-    fire_cause_line = f"\n[発火原因: {fire_cause}]" if fire_cause and ctrl.get("tool_level", 0) >= 2 else ""
+    prompt.py:308-369 の inline pending text 構築 logic を helper 抽出、LLM① と
+    LLM② で reuse する (commit 4 で prompt_assembly が pending builder を欠落させた
+    bug を構造的に防止)。
 
-    # pending（未対応事項） — UPS v2 (type='pending') / 旧形式両対応
-    # id 形式: p_{session}_{cycle:04d}_{source[:8]}_{ms} (log entry の
-    # {session}_{cycle:04d} に対応)。dismiss 時はこの p_ prefix id を渡す。
-    pending = state.get("pending", [])
+    2026-05-16 hotfix: 消化済 pending を <recent_resolved> 別 tag に literal 分離。
+    V07 Phase 1 XML 化 (9bf95b3) で <pending> 内に resolved section を併置した結果、
+    LLM① が tag semantic で「pending = 未対応」と解釈し既消化 topic を再候補化する
+    現象 (cycle 40/45 同一 Self 説明 二重応答) を構造的に解消。段階9 fix 1 (a171de3)
+    の「完了認識を構造提供」設計意図は <recent_resolved> 側で literal 維持。
+
+    Args:
+        state: Noetic state dict (`pending` / `stream_active` / `stream_params` 含む)
+
+    Returns:
+        "<pending>\n  ...\n</pending>" XML block 文字列、未対応 pending のみ含む。
+    """
+    pending = state.get("pending", []) or []
+    pending_lines = []
     if pending:
-        # 段階9 fix 1: 未消化と消化済を分離。消化済 (observed_content 埋まり or
-        # gap=0.0) を "未対応事項" に出すと LLM が「まだ応答してない」と誤認する。
         unresolved = [p for p in pending
                       if p.get("observed_content") is None
                       and p.get("gap", 0.0) > 0.0]
-        resolved = [p for p in pending
-                    if p.get("observed_content") is not None
-                    or p.get("gap", 0.0) == 0.0]
 
-        pending_lines = []
         for p in sorted(unresolved, key=lambda x: -x.get("priority", 0))[:10]:
             p_type = p.get("type", "?")
-            # 段階10.5 Fix 2: content_intent 表示 (LLM 生成 why、表示用)
             content = (p.get("content_intent") or p.get("content", ""))[:80]
             p_id = p.get("id", "?")
             if p_type == "pending":
-                # UPS v2: source_action + lag_kind + gap + attempts + channel
                 source = p.get("source_action", "?")
                 lag = p.get("observation_lag_kind", "?")
                 gap_pct = round(p.get("gap", 0.0) * 100)
@@ -279,87 +270,183 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
                     f"  [pending dismiss={p_id} src={source} lag={lag} g={gap_pct}% x{attempts}{ch_tag}] {content} (cycle {origin}〜)"
                 )
             else:
-                # 旧形式 fallback (migration 期間 safety; Phase 5 iku 再生成後は消える)
                 p_ch = p.get("channel", "")
                 ch_tag = f" ch={p_ch}" if p_ch else ""
                 pending_lines.append(f"  [{p_type} dismiss={p_id}{ch_tag}] {content} ({p.get('timestamp','')})")
 
-        # 段階9 fix 1: 副次セクション。直近 3 件の消化済を参考表示し、
-        # LLM に「これは完了したこと」を構造的に認識させる。
-        if resolved:
-            resolved_sorted = sorted(
-                resolved,
-                key=lambda p: p.get("observed_time") or "",
-                reverse=True,
-            )[:3]
-            pending_lines.append("")
-            pending_lines.append("  【最近完了した応答 (参考、既に済)】")
-            for p in resolved_sorted:
-                ch = p.get("observed_channel") or p.get("expected_channel") or ""
-                ch_tag = f" ch={ch}" if ch else ""
-                src = p.get("source_action", "?")
-                obs_time = p.get("observed_time", "") or ""
-                # 段階10.5 Fix 2: content_intent 表示 (LLM 生成 why)
-                content = (p.get("content_intent") or p.get("content", ""))[:60]
-                pending_lines.append(
-                    f"  [完了 src={src}{ch_tag}] {content} → 観測済 ({obs_time})"
-                )
-
-        pending_text = "\n".join(pending_lines) if pending_lines else "  なし"
-    else:
-        pending_text = "  なし"
-
-    # 関連記憶（Entity/Opinionネットワーク）
-    # 段階11-C G-lite Phase 1: settings.retrieval から use_links/link_depth/link_top_n を配線
-    from core.memory import get_relevant_memories, format_memories_for_prompt
-    from core.config import llm_cfg
-    _retrieval_cfg = llm_cfg.get("retrieval", {}) or {}
-    memories = get_relevant_memories(
-        state, limit=8,
-        use_links=bool(_retrieval_cfg.get("use_links", False)),
-        link_depth=int(_retrieval_cfg.get("link_depth", 1)),
-        link_top_n=int(_retrieval_cfg.get("link_top_n", 3)),
-    )
-    memory_text = format_memories_for_prompt(memories) if memories else ""
-
-    # camera_stream アクティブ時の状態表示（並行活動を可視化）
-    stream_status_line = ""
+    stream_status = ""
     if state.get("stream_active"):
         sp = state.get("stream_params", {}) or {}
         _frames = sp.get("frames", "?")
         _frames_str = "無制限（stop呼出まで継続）" if _frames == 0 else str(_frames)
-        stream_status_line = (
+        stream_status = (
             f"\n[camera_stream アクティブ中: facing={sp.get('facing','?')} "
             f"frames={_frames_str} interval={sp.get('interval_sec','?')}s] "
             f"観察はバックグラウンドで継続中。他ツールを並行実行可能。"
             f"能動停止は camera_stream_stop。"
         )
 
-    # Step E-3b: 反応待ち表示は旧 pending_feedback 由来だったが、UPS v2 pending
-    # (retro_log_entry_id 付き + observed_content=None) が上記 [未対応事項] に
-    # 表示されることで代替される。重複表示を避けて削除。
+    body = "\n".join(pending_lines) if pending_lines else "  なし"
+    return f"<pending>\n{body}{stream_status}\n</pending>"
 
-    return f"""[{now}]{fire_cause_line}
 
-[自己モデル]
-{self_text}
+def _build_recent_resolved_block(state: dict) -> str:
+    """<recent_resolved> XML block helper (2026-05-16 hotfix)。
 
-[未対応事項]
-{pending_text}{stream_status_line}
-{f'{chr(10)}[関連記憶]{chr(10)}{memory_text}{chr(10)}' if memory_text else ''}
-[現在の状況]
-{f'summaries:{chr(10)}{summary_text}{chr(10)}' if summary_text else ''}log:
-{log_text}
+    消化済 pending (observed_content 有り or gap=0.0) を <pending> tag から literal
+    分離し、独立した <recent_resolved> tag で表示。段階9 fix 1 (a171de3) の
+    「完了認識を構造提供 (feedback_llm_as_brain 整合)」設計意図を XML 構造で literal
+    保持しつつ、V07 Phase 1 XML 化以降に observed された再候補化問題 (cycle 40/45
+    同一 Self 説明 二重応答) を tag 分離で構造的に解消する。
 
-[利用可能なツール]
+    直近 3 件のみ observed_time 降順で literal 表示。resolved 0 件なら空文字列を
+    返し、prompt 側で block 自体を省略する (空 XML block を出さない簡素性)。
+
+    Returns:
+        "<recent_resolved>\n  ...\n</recent_resolved>" XML block 文字列、
+        消化済 pending なしの場合は空文字列 "" を返す。
+    """
+    pending = state.get("pending", []) or []
+    if not pending:
+        return ""
+
+    resolved = [p for p in pending
+                if p.get("observed_content") is not None
+                or p.get("gap", 0.0) == 0.0]
+
+    if not resolved:
+        return ""
+
+    resolved_sorted = sorted(
+        resolved,
+        key=lambda p: p.get("observed_time") or "",
+        reverse=True,
+    )[:3]
+
+    lines = []
+    for p in resolved_sorted:
+        ch = p.get("observed_channel") or p.get("expected_channel") or ""
+        ch_tag = f" ch={ch}" if ch else ""
+        src = p.get("source_action", "?")
+        obs_time = p.get("observed_time", "") or ""
+        content = (p.get("content_intent") or p.get("content", ""))[:60]
+        lines.append(
+            f"  [完了 src={src}{ch_tag}] {content} → 観測済 ({obs_time})"
+        )
+
+    body = "\n".join(lines)
+    return f"<recent_resolved>\n{body}\n</recent_resolved>"
+
+
+def _build_recent_history_block(state: dict, limit: int = 5) -> str:
+    """<recent_history> XML block: subjective field (intent + e1-e4) のみ。
+
+    V07 Phase 1 commit 3 (PLAN §3-2-4 + 5 論点 ① ゆう確定):
+    tool/args/result は world_state.recent_events に任せる、重複ゼロ。
+
+    Bootstrap engine: subjective_entries 空でも "(no subjective entries)" を
+    explicit literal で表示 (Codex audit P3-03 fix)。
+    """
+    subj = state.get("subjective_entries", []) or []
+    if not subj:
+        return "<recent_history>\n  (no subjective entries)\n</recent_history>"
+
+    lines = []
+    for entry in subj[-limit:]:
+        intent = (entry.get("intent") or "")[:80]
+        ev_parts = []
+        for k in ("e1", "e2", "e3", "e4"):
+            v = entry.get(k)
+            if v is not None:
+                ev_parts.append(f"{k}={v}")
+        ev_text = ", ".join(ev_parts) if ev_parts else "(no eval)"
+        lines.append(f'  - intent: "{intent}" | {ev_text}')
+
+    body = "\n".join(lines)
+    return f"<recent_history>\n{body}\n</recent_history>"
+
+
+def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: str = "",
+                          fire_candidates: list = None, registry=None) -> str:
+    # V07 Phase 1 commit 3: subjective_state + world_state 相同並置 (PLAN §3-1)
+    # 旧 [自己モデル] / [関連記憶] / [現在の状況] は subjective_state / world_state /
+    # recent_history XML block に置換、tool/args/result は世界視点 (world_state) に
+    # 集約、subjective field (intent + e1-e4) は recent_history に集約 (重複ゼロ)。
+    from core.subjective_view import build_subjective_state
+    from core.world_state_view import build_world_state
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # subjective_view が state.self / memory_graph / related_memory を統合
+    subjective_state_block = build_subjective_state(state)
+    # world_state が file_snapshot / recent_events を統合
+    world_state_block = build_world_state(state)
+    recent_history_block = _build_recent_history_block(state, limit=5)
+
+    allowed = ctrl.get("allowed_tools", set(tools_dict.keys()))
+    tool_lines = _build_tool_lines(allowed, tools_dict, registry=registry)
+    # summaries は撤去せず残置 (cycle ごとの圧縮、未空時のみ表示)
+    summaries = state.get("summaries", [])
+    summary_lines = [
+        f"  [{s.get('label','')} {s.get('covers_from','').split(' ')[0]}〜{s.get('covers_to','').split(' ')[0]}] {s.get('text','')[:300]}"
+        for s in summaries
+    ]
+    summary_text = "\n".join(summary_lines)
+
+    # 段階13 Phase 4 commit 4 (PLAN §3-1 + §5-5): fire_candidates list があれば
+    # 両軸並走 list を LLM② に show、selection は LLM② 判断 (PLAN §5-5「△ 1 cycle 1 つ」literal)。
+    # tool_level ガード解除 (判断 #5 案 b、PLAN §3-3「育成中 cycle 5 で graph 候補が
+    # 薄く混ざる」literal 整合 = cycle 5 で LLM② に graph 候補が見える設計)。
+    # 表示 format は既存 [発火原因: X] inline 継承 (判断 #4 案 c、簡潔・統一)。
+    fire_cause_line = ""
+    if fire_candidates:
+        sorted_cands = sorted(
+            fire_candidates,
+            key=lambda c: c.get("score", 0.0),
+            reverse=True,
+        )
+        # 上位 10 件、kind 識別付き inline (例: "name1(pressure), name2(graph)")。
+        # score 表示なし (LLM② prompt 膨張回避 + selection 委譲、score 自体は内部計算用)。
+        inline_items = [
+            f"{c.get('name', '?')}({c.get('kind', '?')})"
+            for c in sorted_cands[:10]
+        ]
+        fire_cause_line = f"\n[発火候補: {', '.join(inline_items)}]"
+    elif fire_cause and ctrl.get("tool_level", 0) >= 2:
+        # backward compat: list 未指定時は既存 scalar 経路 (tool_level ガード継承)
+        fire_cause_line = f"\n[発火原因: {fire_cause}]"
+
+    # V07 Phase 1 hotfix: pending + stream_status を helper に集約 (commit 4 の
+    # prompt_assembly pending 欠落 bug を構造的に防止)
+    pending_block = _build_pending_block(state)
+
+    # 2026-05-16 hotfix: 消化済 pending を別 XML tag に分離 (cycle 40/45 再候補化 fix)
+    recent_resolved_block = _build_recent_resolved_block(state)
+    recent_resolved_section = f"\n{recent_resolved_block}" if recent_resolved_block else ""
+
+    # V07 Phase 1 hotfix (Codex audit AUD-P2-02 fix): summaries は recent_history の
+    # 後ろに移動 (PLAN §3-4 順序整合、subjective → world → pending → recent_resolved → history → summaries → tools → task)
+    summary_section = f"\n<summaries>\n{summary_text}\n</summaries>" if summary_text else ""
+    prompt_body = f"""[{now}]{fire_cause_line}
+
+{subjective_state_block}
+
+{world_state_block}
+
+{pending_block}{recent_resolved_section}
+
+{recent_history_block}{summary_section}
+
+<available_tools>
 {tool_lines}
+</available_tools>
 
-[候補生成プロトコル]
+<task>
 自己モデルと現在の状況を参照し、次にとりうる行動候補を【5個】列挙してください。
 
-※ log の result 欄に「[表示上 N/M字。ツール実行時は完全取得済]」と付いているのは、
-  コンテキスト予算の都合で表示を縮めているだけです。そのツール実行時は完全な結果を
-  受け取って処理済みなので、同じファイルを再読込する必要はありません。
+※ world_state.recent_events の result 欄に「[表示上 N/M字。ツール実行時は完全取得済]」と
+  付いているのは、コンテキスト予算の都合で表示を縮めているだけです。そのツール実行時は
+  完全な結果を受け取って処理済みなので、同じファイルを再読込する必要はありません。
+※ 5 cycle より古い tool 事実は world_fact_view tool で取得可能 (affordance、相同並置)。
 
 - 各候補は「全く異なる意図・目的」であること（同じ意図の候補は禁止）
 - 連続して実行したい場合は「ツール名+ツール名+...」形式で記述可（例: read_file+update_self, WebSearch+WebFetch+write_file）
@@ -372,5 +459,24 @@ def build_prompt_propose(state: dict, ctrl: dict, tools_dict: dict, fire_cause: 
 
 以下の形式で **5 候補** を出力してください (1 行 1 候補、行頭に番号 1〜5):
 [意図・目的] → ツール名（または ツール名+ツール名+...） / predicted_e2: XX / predicted_ec: 0.XX
+</task>
 
 [TOOL:...]は不要です。候補のみ出力してください。"""
+
+    # V07 Phase 1 hotfix (Codex audit AUD-P3-01 fix): LLM① 側 SOFT_LIMIT 警告
+    # (LLM② assemble_system_prompt のみ警告だったが、V07 で subjective + world 両 ring
+    # 追加分は LLM① 側にも乗るため overflow リスク同等)
+    try:
+        from core.prompt_assembly import SYSTEM_PROMPT_SOFT_LIMIT
+        from core.config import estimate_tokens
+        total = estimate_tokens(prompt_body)
+        if total > SYSTEM_PROMPT_SOFT_LIMIT:
+            import sys
+            print(
+                f"[build_prompt_propose] prompt トークン超過: {total} > {SYSTEM_PROMPT_SOFT_LIMIT}",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass  # graceful skip (estimate_tokens 不在等)
+
+    return prompt_body

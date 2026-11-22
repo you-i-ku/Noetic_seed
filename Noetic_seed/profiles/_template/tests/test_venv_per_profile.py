@@ -73,6 +73,24 @@ def test_bootstrap_uses_requirements_txt():
     )
 
 
+def test_bootstrap_installs_with_own_venv_python():
+    """同期は venv 自身の python で `-m pip` を呼ぶこと (2026-09-24)。
+
+    pip.exe stub には作成時の python.exe の絶対パスが埋め込まれており、
+    profile をコピーするとコピー元の venv に対して同期してしまう。
+    検出する誤実装: `_pip = .../pip.exe` を直接実行する旧実装。
+    """
+    src = MAIN_PY.read_text(encoding="utf-8")
+    _assert(
+        '[str(_venv_python), "-m", "pip", "install"' in src,
+        "venv 自身の python で -m pip install を呼んでいる",
+    )
+    _assert(
+        '"Scripts/pip.exe"' not in src and '"bin/pip"' not in src,
+        "pip.exe / bin/pip の stub を直接実行していない",
+    )
+
+
 def test_requirements_txt_exists_and_nonempty():
     """profile 内に requirements.txt が存在し、空でないこと。"""
     _assert(
@@ -95,5 +113,6 @@ if __name__ == "__main__":
     print("=== test_venv_per_profile ===")
     test_bootstrap_venv_uses_per_profile_path()
     test_bootstrap_uses_requirements_txt()
+    test_bootstrap_installs_with_own_venv_python()
     test_requirements_txt_exists_and_nonempty()
     print("=== all green ===")

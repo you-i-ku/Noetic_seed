@@ -5,7 +5,8 @@ iku の起動初頭で、身体 (state / memory / core / tools) の最低限の�
 自動復元を 1 回試行、それでも失敗なら手動介入を要求して exit(1)。
 
 検査項目 (PLAN §10-1):
-  1. state.json が JSON parse 可能 + 必須キー (cycle_id / tool_level / log)
+  1. state.json が JSON parse 可能 + 必須キー (cycle_id / tool_level /
+     subjective_entries) (段階13 Phase 0.1.D で log → subjective_entries 移行)
   2. memory/ 配下の JSON が全て parse 可能
   3. import テスト: core.controller / tools が import で副作用なく成功
 
@@ -21,12 +22,16 @@ iku の起動初頭で、身体 (state / memory / core / tools) の最低限の�
 """
 import importlib
 import json
+import pkgutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
-REQUIRED_STATE_KEYS: Tuple[str, ...] = ("cycle_id", "tool_level", "log")
+# 段階13 Phase 0.1.D: 新 schema 強制 — subjective_entries を必須化 (旧 log は撤去済)。
+# 既存プロファイル (log のみ存在) は本 check で fail する設計、新規 profile 前提
+# (smoke 慣習 = `_template_smokeN` clean profile)。ゆう判断「migration 不要」整合。
+REQUIRED_STATE_KEYS: Tuple[str, ...] = ("cycle_id", "tool_level", "subjective_entries")
 
 
 class SanityCheckError(Exception):
@@ -58,6 +63,8 @@ def _check_memory_jsons(profile_root: Path) -> None:
     if not memory_dir.exists():
         return  # 初回起動相当、問題なし
     for json_file in memory_dir.rglob("*.json"):
+        if json_file.is_relative_to(memory_dir / "state_generations"):
+            continue
         try:
             json.loads(json_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
@@ -65,28 +72,68 @@ def _check_memory_jsons(profile_root: Path) -> None:
             raise SanityCheckError(f"memory/{rel} の JSON parse 失敗: {e}")
 
 
-def _check_imports() -> None:
-    """core.controller / tools が import 可能か。
+def _enumerate_runtime_modules() -> list:
+    """`core.runtime` package 配下のサブモジュール名を動的列挙。
 
-    既に import 済 (smoke で main.py から走る場合) は reload で再評価、
-    未 import (test 環境) は新規 import_module。書換え後の構文エラーや
-    import 時に raise する例外を本検査で捕捉する。
+    Issue 5 fix (2026-05-02): `pkgutil.iter_modules` で `core/runtime/*.py` を
+    全列挙して import 検査対象に加える。range は **書換え可能 + 起動時必ず
+    通る path** に絞り、`core/` 直下 (memory.py / embedding.py 等) は対象外
+    (PEP 810 lazy import トレンド整合、副作用 import 回避)。
+
+    Returns:
+        ["core.runtime.bash_validation", "core.runtime.compaction", ...]
+
+    Raises:
+        SanityCheckError: `core.runtime` package 自体の import に失敗した場合
+            (= `core/runtime/__init__.py` が壊れている等)。
     """
-    for mod_name in ("core.controller", "tools"):
-        try:
-            if mod_name in sys.modules:
-                importlib.reload(sys.modules[mod_name])
-            else:
-                importlib.import_module(mod_name)
-        except Exception as e:
-            raise SanityCheckError(
-                f"{mod_name} の import 失敗: {type(e).__name__}: {e}"
-            )
+    try:
+        runtime_pkg = importlib.import_module("core.runtime")
+    except Exception as e:
+        raise SanityCheckError(
+            f"core.runtime package の import 失敗: {type(e).__name__}: {e}"
+        )
+    return [
+        name for _, name, _ in pkgutil.iter_modules(
+            runtime_pkg.__path__, prefix="core.runtime."
+        )
+    ]
 
 
-def _run_all_checks(profile_root: Path) -> None:
+def _check_imports() -> None:
+    """Check fresh imports in a disposable interpreter, never reload live modules.
+
+    Keep the original import coverage and import-time exception detection. The
+    child uses this profile and interpreter; -B prevents cache writes. A failed
+    or timed-out check follows the existing SanityCheckError/revert path.
+    """
+    script = (
+        "import importlib\n"
+        "from core.sanity_check import _enumerate_runtime_modules\n"
+        "for name in ('core.controller', 'tools', *_enumerate_runtime_modules()):\n"
+        "    importlib.import_module(name)\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SanityCheckError(
+            f"import check process failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "no diagnostic output")[-4000:]
+        raise SanityCheckError(f"import check failed (exit={result.returncode}): {detail}")
+
+
+
+def _run_all_checks(profile_root: Path, *, recover_state=False) -> None:
     """全 sanity check を実行、失敗時は SanityCheckError を伝播。"""
-    _check_state_json(profile_root)
+    if not recover_state:
+        _check_state_json(profile_root)
     _check_memory_jsons(profile_root)
     _check_imports()
 
@@ -143,6 +190,7 @@ def enforce_sanity_check(
     profile_name: str,
     *,
     auto_revert: bool = True,
+    recover_state: bool = False,
 ) -> None:
     """段階12 Step 6 (PLAN §10): 起動時 sanity check + 自動 revert ガード。
 
@@ -150,12 +198,14 @@ def enforce_sanity_check(
         profile_root: プロファイル workspace root
         profile_name: プロファイル名 (stash filter 用)
         auto_revert: True で失敗時に最新 iku-auto stash で自動 revert を 1 回試行
+        recover_state: main 起動時のみ True。state の診断を世代復旧に任せる。
 
     Raises:
         SystemExit(1): revert しても失敗、または auto_revert=False で失敗時。
     """
+    check_options = {"recover_state": True} if recover_state else {}
     try:
-        _run_all_checks(profile_root)
+        _run_all_checks(profile_root, **check_options)
         return  # 全 OK
     except SanityCheckError as e:
         print()
@@ -175,7 +225,7 @@ def enforce_sanity_check(
         sys.exit(1)
 
     try:
-        _run_all_checks(profile_root)
+        _run_all_checks(profile_root, **check_options)
         print(
             f"[sanity_check] revert 成功、起動続行 "
             f"(前回の改変は revert されました)"

@@ -75,7 +75,10 @@ def _update_energy(state: dict, e2: str, e3: str, e4: str) -> float:
 
 
 def eval_with_llm(intent: str, expect: str, result: str, recent_intents: list, call_llm_fn) -> dict | None:
-    """LLMにE1-E4を一括評価させる。失敗時はNone（ベクトル類似度にフォールバック）。"""
+    """LLMにE1-E4を一括評価させ、3項目以上をパースできれば辞書を返す。
+    3項目未満・例外時はNone。ベクトルによる補完はしない。
+    4項目の完全性・有限数値・0〜1の範囲は呼出側のhookで検証する。
+    """
     recent_str = " / ".join(recent_intents[:3]) if recent_intents else "(none)"
     prompt = f"""以下の行動を評価してください。各項目を0-100の数値で採点してください。
 説明や分析は不要です。必ず以下の形式のみで出力してください:
@@ -208,7 +211,9 @@ def calc_effective_change(tool_names: list[str], tool_result: str,
         score += 0.3 * (old_pending - new_pending)
 
     # --- 行動の意味的新規性（外界作用 or 内省の繰り返し検出）---
-    log = state_after.get("log", [])
+    # 段階13 Phase 0.1.D: tool (raw) + intent + result の両層参照 = merge view
+    from core.state import merge_log_view
+    log = merge_log_view(state_after)
     for tn in tool_names:
         if tn not in ACTIONABLE_TOOLS:
             continue
@@ -418,9 +423,16 @@ def update_unresolved_intents(
             # 拡張したことに伴い、threshold を 0.7 → 0.75 に引上げ
             # (simulate_prescription.py の実ログ検証で 23/23 pair が
             # 0.75 超、誤消化余地は限定的と確認)。
+            # 段階14 後 hotfix (2026-05-08): match_pattern.expected_channel="self"
+            # 固定を削除。外向き channel (output_display channel="device" 等) の
+            # tool 実行時、_matches で channel "device" != "self" が False を返し
+            # 永久残存していた (qwen smoke で cycle 42-49 の 7 cycle attractor
+            # 観察)。pending.expected_channel="self" は内省由来 flag として
+            # 維持、消化判定 (match_pattern) は source_action + 類似度のみで
+            # 行う設計に整合。段階11-A hotfix 3725db3 の「source_action か
+            # expected_channel いずれか必須」契約は source_action 残存で満たす。
             match_pattern={
                 "source_action": source_action,
-                "expected_channel": "self",
                 "observable_similarity_threshold": 0.75,
             },
         )

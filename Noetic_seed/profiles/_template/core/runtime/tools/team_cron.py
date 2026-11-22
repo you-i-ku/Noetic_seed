@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError, result_redactor
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -62,9 +62,9 @@ def team_create(inp: dict) -> str:
     members = inp.get("members") or []
     tasks = inp.get("tasks") or []
     if not name:
-        return "Error: name is required"
+        raise ToolError("Error: name is required")
     if not isinstance(members, list) or not members:
-        return "Error: members (non-empty list) is required"
+        raise ToolError("Error: members (non-empty list) is required")
     rec = _team_registry.create(name, members, tasks)
     return (f"Team created: id={rec.id} name={rec.name} "
             f"members={len(rec.members)} tasks={len(rec.tasks)}")
@@ -73,9 +73,9 @@ def team_create(inp: dict) -> str:
 def team_delete(inp: dict) -> str:
     tid = (inp.get("team_id") or "").strip()
     if not tid:
-        return "Error: team_id is required"
+        raise ToolError("Error: team_id is required")
     if not _team_registry.delete(tid):
-        return f"Error: team '{tid}' not found"
+        raise ToolError(f"Error: team '{tid}' not found")
     return f"Team {tid} deleted"
 
 
@@ -138,11 +138,11 @@ def cron_create(inp: dict) -> str:
     prompt = inp.get("prompt") or ""
     description = inp.get("description") or ""
     if not schedule:
-        return "Error: schedule is required"
+        raise ToolError("Error: schedule is required")
     if not prompt:
-        return "Error: prompt is required"
+        raise ToolError("Error: prompt is required")
     if not _validate_cron(schedule):
-        return f"Error: invalid cron schedule '{schedule}' (need 5 fields)"
+        raise ToolError(f"Error: invalid cron schedule '{schedule}' (need 5 fields)")
     rec = _cron_registry.create(schedule, prompt, description)
     return f"Cron created: id={rec.id} schedule={rec.schedule}"
 
@@ -153,7 +153,7 @@ def cron_list(inp: dict) -> str:
         return "No cron jobs."
     lines = [f"Cron jobs ({len(jobs)}):"]
     for j in jobs:
-        lines.append(f"  {j.id}  [{j.schedule}]  {j.prompt[:60]}"
+        lines.append(f"  {j.id}  [{j.schedule}]  {result_redactor()(j.prompt)[:60]}"
                      + (f"  ({j.description})" if j.description else ""))
     return "\n".join(lines)
 
@@ -161,9 +161,9 @@ def cron_list(inp: dict) -> str:
 def cron_delete(inp: dict) -> str:
     cid = (inp.get("cron_id") or "").strip()
     if not cid:
-        return "Error: cron_id is required"
+        raise ToolError("Error: cron_id is required")
     if not _cron_registry.delete(cid):
-        return f"Error: cron '{cid}' not found"
+        raise ToolError(f"Error: cron '{cid}' not found")
     return f"Cron {cid} deleted"
 
 

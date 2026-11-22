@@ -95,7 +95,7 @@ print("=== Section 4: 統合 (state 経由) ===")
 from core.prompt_assembly import build_world_model_section, assemble_system_prompt
 
 state_with_self = {
-    "log": [],
+    "raw_events": [], "subjective_entries": [],
     "session_id": "t",
     "cycle_id": 0,
     "self": {"name": "iku"},

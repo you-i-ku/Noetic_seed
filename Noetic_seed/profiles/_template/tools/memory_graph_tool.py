@@ -1,4 +1,6 @@
-"""memory_graph — 段階11-D Phase 0 Step 0.2 + 段階13 軽減 2: ego/global/both view.
+"""memory_graph — 段階11-D Phase 0 Step 0.2 + 段階13 軽減 2 + 段階13 Phase 5.
+
+view: ego / global / both (3 mode 配線完成)、global/both で graph_maturity natural unit を表示。
 
 self / memory を unified node とした graph 構造 tool。
 self virtual entries は state.self を描画時に on-the-fly で生成 (永続化なし)。
@@ -9,13 +11,23 @@ memory ↔ memory edges は memory_links.jsonl の永続 link を参照。
   nodes   : self (continuous, id 不変) + memory (kind 区別)
   edges   : memory↔memory (永続) + self↔memory (on-the-fly, similarity only)
   clusters: cluster_estimation 経由 (Phase 5 既実装、global/both view で表示)
-  frontier: Phase 4 で本実装、現状 section 出さない
+  frontier: Phase 4 で _frontier_count 確立、段階13 Phase 5 で global/both view に
+            frontier_node_count (leaf 整数) として表示
   trace   : 直近 memory / link 総数 (簡易 MVP)
 
 view:
   ego    : self 中心 (self facets + edges_self_to_memory + edges_memory_to_memory)
-  global : graph 全体俯瞰 (memory_total + clusters + topology summary)
+  global : graph 全体俯瞰 (memory_total + clusters + topology summary
+           + graph_maturity scalar + graph_maturity_breakdown 5 軸 + frontier_node_count)
   both   : ego + global の重畳
+
+PLAN §3-2 natural unit (graph_maturity 5 軸 + 集約 scalar) は段階13 Phase 5 で
+global/both view に追加 (Phase 4 で確立した compute_graph_maturity の breakdown 同梱版
+``compute_graph_maturity_with_breakdown`` を glue、新規計算なし)。``args.cluster_count`` /
+``args.frontier_count`` / ``args.focus_node`` placeholder は段階11-D Phase 0 Step 0.3 で
+ゆう判断採用された「案 b' (signature placeholder + future_views 明示)」の意図的後送り
+status を継続、本実装は別 Phase 候補 (perspective.viewer 統合 = 段階11-A Theory of Mind
+との橋渡しも別 Phase 候補)。
 
 channel は描画対象外 (channel = 界面 layer、self/memory = internal layer、layer 違反回避)。
 channel 永続化廃止論点は reserved memo に温存。
@@ -23,11 +35,13 @@ channel 永続化廃止論点は reserved memo に温存。
 出力: 中立 JSON 構造化 text (自然言語ゼロ、feedback_llm_as_brain 整合)。
 """
 import json
+from core.runtime.registry import ToolError
+from core.memory_read import MemoryReadReport
 from typing import Optional
 
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
-from core.memory import list_records
-from core.memory_links import list_links
+from core.memory import UNTAGGED_NETWORK, list_records
+from core.memory_links import list_links, LINK_SCAN_LIMIT, get_link_current_strength
 from core.state import load_state
 from core.tag_registry import list_registered_tags
 
@@ -76,14 +90,12 @@ def _build_self_node(state: dict, virtual_entries: list) -> dict:
     }
 
 
-def _list_all_memory_entries(limit_per_tag: int = ALL_MEMORY_LIMIT_PER_TAG) -> list:
-    """全登録 tag の memory entry を集約取得 (新しい順)."""
+def _list_all_memory_entries(limit_per_tag: int = ALL_MEMORY_LIMIT_PER_TAG, *, read_report=None) -> list:
+    """全登録 tag + untagged の memory entry を集約取得 (新しい順)."""
     out = []
-    for tag in list_registered_tags():
-        try:
-            recs = list_records(tag, limit=limit_per_tag)
-        except Exception:
-            continue
+    for tag in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
+        recs = list_records(tag, limit=limit_per_tag,
+                            **({"read_report": read_report} if read_report is not None else {}))
         out.extend(recs)
     return out
 
@@ -105,6 +117,8 @@ def _compute_self_to_memory_edges(virtual_entries: list, all_memory: list,
 
     try:
         all_vecs = _embed_sync(self_texts + mem_texts)
+    except ToolError:
+        raise
     except Exception:
         return edges
     if not all_vecs or len(all_vecs) != len(self_texts) + len(mem_texts):
@@ -118,6 +132,8 @@ def _compute_self_to_memory_edges(virtual_entries: list, all_memory: list,
         for j, mem in enumerate(all_memory):
             try:
                 sim = float(cosine_similarity(self_vecs[i], mem_vecs[j]))
+            except ToolError:
+                raise
             except Exception:
                 continue
             if sim < threshold:
@@ -133,22 +149,37 @@ def _compute_self_to_memory_edges(virtual_entries: list, all_memory: list,
     return edges
 
 
-def _compute_memory_edges() -> list:
+def _compute_memory_edges(current_cycle: Optional[int] = None, *, read_report=None) -> list:
     """memory ↔ memory edges を memory_links.jsonl から取得 (永続 link).
 
     Step 0.2 MVP: 全 link を flatten して返す。depth/top_n 制御は Phase 1+ で
     follow_links 経路と統合検討。
+
+    v0.5 Phase 5 Slice 4 F-003: edge dict に link-strength telemetry の 4 field
+    を additive expose (raw strength + lazy-decayed strength + usage_count +
+    last_used_cycle)。EMA 同型の strength update (11-D Phase 3、情報理論 / Active
+    Inference 数学フレームワーク表現) を view 層から観察可能にする。既存
+    ``confidence`` は保持、view-layer 拡張のみで graph material 不変。
+    decayed_strength は current_cycle 経由で計算、None 時は raw strength と同値
+    (Phase 2 以前 link は confidence にフォールバックする backward compat 経路、
+    memory_links._link_strength を get_link_current_strength 経由で集約)。
     """
     edges = []
-    for l in list_links(limit=10000):
+    for l in list_links(limit=LINK_SCAN_LIMIT, **({"read_report": read_report} if read_report is not None else {})):
         lt = l.get("link_type", "none")
         if lt == "none":
             continue
+        raw_strength = float(l.get("strength", l.get("confidence", 0.0)))
+        decayed = float(get_link_current_strength(l, current_cycle))
         edges.append({
             "from": l.get("from_id", ""),
             "to": l.get("to_id", ""),
             "relation": lt,
             "confidence": float(l.get("confidence", 0.0)),
+            "strength": raw_strength,
+            "decayed_strength": decayed,
+            "usage_count": int(l.get("usage_count", 0)),
+            "last_used_cycle": l.get("last_used_cycle"),
         })
     return edges
 
@@ -207,11 +238,19 @@ def _memory_graph(args: dict) -> str:
     """memory_graph tool 本体。出力は JSON 構造化 text (中立、自然言語ゼロ).
 
     args (PLAN §6-6 signature 互換):
-        view: "ego" (Step 0.2 で実装)、global / both は Phase 4/5 で descended
+        view: "ego" / "global" / "both" (段階13 軽減 2 で全 mode 配線完成)
         depth: int (default 2)
-        focus_node: ego view 中心切替用 (Phase 1+ で使用、Step 0.2 では受取のみ)
-        cluster_count: global view cluster 件数上限 (Phase 5 で使用、Step 0.2 では受取のみ)
-        frontier_count: frontier 候補件数上限 (Phase 4 で使用、Step 0.2 では受取のみ)
+        focus_node: ego view 中心切替用 (placeholder、案 b' 11-D 後送り status 継続)
+        cluster_count: global view cluster 件数上限 (placeholder、同上)
+        frontier_count: frontier 候補件数上限 (placeholder、同上)
+
+    出力 fields:
+        全 view 共通: ``view``, ``depth``, ``trace_recent``
+        ego/both: ``self``, ``edges_self_to_memory``, ``edges_memory_to_memory``
+        global/both (段階13 軽減 2): ``memory_total``, ``clusters``, ``topology``
+        global/both (段階13 Phase 5): ``graph_maturity`` (scalar),
+            ``graph_maturity_breakdown`` (5 軸 sigmoid 値 dict),
+            ``frontier_node_count`` (leaf 整数)
     """
     view = args.get("view", "ego")
     try:
@@ -225,14 +264,17 @@ def _memory_graph(args: dict) -> str:
     args.get("frontier_count")
 
     if view not in ("ego", "global", "both"):
-        return json.dumps({
+        raise ToolError(json.dumps({
             "error": f"view={view} は未対応",
             "supported_views": ["ego", "global", "both"],
-        }, ensure_ascii=False, indent=2)
+        }, ensure_ascii=False, indent=2))
 
+    report = MemoryReadReport()
     state = load_state()
-    all_memory = _list_all_memory_entries()
-    memory_edges = _compute_memory_edges()
+    all_memory = _list_all_memory_entries(read_report=report)
+    # v0.5 Phase 5 Slice 4 F-003: state.cycle_id を渡して decayed_strength を計算可能にする
+    current_cycle = state.get("cycle_id") if isinstance(state, dict) else None
+    memory_edges = _compute_memory_edges(current_cycle=current_cycle, read_report=report)
     trace = _compute_trace(all_memory, memory_edges)
 
     output: dict = {"view": view, "depth": depth}
@@ -249,6 +291,17 @@ def _memory_graph(args: dict) -> str:
         output["memory_total"] = len(all_memory)
         output["clusters"] = _compute_clusters_with_label(all_memory)
         output["topology"] = _compute_topology_summary(memory_edges)
+        # 段階13 Phase 5: PLAN §3-2 natural unit (5 軸 sigmoid + 集約 scalar) を
+        # global/both view に追加。Phase 4 で確立した graph_maturity / sub-score を
+        # tool 表示層に glue (新規計算なし、既存関数呼出のみ)。
+        from core.dynamic_composition import (
+            compute_graph_maturity_with_breakdown,
+            _frontier_count,
+        )
+        maturity = compute_graph_maturity_with_breakdown(state)
+        output["graph_maturity"] = maturity["graph_maturity"]
+        output["graph_maturity_breakdown"] = maturity["breakdown"]
+        output["frontier_node_count"] = _frontier_count(state)
 
     output["trace_recent"] = trace
-    return json.dumps(output, ensure_ascii=False, indent=2)
+    return report.result(json.dumps(output, ensure_ascii=False, indent=2))

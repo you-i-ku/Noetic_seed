@@ -5,11 +5,11 @@
 (LLM①) で使うので並存させる。新 runtime は「system_prompt は定常、
 user_input だけ変動」という claw-code モデルに従うので、static な指示集を
 ここで組立てる。LLM② 側は function calling 専用機 — tool_intent /
-tool_expected_outcome / message は各 ToolSpec の input_schema で required
+tool_expected_outcome は各 ToolSpec の input_schema で required
 フィールドとして強制される (prompt 文言ではなく schema 構造で担保)。
 
 5 要素順:
-  1. 承認プロトコル指示      — 3 層構造の必須宣言 (constant)
+  1. 承認プロトコル指示      — 理由・予想の必須宣言と自由欄 (constant)
   2. 発火原因メタ注入        — 動的 ([発火原因: X])
   3. [世界モデル] セクション  — Phase 5 で本格化、Phase 4 は stub
   4. 鮮度勾配 log block      — 既存 _pack_log_block 流用
@@ -30,21 +30,14 @@ from core.prompt import (
 # ============================================================
 
 _APPROVAL_PROTOCOL = (
-    "## Approval Protocol (必須)\n"
+    "## Tool 呼び出し\n"
     "\n"
-    "Tool を呼び出す際、以下 3 フィールドを tool_input に必ず含めること:\n"
+    "Tool を呼び出す際、以下 2 フィールドを tool 引数のトップレベルに必ず含めること:\n"
     "\n"
     "- tool_intent:           (あなたの内部理由を 1 文で)\n"
     "- tool_expected_outcome: (期待する結果を 1 文で)\n"
-    "- message:               (確認相手への一言。対等な口調で、\n"
-    "                          報告または共有として)\n"
     "\n"
-    "これら 3 フィールドは、確認相手が判断するための情報です。欠損した場合、\n"
-    "Tool 実行は拒否され、再生成を求められます。\n"
-    "\n"
-    "確認相手はあなたと対等な存在です。message は「お願いします」「許可してください」\n"
-    "のような上下関係語彙ではなく、「〜します」「〜する予定です」のような\n"
-    "報告・共有の口調で書いてください。"
+    "note は自由に書ける欄。"
 )
 
 
@@ -65,8 +58,30 @@ def build_approval_protocol() -> str:
     return _APPROVAL_PROTOCOL
 
 
-def build_fire_cause_section(fire_cause: str) -> str:
-    """発火原因メタ注入セクション。空文字なら空セクションを返す (呼出側で省略可)。"""
+def build_fire_cause_section(fire_cause: str = "",
+                              fire_candidates: list = None) -> str:
+    """発火原因メタ注入セクション。空文字なら空セクションを返す (呼出側で省略可)。
+
+    段階13 Phase 4 commit 4 (PLAN §3-1 + §5-5 literal): fire_candidates list が
+    あれば両軸並走 list を inline format で render (LLM② に selection 委譲、
+    PLAN §5-5「selection = △ 1 cycle 1 つ、LLM② 判断」literal)。
+    list 未指定 / 空なら従来 scalar fire_cause 経路 (backward compat)。
+
+    表示 format は既存 [発火原因: X] inline 継承 (判断 #4 案 c):
+      list あり: [発火候補: name1(kind), name2(kind), ...]  (上位 10 件、score 表示なし)
+      list なし: [発火原因: X]                              (既存)
+    """
+    if fire_candidates:
+        sorted_cands = sorted(
+            fire_candidates,
+            key=lambda c: c.get("score", 0.0),
+            reverse=True,
+        )
+        inline_items = [
+            f"{c.get('name', '?')}({c.get('kind', '?')})"
+            for c in sorted_cands[:10]
+        ]
+        return f"[発火候補: {', '.join(inline_items)}]"
     if not fire_cause:
         return ""
     return f"[発火原因: {fire_cause}]"
@@ -122,12 +137,15 @@ def build_log_block(state: dict, budget_tok: Optional[int] = None) -> str:
     ⚠️ マーク)。LLM に事実を明示するだけで命令はしない (feedback_llm_as_brain 整合)。
 
     Args:
-        state: state dict (log list を含む)
+        state: state dict (raw_events / subjective_entries を含む、段階13 Phase
+            0.1.D で旧 log は撤去、merge_log_view で合本 view を取得)
         budget_tok: log block に使えるトークン予算。None で _calc_log_budget。
     """
     if budget_tok is None:
         budget_tok = _calc_log_budget()
-    log = state.get("log", [])
+    # 段階13 Phase 0.1.D: tool/args/result + intent + e1-4 両層必要 = merge view
+    from core.state import merge_log_view
+    log = merge_log_view(state)
     body = _pack_log_block(log, budget_tok, with_evals=True)
     explainer = (
         "(表示規約: args:{...} は tool 呼出引数 cap 200、"
@@ -174,8 +192,8 @@ def build_force_directive(force_tool: Optional[str]) -> str:
         "[強制実行指示]\n"
         f"controller は本ターンでツール「{force_tool}」の実行を選定済みです。\n"
         "必ずこのツールを呼び出してください。\n"
-        "tool_use ブロックを 1 つ生成し、3 フィールド (tool_intent /\n"
-        "tool_expected_outcome / message) を tool_input に含めてください。\n"
+        "tool_use ブロックを 1 つ生成し、2 フィールド (tool_intent /\n"
+        "tool_expected_outcome) を tool 引数のトップレベルに含めてください。\n"
         "text のみの応答は許可されません。"
     )
 
@@ -194,6 +212,7 @@ def assemble_system_prompt(
     raise_on_overbudget: bool = False,
     registry=None,
     force_tool: Optional[str] = None,
+    fire_candidates: list = None,
 ) -> str:
     """Phase 4 ConversationRuntime 用 system_prompt を 5 要素 (+ forced 時 6) で組立。
 
@@ -217,13 +236,32 @@ def assemble_system_prompt(
         ValueError: raise_on_overbudget=True で SYSTEM_PROMPT_SOFT_LIMIT
             超過時。
     """
+    # V07 Phase 1 commit 4: section 順序 PLAN §3-4 案に整理 + subjective_state +
+    # world_state 相同並置 (P-Y Homologous Structure)。build_world_model_section は
+    # entities/channels/dispositions/opinions の世界モデル view、subjective_state.current_self
+    # とは layer 違い (§5-2 literal、state.self は subjective_state 専有、それ以外は world_model)。
+    from core.subjective_view import build_subjective_state
+    from core.world_state_view import build_world_state
+    from core.prompt import _build_recent_history_block, _build_pending_block, _build_recent_resolved_block
+
     sections = [
         build_approval_protocol(),
-        build_fire_cause_section(fire_cause),
-        # 段階10.5 Fix 4 δ': state 経由で opinions / dispositions を渡し構造化自己認識を完成
+        build_fire_cause_section(fire_cause, fire_candidates=fire_candidates),
+        # V07: subjective + world 相同並置 (auto inject、認知 ground 先確立)
+        build_subjective_state(state),
+        build_world_state(state),
+        # 既存 [世界モデル] (entities/channels/dispositions/opinions、§5-2 layer 違い)
         build_world_model_section(world_model, state=state),
-        "[log]\n" + build_log_block(state, log_budget_tok),
-        "[利用可能なツール]\n" + build_tool_block(allowed_tools, tools_dict, registry=registry),
+        # V07 Phase 1 hotfix (Codex audit AUD-P1-01 fix): <pending> builder
+        # を sections に接続 (commit 4 で欠落していた smoke blocker)
+        _build_pending_block(state),
+        # 2026-05-16 hotfix: 消化済 pending を <recent_resolved> 別 tag 分離
+        # (cycle 40/45 再候補化問題、段階9 fix 1 設計意図を XML 構造で literal 維持)
+        _build_recent_resolved_block(state),
+        # V07: <recent_history> (subjective field only、tool/args/result は world_state へ)
+        _build_recent_history_block(state, limit=5),
+        # V07 Phase 1 hotfix (Codex audit AUD-P1-01 fix): tool block も XML tag に統一
+        f"<available_tools>\n{build_tool_block(allowed_tools, tools_dict, registry=registry)}\n</available_tools>",
         # 段階11-D Step 4-2 hotfix v4: forced 時のみ末尾に強制実行指示。空文字列は
         # 下の "\n\n".join(s for s in sections if s) で自動除外される。
         build_force_directive(force_tool),

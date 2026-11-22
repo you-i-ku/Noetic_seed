@@ -13,6 +13,12 @@ websockets
 sqlalchemy
 aiosqlite
 
+# Slice 6.5 Step 2 (Phase E v1.1 2026-05-11): vMF mixture density 評価器の
+# 正規化定数 (modified Bessel function I_v(κ)) を 1024 次元で log scale 数値安定
+# 計算するため scipy.special.ive を使用 (PLAN §5.12.1 v1.1 literal)。
+# 思想中立な汎用数学関数の工具箱、numpy と並ぶ基盤レベル依存。
+scipy
+
 # embedding / vector
 onnxruntime
 tokenizers
@@ -39,3 +45,9 @@ claude-agent-sdk
 
 # self-test (iku の自己診断経路)
 pytest
+
+# 段階13 Phase 2: Layer C JEPA 流予測 (next entry の bge-m3 embedding 位置予測、
+# 空間的予測誤差 = cosine 距離)。CPU 版 wheel を確実に install するため
+# extra-index-url で PyTorch CPU を優先 (Noetic CPU 動作前提)。
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch

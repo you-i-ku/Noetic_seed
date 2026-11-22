@@ -1,15 +1,36 @@
 """controller × Predictor 統合乗算 (段階9 Step 2) 統合テスト。
 
-STAGE9 §4-3 / §7-4 の要件:
+STAGE9 §4-3 / §7-4 の要件 (旧 multiplicative selection 前提):
   - novelty × predicted_e2 の統合乗算が正しく効く
   - predicted_e2 が低い候補は強く抑制される
   - Medium 予測が candidate.prediction に入ってる場合、それが乗算に使われる
   - 候補間の相対重み差が predicted_e2 で変動する
 
-使い方:
+★ V07.5 commit 6 (PLAN v1.4 §4-1 commit 6 + Codex 1 周目 P3 literal): commit 3 paradigm
+shift で controller_select は **argmin_π G(π) literal selection** に置換、stochastic
+weighted sampling 前提 + `_predicted_outcome_multiplier` (pressure 由来) は撤去。本 test
+の 4 test_func は全て旧 multiplicative chain 前提のため、paradigm shift 後の literal
+setup (argmin G + JEPA predict_next_conditioned_batch + compute_efe_components + state
+構築) が大規模化、commit 7 wholesale review で literal 書き直し or 削除 reserved。
+
+新 paradigm shift の literal 健全性 verify は `test_v07_5_paradigm_shift.py` (commit 6
+新規 §6-1 ~ §6-10) で literal 達成済。
+
+使い方 (skip 後の literal 復活時、PLAN v1.5+ で reserved):
   cd Noetic_seed/profiles/_template
   "C:/Users/you11/Desktop/iku/Noetic_seed/.venv/Scripts/python.exe" tests/test_controller_predictor_integration.py
 """
+import pytest
+
+# V07.5 commit 6: file 全体 skip (paradigm shift で literal setup 大規模化、
+# commit 7 wholesale review で literal 書き直し or 削除 reserved)
+pytest.skip(
+    "V07.5 commit 3 paradigm shift で controller_select の literal 経路変更 "
+    "(multiplicative chain → argmin_π G(π))、本 test は旧前提のため commit 7 で literal rewrite or 削除予定。"
+    "新 paradigm shift verify は test_v07_5_paradigm_shift.py で literal 達成済",
+    allow_module_level=True,
+)
+
 import sys
 from pathlib import Path
 
@@ -21,6 +42,8 @@ from core.controller import (
 )
 from core.config import WORLD_MODEL_CFG
 from core.world_model import init_world_model
+# 段階14 Step C: mult = combined / BETA_BASE で multiplier 算出。
+from core.predictor import BETA_BASE
 
 
 def _assert(cond, label):
@@ -37,7 +60,7 @@ def test_medium_prediction_propagates_through_controller():
     print("== Medium prediction (candidate.prediction) が controller の乗算に反映 ==")
     wm = init_world_model()
     state = {
-        "energy": 50, "entropy": 0.65, "log": [], "pending": [],
+        "energy": 50, "entropy": 0.65, "raw_events": [], "subjective_entries": [], "pending": [],
         "world_model": wm,
     }
     ctrl = {"tool_rank": {"output_display": 60, "wait": 40}}
@@ -73,9 +96,14 @@ def test_low_predicted_e2_suppresses_weight():
         {"predicted_e2": 10}, cand_low, {}, WORLD_MODEL_CFG)
     m_high = _predicted_outcome_multiplier(
         {"predicted_e2": 90}, cand_high, {}, WORLD_MODEL_CFG)
+    # 段階14 Step C: mult = combined / BETA_BASE
+    e_low = 0.1 / BETA_BASE
+    e_high = 0.9 / BETA_BASE
     return all([
-        _assert(abs(m_low - 0.1) < 1e-9, f"pe2=10 → 0.1 (actual: {m_low})"),
-        _assert(abs(m_high - 0.9) < 1e-9, f"pe2=90 → 0.9 (actual: {m_high})"),
+        _assert(abs(m_low - e_low) < 1e-9,
+                f"combined=0.1, β=BETA_BASE → {e_low} (actual: {m_low})"),
+        _assert(abs(m_high - e_high) < 1e-9,
+                f"combined=0.9, β=BETA_BASE → {e_high} (actual: {m_high})"),
         _assert(m_high / m_low > 8.0,
                 f"pe2 高低の比 9 倍 (actual ratio: {m_high/m_low:.1f}x)"),
         _assert(any("low_outcome" in p for p in cand_low.get("penalties", [])),
@@ -92,7 +120,7 @@ def test_high_pe2_candidate_has_higher_weight_share():
     print("== 高 pe2 候補は低 pe2 候補より重み share が大きい ==")
     wm = init_world_model()
     state = {
-        "energy": 50, "entropy": 0.65, "log": [], "pending": [],
+        "energy": 50, "entropy": 0.65, "raw_events": [], "subjective_entries": [], "pending": [],
         "world_model": wm,
     }
     ctrl = {"tool_rank": {"tool_a": 50, "tool_b": 50}}
@@ -123,7 +151,7 @@ def test_missing_prediction_uses_light_fallback():
     print("== candidate.prediction なし → Light fallback で pe2 補填 ==")
     wm = init_world_model()
     state = {
-        "energy": 50, "entropy": 0.65, "log": [], "pending": [],
+        "energy": 50, "entropy": 0.65, "raw_events": [], "subjective_entries": [], "pending": [],
         "world_model": wm,
     }
     ctrl = {"tool_rank": {"output_display": 60}}

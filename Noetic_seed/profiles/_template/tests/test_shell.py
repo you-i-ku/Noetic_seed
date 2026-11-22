@@ -9,9 +9,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError
 from core.runtime.tools import shell
 
+
+
+def _expect_tool_error(fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+    except ToolError as exc:
+        return str(exc)
+    raise AssertionError("expected ToolError, not a successful string")
 
 def _assert(cond, label):
     status = "OK " if cond else "FAIL"
@@ -47,7 +55,7 @@ def test_bash_exit_code():
     if not shutil.which("bash"):
         return _skip("bash not in PATH")
     reg = _get_reg()
-    out = reg.execute("bash", {"command": "exit 42"})
+    out = _expect_tool_error(reg.execute, "bash", {"command": "exit 42"})
     return _assert("exit code: 42" in out, "exit code 42")
 
 
@@ -68,14 +76,14 @@ def test_bash_timeout():
     if not shutil.which("bash"):
         return _skip("bash not in PATH")
     reg = _get_reg()
-    out = reg.execute("bash", {"command": "sleep 5", "timeout": 1})
+    out = _expect_tool_error(reg.execute, "bash", {"command": "sleep 5", "timeout": 1})
     return _assert("timeout" in out.lower(), "timeout エラー")
 
 
 def test_bash_empty_command():
     print("== bash: empty command ==")
     reg = _get_reg()
-    out = reg.execute("bash", {"command": ""})
+    out = _expect_tool_error(reg.execute, "bash", {"command": ""})
     return _assert("required" in out.lower(), "empty rejected")
 
 
@@ -120,14 +128,14 @@ def test_repl_python():
 def test_repl_unsupported_lang():
     print("== REPL: unsupported language ==")
     reg = _get_reg()
-    out = reg.execute("REPL", {"code": "x", "language": "brainfuck"})
+    out = _expect_tool_error(reg.execute, "REPL", {"code": "x", "language": "brainfuck"})
     return _assert("unsupported" in out.lower(), "拒否")
 
 
 def test_repl_empty_code():
     print("== REPL: empty code ==")
     reg = _get_reg()
-    out = reg.execute("REPL", {"code": "", "language": "python"})
+    out = _expect_tool_error(reg.execute, "REPL", {"code": "", "language": "python"})
     return _assert("required" in out.lower(), "拒否")
 
 

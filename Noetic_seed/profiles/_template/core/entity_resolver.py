@@ -87,3 +87,82 @@ def find_similar_facts(new_entry: dict, *,
                             results.append((c, 3))
 
     return sorted(results, key=lambda x: x[1])
+
+
+# ============================================================
+# 段階13 Phase 1: subjective entry 類似検索 (Layer B sibling)
+# ============================================================
+
+def find_similar_subjective(new_entry: dict, *,
+                            embed_fn: Optional[Callable] = None,
+                            cosine_fn: Optional[Callable] = None,
+                            limit: int = 50) -> list:
+    """段階13 Phase 1: subjective_entries.jsonl 内の類似 entry を embedding で検索。
+
+    PLAN §18-A4 (iv') literal「既存基盤フル流用」+ §21-6 (c) literal「signature 拡張
+    じゃなく新 sibling 推奨」整合。`find_similar_facts` (memory entry 専用、network
+    必須、Tier 1 metadata.entity_name) とは構造が違うため別関数化:
+      - subjective entry は network / metadata.entity_name 概念なし
+      - text 組み立ては intent + expect (Phase 0.4 / Phase 1 enrichment と同 text)
+      - Tier は embedding only (SAME / DIFFERENT 同 threshold 流用)、Tier 1 metadata
+        相当の素直な exact match 軸が無い
+
+    Tier 構造 (find_similar_facts と同 threshold):
+      - Tier 2: cosine >= EMBEDDING_SAME_THRESHOLD (0.85) — 濃厚類似
+      - Tier 3: EMBEDDING_DIFFERENT_THRESHOLD <= cosine < SAME (0.70-0.85) — 潜在類似
+
+    Args:
+        new_entry: 比較元の subjective entry dict (intent / expect 必須)
+        embed_fn: (list[str]) -> list[list[float]]。None で skip
+        cosine_fn: (vec, vec) -> float。None で skip
+        limit: 走査対象 subjective entry 件数上限 (cost 抑制)
+
+    Returns:
+        [(candidate_entry, tier), ...] — tier 昇順ソート
+    """
+    if embed_fn is None or cosine_fn is None:
+        return []
+
+    new_intent = new_entry.get("intent", "") or ""
+    new_expect = new_entry.get("expect", "") or ""
+    if not new_intent and not new_expect:
+        return []
+    new_text = f"intent: {new_intent}\nexpect: {new_expect}"
+    new_id = new_entry.get("id", "")
+
+    # 段階13 Phase 1: filter 順序 (filter → limit) を non_empty_subjective_entries
+    # 経由で集約 (Codex review 2 周目指摘)。limit 前に blank filter しないと、
+    # 先頭 limit 件が raw event 起源 (id-only) の場合に real subj が embedding 計算
+    # 対象外になる + 意味なし `intent: \nexpect: ` text を embed する 2 種の bug。
+    from core.memory import load_all_subjective_entries, non_empty_subjective_entries
+    all_entries = non_empty_subjective_entries(load_all_subjective_entries())
+    candidates = [e for e in all_entries if e.get("id") != new_id][:limit]
+    if not candidates:
+        return []
+
+    cand_texts = []
+    for c in candidates:
+        ci = c.get("intent", "") or ""
+        ce = c.get("expect", "") or ""
+        cand_texts.append(f"intent: {ci}\nexpect: {ce}")
+
+    try:
+        vecs = embed_fn([new_text] + cand_texts)
+    except Exception:
+        return []
+    if not vecs or len(vecs) != 1 + len(candidates):
+        return []
+
+    query_vec = vecs[0]
+    results: list = []
+    for i, c in enumerate(candidates):
+        try:
+            sim = float(cosine_fn(query_vec, vecs[i + 1]))
+        except Exception:
+            continue
+        if sim >= EMBEDDING_SAME_THRESHOLD:
+            results.append((c, 2))
+        elif EMBEDDING_DIFFERENT_THRESHOLD <= sim < EMBEDDING_SAME_THRESHOLD:
+            results.append((c, 3))
+
+    return sorted(results, key=lambda x: x[1])

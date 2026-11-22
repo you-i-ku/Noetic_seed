@@ -3,7 +3,7 @@
 claw-code 参照: rust/crates/runtime/src/user_interaction.rs, config_tools.rs
 
 AskUserQuestion / SendUserMessage は runtime 外の UI レイヤー (ws_server 等)
-への橋渡しだけ。callback がなければ「pending」を返す。
+への橋渡しだけ。callback がなければ従来の「pending」文面で ToolError を送る。
 Config は settings.json の get/set。
 """
 import json
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError, result_redactor
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -38,18 +38,20 @@ def ask_user_question(inp: dict) -> str:
     question = (inp.get("question") or "").strip()
     options = inp.get("options") or []
     if not question:
-        return "Error: question is required"
+        raise ToolError("Error: question is required")
 
     fn = _ui_bridge.get("ask_user")
     if fn is None:
         # UI レイヤー未接続時は質問を保留として返す
-        return ("[AskUserQuestion pending — UI bridge not configured]\n"
+        raise ToolError("[AskUserQuestion pending — UI bridge not configured]\n"
                 f"Question: {question}\n"
                 f"Options: {options if options else '(free-form)'}")
     try:
         answer = fn(question, options)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: ask_user callback failed: {e}"
+        raise ToolError(f"Error: ask_user callback failed: {e}")
     return f"User answered: {answer}"
 
 
@@ -62,19 +64,21 @@ def send_user_message(inp: dict) -> str:
     attachments = inp.get("attachments") or []
     status = (inp.get("status") or "normal").lower()
     if status not in ("normal", "proactive"):
-        return f"Error: invalid status '{status}'"
+        raise ToolError(f"Error: invalid status '{status}'")
     if not message:
-        return "Error: message is required"
+        raise ToolError("Error: message is required")
 
     fn = _ui_bridge.get("send_user")
     if fn is None:
-        return (f"[SendUserMessage pending — UI bridge not configured]\n"
+        raise ToolError(f"[SendUserMessage pending — UI bridge not configured]\n"
                 f"Status: {status}\n"
-                f"Message: {message[:500]}")
+                f"Message: {result_redactor()(message)[:500]}")
     try:
         fn(message, attachments, status)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: send_user callback failed: {e}"
+        raise ToolError(f"Error: send_user callback failed: {e}")
     # 段階10 Step 4 付帯 D: Fix 5 精神で sent message truncation 撤去
     return f"Sent ({status}): {message}"
 
@@ -87,8 +91,10 @@ def structured_output(inp: dict) -> str:
     """入力をそのまま JSON 整形して返すだけ (agent が構造化結果を返すための通路)。"""
     try:
         return json.dumps(inp, ensure_ascii=False, indent=2)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: serialize failed: {e}"
+        raise ToolError(f"Error: serialize failed: {e}")
 
 
 # ============================================================
@@ -101,18 +107,22 @@ def _make_config(settings_path: Path) -> Callable:
         value = inp.get("value")  # None = get, else = set
 
         if not setting:
-            return "Error: setting is required"
+            raise ToolError("Error: setting is required")
 
         if not settings_path.exists():
             try:
                 settings_path.write_text("{}", encoding="utf-8")
+            except ToolError:
+                raise
             except Exception as e:
-                return f"Error: cannot create settings file: {e}"
+                raise ToolError(f"Error: cannot create settings file: {e}")
 
         try:
             data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: invalid settings JSON: {e}"
+            raise ToolError(f"Error: invalid settings JSON: {e}")
 
         # dot 記法対応 (e.g. "provider.model")
         keys = setting.split(".")
@@ -122,7 +132,7 @@ def _make_config(settings_path: Path) -> Callable:
             node = data
             for k in keys:
                 if not isinstance(node, dict) or k not in node:
-                    return f"Error: setting '{setting}' not found"
+                    raise ToolError(f"Error: setting '{setting}' not found")
                 node = node[k]
             return json.dumps({setting: node}, ensure_ascii=False)
 
@@ -138,8 +148,10 @@ def _make_config(settings_path: Path) -> Callable:
                 json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: write failed: {e}"
+            raise ToolError(f"Error: write failed: {e}")
         return f"Set {setting} = {json.dumps(value, ensure_ascii=False)}"
 
     return config

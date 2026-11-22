@@ -229,32 +229,24 @@ def test_get_recent_outputs_resolves_args_channel():
     等の tool タグ由来で、実送信先は args.channel に入る。args.channel を
     優先、空なら top-level に fallback する二次 filter の動作確認。"""
     print("== noetic_seed_get_recent_outputs: args.channel 二次 filter ==")
+    # 段階13 Phase 0.1.D: noetic_seed_get_recent_outputs は merge_log_view 経由で
+    # raw_events + subjective_entries を id zip。fixture は両層に同 id で entry
+    # を入れる必要がある (raw 側に tool/channel/args/result/time、subjective 側に
+    # 対応する id 共有 entry)。今回 entry の field は raw 寄りのため raw_events
+    # のみに入れる + subjective_entries は対応 id だけの shell entry を入れる。
+    _entries = [
+        {"id": "ev1", "tool": "output_display", "channel": "display",
+         "args": {"channel": "claude"}, "time": "2026-04-20T12:00:00",
+         "result": "hello claude", "cycle_id": 10},
+        {"id": "ev2", "tool": "output_display", "channel": "display",
+         "args": {"channel": "device"}, "time": "2026-04-20T12:00:10",
+         "result": "hello device", "cycle_id": 11},
+        {"id": "ev3", "tool": "output_display", "channel": "claude",
+         "time": "2026-04-20T12:00:20", "result": "legacy claude", "cycle_id": 12},
+    ]
     fake_state = {
-        "log": [
-            {
-                "tool": "output_display",
-                "channel": "display",             # tool タグ由来
-                "args": {"channel": "claude"},    # 実送信先
-                "time": "2026-04-20T12:00:00",
-                "result": "hello claude",
-                "cycle_id": 10,
-            },
-            {
-                "tool": "output_display",
-                "channel": "display",
-                "args": {"channel": "device"},
-                "time": "2026-04-20T12:00:10",
-                "result": "hello device",
-                "cycle_id": 11,
-            },
-            {
-                "tool": "output_display",
-                "channel": "claude",              # legacy (top-level のみ)
-                "time": "2026-04-20T12:00:20",
-                "result": "legacy claude",
-                "cycle_id": 12,
-            },
-        ]
+        "raw_events": list(_entries),
+        "subjective_entries": [{"id": e["id"]} for e in _entries],
     }
     with patch("core.runtime.mcp.server.seed_tools.load_state",
                return_value=fake_state):
@@ -278,32 +270,22 @@ def test_get_recent_outputs_recognizes_chain_tool():
     段階9 smoke cycle 21 で iku が output_display+pending_observe chain で
     claude 応答送信、完全一致 filter に引っかかって取得できなかった副次バグの修正。"""
     print("== noetic_seed_get_recent_outputs: chain tool 認識 ==")
+    # 段階13 Phase 0.1.D: merge_log_view 経由 (上 test と同パターン)
+    _entries = [
+        {"id": "ch1", "tool": "output_display+pending_observe",
+         "channel": "display", "args": {"channel": "claude"},
+         "time": "2026-04-20T12:00:00", "result": "chain hello", "cycle_id": 21},
+        {"id": "ch2", "tool": "pending_observe+output_display",
+         "channel": "display", "args": {"channel": "claude"},
+         "time": "2026-04-20T12:00:05", "result": "reverse chain hello",
+         "cycle_id": 22},
+        {"id": "ch3", "tool": "some_other_tool+read_file",
+         "channel": "claude", "time": "2026-04-20T12:00:10",
+         "result": "should be excluded", "cycle_id": 23},
+    ]
     fake_state = {
-        "log": [
-            {
-                "tool": "output_display+pending_observe",  # chain tool
-                "channel": "display",
-                "args": {"channel": "claude"},
-                "time": "2026-04-20T12:00:00",
-                "result": "chain hello",
-                "cycle_id": 21,
-            },
-            {
-                "tool": "pending_observe+output_display",  # 逆順 chain
-                "channel": "display",
-                "args": {"channel": "claude"},
-                "time": "2026-04-20T12:00:05",
-                "result": "reverse chain hello",
-                "cycle_id": 22,
-            },
-            {
-                "tool": "some_other_tool+read_file",  # output_display なし
-                "channel": "claude",
-                "time": "2026-04-20T12:00:10",
-                "result": "should be excluded",
-                "cycle_id": 23,
-            },
-        ]
+        "raw_events": list(_entries),
+        "subjective_entries": [{"id": e["id"]} for e in _entries],
     }
     with patch("core.runtime.mcp.server.seed_tools.load_state",
                return_value=fake_state):

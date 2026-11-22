@@ -70,7 +70,7 @@ _assert(
 print("=== Section 2: assemble_system_prompt 全体 ===")
 
 state = {
-    "log": [],
+    "raw_events": [], "subjective_entries": [],
     "session_id": "t",
     "cycle_id": 0,
     "self": {"name": "iku"},

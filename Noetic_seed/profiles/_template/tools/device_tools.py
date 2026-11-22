@@ -4,6 +4,7 @@ WebSocket device_request/response プロトコルを使用。
 camera_stream は非同期実行: 承認後 Android に fire-and-forget でコマンドを送り、
 Android が各フレームを stream_frame メッセージで送信してくる（ws_server が蓄積）。
 """
+from core.runtime.registry import ToolError, ToolResult
 import base64
 import time
 from datetime import datetime
@@ -50,27 +51,27 @@ def _camera_stream(args) -> str:
     """
     facing = args.get("facing", "back").strip().lower()
     if facing not in ("front", "back"):
-        facing = "back"
+        raise ToolError("エラー: facing は front/back のいずれかを指定してください")
 
     try:
         frames = int(args.get("frames", "5"))
     except (ValueError, TypeError):
-        frames = 5
+        raise ToolError("エラー: frames は 0（無制限）または 1-30 の範囲で指定してください")
     try:
         interval_sec = float(args.get("interval_sec", "1.0"))
     except (ValueError, TypeError):
-        interval_sec = 1.0
+        raise ToolError("エラー: interval_sec は 0.3-5.0 の範囲で指定してください")
 
     # frames=0: 無制限モード（Pattern B、Android 側の絶対上限10分が発動するまで継続）
     # frames=1-30: 指定枚数で自動終了（Pattern A）
     if frames != 0 and not (1 <= frames <= 30):
-        return "エラー: frames は 0（無制限）または 1-30 の範囲で指定してください"
+        raise ToolError("エラー: frames は 0（無制限）または 1-30 の範囲で指定してください")
     if not (0.3 <= interval_sec <= 5.0):
-        return "エラー: interval_sec は 0.3-5.0 の範囲で指定してください"
+        raise ToolError("エラー: interval_sec は 0.3-5.0 の範囲で指定してください")
 
     state = load_state()
     if state.get("stream_active"):
-        return "エラー: 既に camera_stream がアクティブです。camera_stream_stop で停止してから再開してください"
+        raise ToolError("エラー: 既に camera_stream がアクティブです。camera_stream_stop で停止してから再開してください")
 
     if frames == 0:
         summary = f"facing={facing} frames=無制限 interval={interval_sec}s (camera_stream_stopで明示終了、未指定なら最大10分)"
@@ -79,9 +80,12 @@ def _camera_stream(args) -> str:
         summary = f"facing={facing} frames={frames} interval={interval_sec}s (約{estimated_sec:.1f}秒)"
     preview = _build_approval_preview("camera_stream", summary, args)
     if not request_approval("camera_stream", preview, timeout_sec=60):
-        return "キャンセル: 撮影は承認されませんでした"
+        raise ToolError("キャンセル: 撮影は承認されませんでした")
 
     # 前回のストリームフレームが残ってたらクリア
+    state = load_state()
+    if state.get("stream_active"):
+        raise ToolError("stream became active while awaiting approval")
     clear_stream_buffer()
 
     # Android に非同期で送信（応答を待たない）
@@ -134,6 +138,7 @@ def _camera_stream(args) -> str:
             "この画像を 1-2 文で簡潔に描写してください。"
         )
 
+    description_error = None
     try:
         from core.llm import call_llm
         description = call_llm(
@@ -142,22 +147,28 @@ def _camera_stream(args) -> str:
             temperature=0.7,
             image_paths=[str(first_full)],
         ).strip()
+        if not description:
+            description_error = {"empty_response": True}
     except Exception as e:
+        # The stream has already started. Report this secondary failure as
+        # successful acquisition with detail, including an explicit ToolError.
         description = f"（描写取得失敗: {e}）"
+        description_error = {"exception_type": type(e).__name__, "message": str(e)}
 
-    return (
+    message = (
         f"ストリーム開始成功: facing={facing} frames={frames} interval={interval_sec}s\n"
         f"最初のフレーム: {first_rel}\n"
         f"最初のフレーム観察: {description}\n"
         f"観察は継続中（後続フレームは次サイクル以降で視覚入力に入る）。camera_stream_stop で能動停止できます。"
     )
+    return ToolResult(message, {"description_error": description_error}) if description_error else message
 
 
 def _camera_stream_stop(args) -> str:
     """アクティブな camera_stream を停止する。"""
     state = load_state()
     if not state.get("stream_active"):
-        return "エラー: アクティブな camera_stream がありません"
+        raise ToolError("エラー: アクティブな camera_stream がありません")
 
     # 停止時点のバッファ状況を取得
     frames, counter, _ended = get_stream_snapshot(consume_end=False)
@@ -196,20 +207,20 @@ def _screen_peek(args) -> str:
     try:
         frames = int(args.get("frames", "5"))
     except (ValueError, TypeError):
-        frames = 5
+        raise ToolError("エラー: frames は 0（無制限）または 1-30 の範囲で指定してください")
     try:
         interval_sec = float(args.get("interval_sec", "1.0"))
     except (ValueError, TypeError):
-        interval_sec = 1.0
+        raise ToolError("エラー: interval_sec は 0.3-5.0 の範囲で指定してください")
 
     if frames != 0 and not (1 <= frames <= 30):
-        return "エラー: frames は 0（無制限）または 1-30 の範囲で指定してください"
+        raise ToolError("エラー: frames は 0（無制限）または 1-30 の範囲で指定してください")
     if not (0.3 <= interval_sec <= 5.0):
-        return "エラー: interval_sec は 0.3-5.0 の範囲で指定してください"
+        raise ToolError("エラー: interval_sec は 0.3-5.0 の範囲で指定してください")
 
     state = load_state()
     if state.get("stream_active"):
-        return "エラー: 既に camera_stream または screen_peek がアクティブです。camera_stream_stop で停止してください"
+        raise ToolError("エラー: 既に camera_stream または screen_peek がアクティブです。camera_stream_stop で停止してください")
 
     if frames == 0:
         summary = f"frames=無制限 interval={interval_sec}s (camera_stream_stopで明示終了、未指定なら最大10分)"
@@ -218,8 +229,11 @@ def _screen_peek(args) -> str:
         summary = f"frames={frames} interval={interval_sec}s (約{estimated_sec:.1f}秒)"
     preview = _build_approval_preview("screen_peek", summary, args)
     if not request_approval("screen_peek", preview, timeout_sec=60):
-        return "キャンセル: 画面キャプチャは承認されませんでした"
+        raise ToolError("キャンセル: 画面キャプチャは承認されませんでした")
 
+    state = load_state()
+    if state.get("stream_active"):
+        raise ToolError("stream became active while awaiting approval")
     clear_stream_buffer()
 
     # Android に非同期で送信
@@ -274,6 +288,7 @@ def _screen_peek(args) -> str:
             "この画像を 1-2 文で簡潔に描写してください。"
         )
 
+    description_error = None
     try:
         from core.llm import call_llm
         description = call_llm(
@@ -282,15 +297,21 @@ def _screen_peek(args) -> str:
             temperature=0.7,
             image_paths=[str(first_full)],
         ).strip()
+        if not description:
+            description_error = {"empty_response": True}
     except Exception as e:
+        # The stream has already started. Report this secondary failure as
+        # successful acquisition with detail, including an explicit ToolError.
         description = f"（描写取得失敗: {e}）"
+        description_error = {"exception_type": type(e).__name__, "message": str(e)}
 
-    return (
+    message = (
         f"画面キャプチャ開始成功: frames={frames} interval={interval_sec}s\n"
         f"最初のフレーム: {first_rel}\n"
         f"最初のフレーム観察: {description}\n"
         f"観察は継続中（後続フレームは次サイクル以降で視覚入力に入る）。camera_stream_stop で能動停止できます。"
     )
+    return ToolResult(message, {"description_error": description_error}) if description_error else message
 
 
 def _mic_record(args) -> str:
@@ -313,16 +334,16 @@ def _mic_record(args) -> str:
     try:
         duration_sec = float(args.get("duration_sec", "5.0"))
     except (ValueError, TypeError):
-        duration_sec = 5.0
+        raise ToolError("エラー: duration_sec は 1.0-30.0 の範囲で指定してください")
     if not (1.0 <= duration_sec <= 30.0):
-        return "エラー: duration_sec は 1.0-30.0 の範囲で指定してください"
+        raise ToolError("エラー: duration_sec は 1.0-30.0 の範囲で指定してください")
 
     language = (args.get("language", "") or "").strip() or None
 
     summary = f"duration={duration_sec:.1f}s" + (f" lang={language}" if language else "")
     preview = _build_approval_preview("mic_record", summary, args)
     if not request_approval("mic_record", preview, timeout_sec=60):
-        return "キャンセル: 録音は承認されませんでした"
+        raise ToolError("キャンセル: 録音は承認されませんでした")
 
     # Android にリクエスト（同期、応答待ち）
     # タイムアウトは録音時間 + 余裕（録音準備 + 送信 + 余裕）
@@ -330,28 +351,41 @@ def _mic_record(args) -> str:
     response = request_device("mic_record", {"duration_sec": duration_sec}, timeout_sec=timeout)
     if not response or not response.get("success"):
         err = (response or {}).get("error", "不明なエラー")
-        return f"録音失敗: {err}"
+        raise ToolError(f"録音失敗: {err}")
 
     audio_b64 = response.get("data", "")
     if not audio_b64:
-        return "録音失敗: data が空です"
+        raise ToolError("録音失敗: data が空です")
 
     # WAV を sandbox/audio/ に保存
-    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     wav_path = AUDIO_DIR / f"mic_{ts}.wav"
     try:
-        wav_path.write_bytes(base64.b64decode(audio_b64))
+        AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+        wav_path.write_bytes(base64.b64decode(audio_b64, validate=True))
+    except ToolError:
+        raise
     except Exception as e:
-        return f"WAV 保存失敗: {e}"
+        raise ToolError(f"WAV 保存失敗: {e}")
 
     # 解析
     try:
         from core.audio import analyze_audio, format_audio_result
         result = analyze_audio(str(wav_path), language=language)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"音声解析失敗: {type(e).__name__}: {e}"
+        raise ToolError(f"音声解析失敗: {type(e).__name__}: {e}")
 
     rel = wav_path.relative_to(BASE_DIR).as_posix()
     formatted = format_audio_result(result, duration_sec)
-    return f"{formatted}\n保存先: {rel}"
+    message = f"{formatted}\n保存先: {rel}"
+    speech_ok = result.get("speech") is not None
+    ambient_ok = result.get("ambient") is not None
+    if not speech_ok or not ambient_ok:
+        detail = {"speech_succeeded": speech_ok, "ambient_succeeded": ambient_ok,
+                  "errors": result.get("errors", [])}
+        if not speech_ok and not ambient_ok:
+            raise ToolError(message, detail=detail)
+        return ToolResult(message, detail=detail)
+    return message

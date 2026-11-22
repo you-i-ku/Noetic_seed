@@ -17,6 +17,8 @@ link 生成タイミング: memory_store 同期 + top-K=5 近傍のみ LLM judge
 3 field 追加 (Phase 3 Physarum update の前準備、§-1 v1「initial strength =
 confidence」自然 migration)。
 """
+from core.runtime.registry import result_redactor
+
 import json
 import re
 import uuid
@@ -44,6 +46,13 @@ PHYSARUM_ALPHA = 0.1                 # up rate (Tero 2007 + EMA 典型値 0.01-0
 PHYSARUM_BETA = 0.05                 # decay rate (Tero 2007 + 半減期 14 cycle)
 STRENGTH_CAP = 1.0                   # 数学派生 saturate ceiling (α=0.1 で 10 連続 hit で saturate)
 PRUNING_STRENGTH_RATIO = 0.15        # pruning threshold = initial × 0.15 (動的相対基準)
+# graph 全走査時の link 取得上限 (default list_links limit=200 では不足)。
+# 段階11-C G-lite Phase 1 (commit 40867f2c) で確立した慣習値。隠れ根拠は
+# 本 module の pruning 機構 (PHYSARUM_BETA + PRUNING_STRENGTH_RATIO) で
+# idle link が ≒ 56 cycle で削除される設計 = 実運用で 10000 行頭打ち想定。
+# smoke 観察で実値判明したら本定数を更新、全 5 利用箇所 (dynamic_composition /
+# tag_emergence_monitor / memory_graph_tool / reflection / 本 module) に一括反映。
+LINK_SCAN_LIMIT = 10000
 
 
 def _compute_pruning_idle_cycles() -> int:
@@ -87,6 +96,30 @@ def _apply_lazy_decay(link: dict, current_cycle: int) -> float:
     return strength * ((1.0 - PHYSARUM_BETA) ** elapsed)
 
 
+def get_link_current_strength(link: dict,
+                              current_cycle: Optional[int] = None) -> float:
+    """link の現在 strength を取得 (current_cycle 指定時は lazy decay 適用後)。
+
+    v0.5 Phase 5 Slice 4 F-003: memory_graph view 層で decayed_strength を
+    露出するための公開 API。私的関数 (_link_strength / _apply_lazy_decay) の
+    呼び分けを集約、view-layer から module 越境せず利用可能にする。
+
+    Args:
+        link: link entry dict
+        current_cycle: 現 cycle 番号。None なら raw strength を返す。
+
+    Returns:
+        current_cycle 指定時は lazy decay 適用後の strength (read-only、link 不変)、
+        None 時は raw strength。
+    """
+    if current_cycle is not None:
+        try:
+            return _apply_lazy_decay(link, current_cycle)
+        except Exception:
+            pass
+    return _link_strength(link)
+
+
 def _link_file() -> Path:
     MEMORY_DIR.mkdir(exist_ok=True)
     return MEMORY_DIR / LINK_FILE_NAME
@@ -122,7 +155,7 @@ def _build_link_prompt(entry_a: dict, entry_b: dict) -> str:
     )
 
 
-def _parse_link_response(response: str) -> dict:
+def _parse_link_response(response: str, *, strict=False) -> dict:
     """LLM 応答から {link_type, confidence, reason} を抽出 (robust)。
 
     失敗時 / none 時 / 閾値未満は link 作らない扱い (link_type="none")。
@@ -131,10 +164,14 @@ def _parse_link_response(response: str) -> dict:
     try:
         m = re.search(r'\{.*\}', response, re.DOTALL)
         if not m:
+            if strict:
+                raise ValueError("link response contains no JSON object")
             return default
         data = json.loads(m.group(0))
         lt = str(data.get("link_type", "none")).strip().lower()
-        if lt not in LINK_TYPES:
+        if lt not in LINK_TYPES and lt != "none":
+            if strict:
+                raise ValueError(f"unknown link_type: {lt}")
             lt = "none"
         conf = float(data.get("confidence", 0.0))
         conf = max(0.0, min(1.0, conf))
@@ -144,11 +181,13 @@ def _parse_link_response(response: str) -> dict:
             "reason": str(data.get("reason", ""))[:200],
         }
     except Exception:
+        if strict:
+            raise
         return default
 
 
 def _llm_judge_link(entry_a: dict, entry_b: dict,
-                    llm_call_fn: Optional[Callable] = None) -> dict:
+                    llm_call_fn: Optional[Callable] = None, *, failures=None) -> dict:
     """2 entry 間の link 判定 (LLM mock 可能、error で graceful fallback)。"""
     if llm_call_fn is None:
         from core.llm import call_llm
@@ -156,9 +195,11 @@ def _llm_judge_link(entry_a: dict, entry_b: dict,
     prompt = _build_link_prompt(entry_a, entry_b)
     try:
         response = llm_call_fn(prompt, max_tokens=200, temperature=0.2)
-        return _parse_link_response(response)
+        return _parse_link_response(response, strict=failures is not None)
     except Exception as e:
-        print(f"  [memory_links] judge skip (error: {e})")
+        if failures is not None:
+            failures.append({"phase": "link_judge", "exception_type": type(e).__name__, "message": str(e)})
+        print(f"  [memory_links] judge skip (error: {result_redactor()(str(e))})")
         return {"link_type": "none", "confidence": 0.0, "reason": ""}
 
 
@@ -207,13 +248,18 @@ def update_link_strength_used(link_id: str,
     3. last_used / last_used_cycle / usage_count を update
     4. memory_links.jsonl に書き戻し
 
-    11-D Phase 4 (Predictive coding modulator):
+    11-D Phase 4 (Predictive coding modulator) + Slice 4 F-001 production wiring:
     - prediction_error (0.0-1.0) が指定されたら strength up を modulate:
       * strength_delta = α * max(0.0, 1.0 - prediction_error)
       * 予測誤差小 (成功) → modulator 1.0 → α そのまま
       * 予測誤差大 (失敗) → modulator 0.0 → strength up ゼロ
     - 段階10 経路 (entropy.record_ec_prediction_error) との接続点。
       values は 0.0-1.0 severity スケールでそのまま使える (clamp あり)
+    - production timing = **前 cycle modulation** (Slice 4 設計確定):
+      retrieval は cycle 序盤、prediction_error history 書込は cycle 末 (main.py)
+      のため、retrieval 時の history[-1] は前 cycle の error。RL/Active Inference
+      の TD error / FEP 学習則 (= 過去誤差で現在 policy 更新) の標準パターンと
+      整合的。同 cycle modulation 化は cycle 構造改修必要のため採用せず。
 
     Args:
         link_id: 対象 link の id
@@ -370,26 +416,10 @@ def prune_weak_links(current_cycle: int) -> int:
     return removed
 
 
-def list_links(limit: int = 200) -> list:
+def list_links(limit: int = 200, *, read_report=None) -> list:
     """memory_links.jsonl から新しい順に limit 件読む。"""
-    fpath = _link_file()
-    if not fpath.exists():
-        return []
-    try:
-        lines = fpath.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return []
-    out = []
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            continue
-        if len(out) >= limit:
-            break
-    return out
+    from core.memory_read import read_memory_jsonl
+    return read_memory_jsonl(_link_file(), report=read_report, reverse=True, limit=limit)
 
 
 def generate_links_for(new_entry: dict, *,
@@ -398,7 +428,7 @@ def generate_links_for(new_entry: dict, *,
                        cosine_fn: Optional[Callable] = None,
                        llm_call_fn: Optional[Callable] = None,
                        confidence_threshold: float = LINK_CONFIDENCE_THRESHOLD,
-                       candidate_limit: int = 50) -> list:
+                       candidate_limit: int = 50, failures=None) -> list:
     """新 memory entry の近傍 top-K に対して link 生成 (memory_store 同期呼出想定)。
 
     PLAN §5 Phase 4 Step 4.3: memory_store 同期呼出で embedding 近傍 top-K を
@@ -426,7 +456,11 @@ def generate_links_for(new_entry: dict, *,
     if embed_fn is None or cosine_fn is None:
         return []
 
-    all_records = list_records(network, limit=candidate_limit)
+    from core.memory_read import MemoryReadReport
+    report = MemoryReadReport()
+    all_records = list_records(network, limit=candidate_limit, **({"read_report": report} if failures is not None else {}))
+    if failures is not None and (report.rows_unreadable or report.files_unreadable):
+        failures.append({"phase": "link_candidates", **vars(report)})
     candidates = [r for r in all_records if r.get("id") != new_id]
     if not candidates:
         return []
@@ -438,9 +472,13 @@ def generate_links_for(new_entry: dict, *,
     # embedding で近傍 top-K 取得
     try:
         vecs = embed_fn([new_content] + [c.get("content", "") for c in candidates])
-    except Exception:
+    except Exception as e:
+        if failures is not None:
+            failures.append({"phase": "link_embedding", "exception_type": type(e).__name__, "message": str(e)})
         return []
     if not vecs or len(vecs) != 1 + len(candidates):
+        if failures is not None:
+            failures.append({"phase": "link_embedding", "expected_vectors": 1 + len(candidates), "returned_vectors": len(vecs) if vecs is not None else 0})
         return []
 
     query_vec = vecs[0]
@@ -448,7 +486,9 @@ def generate_links_for(new_entry: dict, *,
     for i, c in enumerate(candidates):
         try:
             sim = float(cosine_fn(query_vec, vecs[i + 1]))
-        except Exception:
+        except Exception as e:
+            if failures is not None:
+                failures.append({"phase": "link_similarity", "exception_type": type(e).__name__, "message": str(e)})
             continue
         sims.append((c, sim))
     sims.sort(key=lambda x: x[1], reverse=True)
@@ -457,7 +497,7 @@ def generate_links_for(new_entry: dict, *,
     # 各近傍に対して LLM judge
     created = []
     for cand, _sim in near:
-        verdict = _llm_judge_link(new_entry, cand, llm_call_fn=llm_call_fn)
+        verdict = _llm_judge_link(new_entry, cand, llm_call_fn=llm_call_fn, **({"failures": failures} if failures is not None else {}))
         if verdict.get("link_type", "none") == "none":
             continue
         if verdict.get("confidence", 0.0) < confidence_threshold:
@@ -465,6 +505,103 @@ def generate_links_for(new_entry: dict, *,
         link_entry = _build_link_entry(new_entry, cand, verdict)
         _append_link(link_entry)
         created.append(link_entry)
+    return created
+
+
+# ============================================================
+# v0.5 Phase 5 Slice 4 F-002: co_activation 構造的生成 hook
+# ============================================================
+# 11-D Phase 4 で should_explore_new_links (trigger boolean のみ) を実装、
+# 本 Slice で「実発火 = retrieved memory pair から co_activation link を
+# 構造的生成」を配線。LLM 通さず、「同時 retrieval された」事実を構造的に記録。
+# semantic / supporting 自動発火は次 pass (PLAN_CODE_TRACEABILITY §3.1
+# F-002 conservative first pass literal)。
+
+CO_ACTIVATION_INITIAL_CONFIDENCE = 0.7      # LINK_CONFIDENCE_THRESHOLD と整合 (Codex P1 fix
+                                              # 2026-05-10): 構造的事実 (同時 retrieval) は LLM
+                                              # judge 推測より信頼性高、0.7 = follow_links 走査
+                                              # 閾値以上で retrieval 経路から実際に参照される。
+                                              # Physarum decay 余地 (1.0 cap まで 0.3) 確保。
+CO_ACTIVATION_MAX_PAIRS_PER_CALL = 10        # 1 回呼出で生成する link 上限 (cost 制御)
+CO_ACTIVATION_TOP_N_MEMORIES = 5             # pair 候補 memory 上位件数 (5C2 = 10 pair)
+
+
+def generate_co_activation_links(memories: list,
+                                 current_cycle: Optional[int] = None,
+                                 *,
+                                 max_pairs: int = CO_ACTIVATION_MAX_PAIRS_PER_CALL,
+                                 top_n: int = CO_ACTIVATION_TOP_N_MEMORIES) -> list:
+    """retrieval で同時取得された memory 群から co_activation link を構造的生成。
+
+    11-D Phase 4 → Slice 4 F-002: should_explore_new_links が True の時 (high
+    prediction error) に呼ばれる hook。LLM 通さず、構造的事実 (= 同時 retrieval
+    されたペア) として co_activation link を memory_links.jsonl に append。
+
+    co_activation は対称的関係 (= 同時 retrieval された事実は方向不変)、ただし
+    既存 follow_links は outgoing しか辿らないため、生成時に **双方向 2 本**
+    (A→B + B→A) を同時 append してデータ層で対称性を表現する (Codex Slice 4
+    review P1-3 ゆう案採用、2026-05-10)。dedup は frozenset で対称的に集約、
+    1 pair = 2 link として扱う (max_pairs は pair 単位 cap)。strength up は
+    別経路 update_link_strength_used で各 link 個別に走る (対称関係の対称強化)。
+
+    Args:
+        memories: retrieval 結果の memory entry list (network_mems 上位想定)
+        current_cycle: 現 cycle (link last_used_cycle / reason に記録)
+        max_pairs: 本呼出で生成する pair 上限 (cost 制御、1 pair = 2 link)
+        top_n: 生成対象とする memory 上位件数 (top_n × (top_n-1) / 2 pair)
+
+    Returns:
+        生成した link entry list (1 pair につき 2 link)
+    """
+    if not memories or len(memories) < 2:
+        return []
+    candidate_mems = memories[:top_n]
+    existing_pairs = set()
+    for l in list_links(limit=LINK_SCAN_LIMIT):
+        if l.get("link_type") == "co_activation":
+            f = l.get("from_id", "")
+            t = l.get("to_id", "")
+            if f and t:
+                existing_pairs.add(frozenset((f, t)))
+    from core.perspective import default_self_perspective
+    created = []
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    perspective = default_self_perspective()
+    pairs_created = 0
+    for i in range(len(candidate_mems)):
+        if pairs_created >= max_pairs:
+            break
+        for j in range(i + 1, len(candidate_mems)):
+            if pairs_created >= max_pairs:
+                break
+            id_a = candidate_mems[i].get("id", "")
+            id_b = candidate_mems[j].get("id", "")
+            if not id_a or not id_b or id_a == id_b:
+                continue
+            pair_key = frozenset((id_a, id_b))
+            if pair_key in existing_pairs:
+                continue
+            # 双方向 2 本 (A→B + B→A) 同時 append (P1-3 ゆう案、データ層対称性)
+            for from_id, to_id in ((id_a, id_b), (id_b, id_a)):
+                link_entry = {
+                    "id": f"link_{uuid.uuid4().hex[:12]}",
+                    "from_id": from_id,
+                    "to_id": to_id,
+                    "link_type": "co_activation",
+                    "confidence": CO_ACTIVATION_INITIAL_CONFIDENCE,
+                    "strength": CO_ACTIVATION_INITIAL_CONFIDENCE,
+                    "perspective": perspective,
+                    "created_at": now,
+                    "last_used": now,
+                    "last_used_cycle": int(current_cycle) if current_cycle is not None else None,
+                    "usage_count": 0,
+                    "reason": (f"co-retrieved at cycle {current_cycle}"
+                               if current_cycle is not None else "co-retrieved"),
+                }
+                _append_link(link_entry)
+                created.append(link_entry)
+            existing_pairs.add(pair_key)
+            pairs_created += 1
     return created
 
 
@@ -512,7 +649,7 @@ def follow_links(
         return []
     visited = set(visited) if visited else set()
     visited.add(node_id)
-    all_links = list_links(limit=10000)
+    all_links = list_links(limit=LINK_SCAN_LIMIT)
     return _traverse_depth(
         node_id, 1, depth, all_links, visited,
         link_types, min_confidence, top_n_per_depth,

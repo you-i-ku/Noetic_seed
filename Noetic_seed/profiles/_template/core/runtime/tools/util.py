@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError, result_redactor
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -19,11 +19,14 @@ from core.runtime.tool_schema import ToolSpec
 # ============================================================
 
 def sleep(inp: dict) -> str:
-    duration_ms = int(inp.get("duration_ms", 0))
+    try:
+        duration_ms = int(inp.get("duration_ms", 0))
+    except (TypeError, ValueError) as e:
+        raise ToolError(str(e)) from e
     if duration_ms < 0:
-        return "Error: duration_ms must be non-negative"
+        raise ToolError("Error: duration_ms must be non-negative")
     if duration_ms > 60000:
-        return "Error: duration_ms too large (max 60000)"
+        raise ToolError("Error: duration_ms too large (max 60000)")
     time.sleep(duration_ms / 1000.0)
     return f"Slept {duration_ms} ms"
 
@@ -38,7 +41,7 @@ _todos: list = []
 def todo_write(inp: dict) -> str:
     items = inp.get("todos", [])
     if not isinstance(items, list):
-        return "Error: todos must be a list"
+        raise ToolError("Error: todos must be a list")
     global _todos
     _todos = list(items)
     return f"Todo list updated ({len(_todos)} items)"
@@ -60,28 +63,34 @@ def _make_notebook_edit(workspace_root: Path) -> Callable:
         cell_type = inp.get("cell_type")
         action = (inp.get("action") or "replace").lower()
 
+        if action not in ("replace", "insert", "delete"):
+            raise ToolError(f"Error: invalid action '{action}'")
+        if cell_type is not None and cell_type not in ("code", "markdown", "raw"):
+            raise ToolError(f"Error: invalid cell_type '{cell_type}'")
         if not path:
-            return "Error: path is required"
+            raise ToolError("Error: path is required")
         if cell_index is None:
-            return "Error: cell_index is required"
+            raise ToolError("Error: cell_index is required")
         try:
             cell_index = int(cell_index)
         except (TypeError, ValueError):
-            return "Error: cell_index must be an integer"
+            raise ToolError("Error: cell_index must be an integer")
 
         root = workspace_root.resolve()
         target = (root / path).resolve()
         try:
             target.relative_to(root)
         except ValueError:
-            return f"Error: path '{path}' is outside workspace"
+            raise ToolError(f"Error: path '{path}' is outside workspace")
         if not target.exists():
-            return f"Error: notebook not found: {path}"
+            raise ToolError(f"Error: notebook not found: {path}")
 
         try:
             nb = json.loads(target.read_text(encoding="utf-8"))
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: invalid notebook JSON: {e}"
+            raise ToolError(f"Error: invalid notebook JSON: {e}")
 
         cells = nb.get("cells", [])
 
@@ -97,11 +106,11 @@ def _make_notebook_edit(workspace_root: Path) -> Callable:
             cells.insert(min(cell_index, len(cells)), new_cell)
         elif action == "delete":
             if cell_index < 0 or cell_index >= len(cells):
-                return f"Error: cell_index {cell_index} out of range"
+                raise ToolError(f"Error: cell_index {cell_index} out of range")
             cells.pop(cell_index)
         else:  # replace
             if cell_index < 0 or cell_index >= len(cells):
-                return f"Error: cell_index {cell_index} out of range"
+                raise ToolError(f"Error: cell_index {cell_index} out of range")
             cells[cell_index]["source"] = (
                 new_source if isinstance(new_source, list) else [new_source]
             )
@@ -112,8 +121,10 @@ def _make_notebook_edit(workspace_root: Path) -> Callable:
         try:
             target.write_text(json.dumps(nb, indent=1, ensure_ascii=False),
                               encoding="utf-8")
+        except ToolError:
+            raise
         except Exception as e:
-            return f"Error: write failed: {e}"
+            raise ToolError(f"Error: write failed: {e}")
         return f"Notebook {action} at cell {cell_index} complete"
 
     return notebook_edit
@@ -140,19 +151,20 @@ def run_task_packet(inp: dict) -> str:
     """
     packet = inp.get("packet")
     if not isinstance(packet, dict):
-        return "Error: packet must be an object"
+        raise ToolError("Error: packet must be an object")
     obj = packet.get("objective", "")
     scope = packet.get("scope", "")
     if not obj:
-        return "Error: packet.objective is required"
+        raise ToolError("Error: packet.objective is required")
     summary = [
-        f"objective: {obj[:200]}",
-        f"scope: {scope[:200]}" if scope else "",
+        f"objective: {result_redactor()(obj)[:200]}",
+        f"scope: {result_redactor()(scope)[:200]}" if scope else "",
         f"repo: {packet.get('repo', '')}",
         f"branch_policy: {packet.get('branch_policy', '')}",
         f"acceptance_tests: {len(packet.get('acceptance_tests') or [])} items",
     ]
-    return "TaskPacket accepted:\n" + "\n".join(l for l in summary if l)
+    raise ToolError("TaskPacket accepted:\n" + "\n".join(l for l in summary if l),
+                    detail={"execution_started": False})
 
 
 # ============================================================

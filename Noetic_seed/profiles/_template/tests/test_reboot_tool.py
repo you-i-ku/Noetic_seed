@@ -68,7 +68,13 @@ def test_reboot_reject_short_circuit(
     """承認 reject でキャンセル message 返り、後続段階は呼ばれない。"""
     print("== reboot 承認 reject で短絡、後続段階 skip ==")
     from tools.reboot import _reboot
-    result = _reboot({})
+    from core.runtime.registry import ToolError
+    try:
+        _reboot({})
+    except ToolError as error:
+        result = str(error)
+    else:
+        raise AssertionError("reboot rejection must raise ToolError")
     return all([
         _assert(mock_approval.called, "request_approval 呼ばれた"),
         _assert("キャンセル" in result, f"返り値にキャンセル message (実測: {result})"),
@@ -84,7 +90,13 @@ def test_reboot_preview_without_message(mock_approval):
     """args に message なしでも preview は最低限の説明を含む。"""
     print("== message なしでも preview 最低限の文言 ==")
     from tools.reboot import _reboot
-    _reboot({})
+    from core.runtime.registry import ToolError
+    try:
+        _reboot({})
+    except ToolError:
+        pass
+    else:
+        raise AssertionError("reboot rejection must raise ToolError")
     preview = mock_approval.call_args[0][1]
     return all([
         _assert("[reboot]" in preview, "preview に [reboot] prefix"),

@@ -29,7 +29,7 @@ def _full_input(**overrides):
     base = {
         "tool_intent": "設定を書く",
         "tool_expected_outcome": "file 作成",
-        "message": "設定を書きます",
+        "note": "設定を書きます",
         "path": "/tmp/foo.py",
         "content": "x",
     }
@@ -74,20 +74,20 @@ def test_preview_shows_intent_and_expected():
     ])
 
 
-def test_preview_shows_message_section():
-    print("== preview: message が ③ 区画に表示 ==")
+def test_preview_shows_note_section():
+    print("== preview: note が ③ 区画に表示 ==")
     preview = _format_preview("write_file", _full_input(), [])
-    return _assert("設定を書きます" in preview, "message text")
+    return _assert("設定を書きます" in preview, "note text")
 
 
 def test_preview_missing_fields_placeholder():
     print("== preview: 3 層欠損は '(空)' 表示 ==")
-    inp = _full_input(tool_intent="", tool_expected_outcome="", message="")
+    inp = _full_input(tool_intent="", tool_expected_outcome="", note="")
     preview = _format_preview("write_file", inp, [])
     return all([
         _assert("intent:   (空)" in preview, "intent 空"),
         _assert("expected: (空)" in preview, "expected 空"),
-        _assert("(空)" in preview, "message 空"),
+        _assert("(空)" in preview, "note 空"),
     ])
 
 
@@ -311,7 +311,7 @@ if __name__ == "__main__":
         ("preview: 3 層構造", test_preview_has_three_layers),
         ("preview: args 分離", test_preview_hides_approval_fields_from_args),
         ("preview: intent/expected", test_preview_shows_intent_and_expected),
-        ("preview: message ③", test_preview_shows_message_section),
+        ("preview: note ③", test_preview_shows_note_section),
         ("preview: 空欄 placeholder", test_preview_missing_fields_placeholder),
         ("preview: pre_hook 含む", test_preview_includes_pre_hook),
         ("preview: pre_hook 無し", test_preview_no_pre_hook_section_when_empty),

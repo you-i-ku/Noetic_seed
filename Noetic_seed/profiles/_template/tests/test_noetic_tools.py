@@ -33,7 +33,8 @@ def _fake_tools_dict():
         "camera_stream", "camera_stream_stop", "screen_peek",
         "auth_profile_info", "secret_read", "secret_write",
         # 余分 (noetic_ext 対象外、無視されるべき)
-        "elyth_post", "x_post", "create_tool",
+        # 段階13 Phase 6.1 で create_tool 撤廃に伴い elyth_post / x_post のみ残す
+        "elyth_post", "x_post",
     ]
     d = {}
     for n in names:
@@ -76,13 +77,12 @@ def test_registered_tool_names_match():
 
 
 def test_extra_tools_ignored():
-    print("== 対象外 tool (elyth_post / x_post / create_tool) は登録されない ==")
+    print("== 対象外 tool (elyth_post / x_post) は登録されない ==")
     reg = ToolRegistry()
     register_noetic_tools(reg, _fake_tools_dict())
     return all([
         _assert(not reg.has("elyth_post"), "elyth_post 登録なし"),
         _assert(not reg.has("x_post"), "x_post 登録なし"),
-        _assert(not reg.has("create_tool"), "create_tool 登録なし"),
     ])
 
 
@@ -90,16 +90,17 @@ def test_extra_tools_ignored():
 # input_schema 検証 (claw 文法準拠チェック)
 # ============================================================
 
-def test_schema_has_approval_3_layer():
-    print("== 全 tool の input_schema に 3 層 required ==")
+def test_schema_has_required_reason_and_optional_note():
+    print("== 全 tool の input_schema に 理由・予想 required / note 任意 ==")
     reg = ToolRegistry()
     register_noetic_tools(reg, _fake_tools_dict())
     results = []
     for name in NOETIC_TOOL_NAMES:
         spec = reg.get(name)
         required = set(spec.input_schema.get("required", []))
-        ok = {"tool_intent", "tool_expected_outcome", "message"} <= required
-        results.append(_assert(ok, f"{name}"))
+        ok = {"tool_intent", "tool_expected_outcome"} <= required
+        results.append(_assert(ok and "note" not in required
+                               and "note" in spec.input_schema["properties"], f"{name}"))
     return all(results)
 
 
@@ -136,7 +137,6 @@ def test_schema_tool_specific_required():
     cases = [
         ("output_display", {"content"}),
         ("update_self", {"key", "value"}),
-        ("search_memory", {"query"}),
         ("memory_store", {"network", "content"}),
         ("memory_update", {"memory_id"}),
         ("memory_forget", {"memory_id"}),
@@ -152,6 +152,16 @@ def test_schema_tool_specific_required():
         required = set(spec.input_schema.get("required", []))
         ok = must <= required
         results.append(_assert(ok, f"{name}: {must} required"))
+    # M1b: query / id のどちらも無い呼び出しはハンドラ側で拒否する。
+    spec = reg.get("search_memory")
+    required = set(spec.input_schema.get("required", []))
+    props = spec.input_schema.get("properties", {})
+    results.extend([
+        _assert(required == {"tool_intent", "tool_expected_outcome"},
+                "search_memory: required は理由・予想のみ"),
+        _assert({"query", "id"} <= set(props),
+                "search_memory: query と id が properties にある"),
+    ])
     return all(results)
 
 
@@ -243,7 +253,7 @@ def test_handler_delegates_to_tools_dict():
     register_noetic_tools(reg, _fake_tools_dict())
     out = reg.execute("output_display", {
         "content": "hello",
-        "tool_intent": "t", "tool_expected_outcome": "t", "message": "t",
+        "tool_intent": "t", "tool_expected_outcome": "t", "note": "t",
     })
     return _assert("output_display" in out, f"fake func 経由: {out[:60]}")
 
@@ -254,7 +264,7 @@ def test_handler_view_image():
     register_noetic_tools(reg, _fake_tools_dict())
     out = reg.execute("view_image", {
         "path": "x.jpg",
-        "tool_intent": "t", "tool_expected_outcome": "t", "message": "t",
+        "tool_intent": "t", "tool_expected_outcome": "t", "note": "t",
     })
     return _assert("view_image" in out, f"legacy 呼出: {out[:60]}")
 
@@ -310,7 +320,7 @@ if __name__ == "__main__":
         ("NOETIC_TOOL_NAMES export", test_tool_names_exposed),
         ("tool 名一致", test_registered_tool_names_match),
         ("対象外 tool 無視", test_extra_tools_ignored),
-        ("schema: 3 層 required", test_schema_has_approval_3_layer),
+        ("schema: 理由・予想 required / note 任意", test_schema_has_required_reason_and_optional_note),
         ("schema: type=object", test_schema_type_object_everywhere),
         ("schema: additionalProperties=False", test_schema_additional_properties_false),
         ("schema: tool 固有 required", test_schema_tool_specific_required),

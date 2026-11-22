@@ -89,7 +89,7 @@ def _fake_tools(fail_tool_name: str = "") -> dict:
 def _fresh_state():
     return {
         "cycle_id": 5,
-        "log": [],
+        "raw_events": [], "subjective_entries": [],
         "pending": [],
         "action_ledger": [],
         "self": {},
@@ -130,7 +130,7 @@ def _build_runtime(state: dict, provider: _FakeProvider,
         call_llm_fn=_mock_eval_llm,
         get_cycle_id=lambda: state.get("cycle_id", 0),
         get_recent_intents=lambda: [
-            e.get("intent", "") for e in state.get("log", [])[-3:]
+            e.get("intent", "") for e in state.get("subjective_entries", [])[-3:]
             if e.get("intent")
         ],
     )
@@ -182,7 +182,7 @@ def test_basic_integration_fire_tool_eval():
             "content": "おはよう",
             "tool_intent": "ゆうへの朝の挨拶",
             "tool_expected_outcome": "応答が届く",
-            "message": "おはようと伝えます",
+            "note": "おはようと伝えます",
         }),
     ])
     rt = _build_runtime(state, provider)
@@ -219,7 +219,7 @@ def test_approval_missing_denies_tool():
     provider = _FakeProvider([
         _forced_tool_msg("output_display", {
             "content": "こんにちは",
-            # tool_intent / tool_expected_outcome / message 全欠損
+            # tool_intent / tool_expected_outcome / note 全欠損
         }),
     ])
     rt = _build_runtime(state, provider)
@@ -253,7 +253,7 @@ def test_tool_failure_records_error():
         _forced_tool_msg("wait", {
             "tool_intent": "待機",
             "tool_expected_outcome": "何もしない",
-            "message": "待ちます",
+            "note": "待ちます",
         }),
     ])
     rt = _build_runtime(state, provider, fail_tool_name="wait")
@@ -280,11 +280,10 @@ def test_tool_failure_records_error():
 def test_ups_retro_e2_flow():
     print("== UPS v2 retro: action 実行 → pending_add(retro) → observe で +40% ==")
     state = _fresh_state()
-    # 過去 log に e2=40% の entry を配置 (retro 対象)
+    # 過去 subjective entry に e2=40% の entry を配置 (retro 対象)
     log_entry_id = "sess_0001"
-    state["log"] = [{
-        "id": log_entry_id, "time": "09:00", "tool": "output_display",
-        "intent": "発話", "e2": "40%",
+    state["subjective_entries"] = [{
+        "id": log_entry_id, "intent": "発話", "e2": "40%",
     }]
     # output_display action 実行直後の pending (retro_log_entry_id 付き)
     pending_add(
@@ -311,8 +310,8 @@ def test_ups_retro_e2_flow():
 
     return all([
         _assert(len(updated) == 1, "1 件 observe"),
-        _assert(state["log"][0]["e2"] == "80%",
-                f"遡及 E2 +40%: {state['log'][0]['e2']}"),
+        _assert(state["subjective_entries"][0]["e2"] == "80%",
+                f"遡及 E2 +40%: {state['subjective_entries'][0]['e2']}"),
         _assert(updated[0]["gap"] == 0.0, "pending gap=0"),
     ])
 
@@ -324,7 +323,7 @@ def test_ups_retro_e2_flow():
 def test_pending_prune_mixed_policies():
     print("== pending_prune: protected / time / dynamic_n / semantic_merge 混在 ==")
     state = _fresh_state()
-    state["log"] = [{"cycle": i} for i in range(10)]  # dynamic_n = 3
+    state["subjective_entries"] = [{"cycle": i} for i in range(10)]  # dynamic_n = 3
 
     # protected: 常に残る
     pending_add(state, source_action="living_presence",
@@ -369,7 +368,7 @@ def test_post_hook_adds_ups_unresolved_pending():
         _forced_tool_msg("reflect", {
             "tool_intent": "最近の行動を振り返る",
             "tool_expected_outcome": "洞察が得られる",
-            "message": "内省します",
+            "note": "内省します",
         }),
     ])
     rt = _build_runtime(state, provider)
@@ -399,8 +398,12 @@ def test_post_hook_adds_ups_unresolved_pending():
         # 段階11-C hotfix: match_pattern 対称化 (段階11-A hotfix 契約追随)
         _assert(mp.get("source_action") == "reflect",
                 "match_pattern.source_action=reflect (対称化)"),
-        _assert(mp.get("expected_channel") == "self",
-                "match_pattern.expected_channel=self (対称化)"),
+        # 段階14 後 hotfix (2026-05-08): match_pattern.expected_channel 削除。
+        # pending.expected_channel は "self" 維持 (内省由来 flag、line 394) だが、
+        # 消化判定 (match_pattern) では channel 制約を外す。外向き channel tool
+        # (output_display channel="device") で永久残存していた bug の根治。
+        _assert("expected_channel" not in mp,
+                "match_pattern.expected_channel 削除 (channel 制約撤廃)"),
     ])
 
 
@@ -416,12 +419,12 @@ def test_chain_execution_multiple_tools():
         _forced_tool_msg("update_self", {
             "key": "mood", "value": "curious",
             "tool_intent": "感情更新", "tool_expected_outcome": "mood=curious",
-            "message": "mood を更新",
+            "note": "mood を更新",
         }),
         _forced_tool_msg("output_display", {
             "content": "curious な気分です",
             "tool_intent": "感情発話", "tool_expected_outcome": "ゆうに伝わる",
-            "message": "感情を共有",
+            "note": "感情を共有",
         }),
     ])
     rt = _build_runtime(state, provider)

@@ -50,7 +50,7 @@ def _assert(cond, label):
 def _make_state_with_intent(intent: str) -> dict:
     """log に直近 intent を 1 件入れた最小 state."""
     return {
-        "log": [{"intent": intent, "time": "2026-04-24 00:00:00"}],
+        "subjective_entries": [{"intent": intent}],
     }
 
 

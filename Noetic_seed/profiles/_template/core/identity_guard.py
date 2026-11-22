@@ -4,9 +4,8 @@
 - iku の identity name に LLM 役割語 (assistant, user, Claude 等) が入ると、
   cycle 1 の 1 手で以降の認知全体が LLM 初期化状態に汚染される
   (段階11-B smoke 2 段目 2 回目で実証、40 cycle 波及)。
-- state["self"]["name"] は一度設定されると immutable (builtin._update_self
-  L203-206) なので、汚染は cycle 1 の 1 手でしか発生しない = この 1 手を
-  構造的摩擦で守る設計。
+- state["self"]["name"] の初回設定・改名のどちらでも役割ラベルを検査する。
+  名前の変更は許可し、役割語のブロックは維持する。
 
 設計哲学:
 - feedback_llm_as_brain: prompt 指示ではなく、構造的 validation で守る。

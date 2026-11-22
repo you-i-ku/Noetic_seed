@@ -8,6 +8,7 @@ claw-code 参照: rust/crates/commands/src/lib.rs
   - 未登録なら "/help" にフォールバック (または not found)
 """
 import shlex
+from core.runtime.registry import ToolError
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -19,6 +20,7 @@ class CommandResult:
     is_error: bool = False
     # UI 層が追加動作するためのフラグ (exit / clear 等)
     action: Optional[str] = None
+    detail: object = None
 
 
 @dataclass
@@ -81,6 +83,8 @@ class CommandDispatcher:
 
         try:
             return spec.handler(args, ctx)
+        except ToolError as e:
+            return CommandResult(text=str(e), is_error=True, detail=e.detail)
         except Exception as e:
             return CommandResult(
                 text=f"Command /{name} failed: {type(e).__name__}: {e}",

@@ -8,7 +8,7 @@ from core.runtime.tool_schema import ToolSpec
 
 
 def _approval_props() -> dict:
-    """全 Noetic tool 共通の承認 3 層 properties。"""
+    """全 Noetic tool 共通の理由・予想 (必須) と note (任意) の properties。"""
     return {
         "tool_intent": {
             "type": "string",
@@ -18,14 +18,14 @@ def _approval_props() -> dict:
             "type": "string",
             "description": "期待する結果 (1 文、80 字目安)",
         },
-        "message": {
+        "note": {
             "type": "string",
-            "description": "端末前の協力者への一言 (対等な口調、報告・共有)",
+            "description": "自由に書ける欄",
         },
     }
 
 
-_APPROVAL_REQUIRED = ["tool_intent", "tool_expected_outcome", "message"]
+_APPROVAL_REQUIRED = ["tool_intent", "tool_expected_outcome"]
 
 
 def _build_specs(tools_dict: dict) -> list:
@@ -49,7 +49,10 @@ def _build_specs(tools_dict: dict) -> list:
             name="update_self",
             description=(
                 "自己モデル (state.self) の属性を更新する。key-value pair で記録、"
-                "name は一度確定すると変更不可。"
+                "name も更新できる。Slice 6.5 Step 6 (PLAN §5.4) で "
+                "confidence 引数追加: 該当 key の自分の納得度 [0.0, 1.0] で、preference "
+                "distribution C (案 ④ identity-anchored、vMF mixture) の concentration κ "
+                "に直接反映される (高 conf → 鋭い peak / 低 conf → 広い peak)。"
             ),
             input_schema={
                 "type": "object",
@@ -61,6 +64,17 @@ def _build_specs(tools_dict: dict) -> list:
                     "value": {
                         "type": "string",
                         "description": "格納する値",
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": (
+                            "この属性への確信度 [0.0, 1.0] (省略時 0.7)。"
+                            "高い値 = 自分で深く納得してる側面、preference 分布で鋭い peak。"
+                            "低い値 = 自認はしてるが実感薄い側面、preference 分布で広い peak。"
+                            "key='name' の場合この引数は無視される (confidence 不問)。"
+                        ),
+                        "minimum": 0.0,
+                        "maximum": 1.0,
                     },
                     **_approval_props(),
                 },

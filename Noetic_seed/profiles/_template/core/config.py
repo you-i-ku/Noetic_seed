@@ -10,7 +10,6 @@ SEED_FILE = BASE_DIR / "seed.txt"
 RAW_LOG_FILE = BASE_DIR / "raw_log.txt"
 STATE_FILE = BASE_DIR / "state.json"
 SANDBOX_DIR = BASE_DIR / "sandbox"
-SANDBOX_TOOLS_DIR = BASE_DIR / "sandbox" / "tools"
 LLM_SETTINGS = BASE_DIR / "settings.json"
 DEBUG_LOG = BASE_DIR / "llm_debug.log"
 RESOLUTION_LOG = BASE_DIR / "resolution_debug.log"
@@ -65,6 +64,34 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return len(text) // 3 + 1
+
+
+# === tool 戻り値の表示上限 ===
+# log.result に保存される tool 出力の切り詰め幅。段階9 Fix 5 (`ui_tools.py` の
+# `content[:80]`) と同じ轍を踏まないため、切った時は必ず marker を付けて
+# 「切った」という事実自体を iku に届ける。
+#
+# marker なしで切ると iku は自分の観測が不完全なことに気づけない。実観測例
+# (2026-09-05): read_file が state.json 全文 + 正確なヘッダ
+# `[state.json | lines 1-3555/3555]` を返したが、main.py 側が marker なしで
+# 20,000 字に切ったため、ヘッダだけが生き残り iku は「全部読めた」と誤認した。
+# 書式は tools/http_tool.py の _RESPONSE_MAX_CHARS 処理に揃えてある。
+TOOL_RESULT_MAX_CHARS = 20_000
+
+
+def cap_tool_result(text: str) -> str:
+    """tool 戻り値を表示上限で切り、切った場合のみ marker を付けて返す。
+
+    contract:
+      - len(text) <= TOOL_RESULT_MAX_CHARS  → 入力をそのまま返す (marker なし)
+      - len(text) >  TOOL_RESULT_MAX_CHARS  → 先頭 TOOL_RESULT_MAX_CHARS 字 + marker
+      - marker の分母は「切り詰め後」ではなく「元の長さ」
+    """
+    if len(text) <= TOOL_RESULT_MAX_CHARS:
+        return text
+    return (text[:TOOL_RESULT_MAX_CHARS] +
+            f"\n...(表示上 {TOOL_RESULT_MAX_CHARS}/{len(text)}字に切詰。ツール実行時は完全取得済)")
+
 
 # === 電脳気候パラメータのデフォルト（pref.jsonで上書き可）===
 DEFAULT_PRESSURE_PARAMS = {

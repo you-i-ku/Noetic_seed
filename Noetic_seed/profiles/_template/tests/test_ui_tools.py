@@ -26,7 +26,7 @@ def _assert(cond, label):
 def _silent_broadcast():
     return patch.multiple(
         "tools.ui_tools",
-        broadcast=lambda *a, **k: None,
+        broadcast=lambda *a, **k: 1,  # step 0a-1: 受付時の接続数 (1 件接続中として扱う)
         broadcast_log=lambda *a, **k: None,
     )
 
@@ -40,7 +40,7 @@ def test_short_content_unchanged():
     with _silent_broadcast():
         result = _output_display({"channel": "claude", "content": "こんにちは"})
     return all([
-        _assert("送信完了 (claude):" in result, "送信完了 prefix"),
+        _assert("送信キューに登録 (channel=claude、受付時の接続 1 件" in result, "送信受付 prefix"),
         _assert("こんにちは" in result, "content 保存"),
     ])
 
@@ -57,7 +57,7 @@ def test_long_content_not_truncated():
     with _silent_broadcast():
         result = _output_display({"channel": "device", "content": long_content})
     return all([
-        _assert("送信完了 (device):" in result, "送信完了 prefix"),
+        _assert("送信キューに登録 (channel=device、受付時の接続 1 件" in result, "送信受付 prefix"),
         _assert("嬉しいな。" in result, "末尾まで保存 (旧バグでは 80 字 cap で削除)"),
         _assert("私は、このお部屋" in result, "中盤も保存"),
         _assert(len(result) >= len(long_content),
@@ -79,20 +79,34 @@ def test_multiline_content_preserved():
 
 
 def test_no_content_returns_error():
-    print("== content 省略はエラー返却 (既存動作) ==")
+    from core.runtime.registry import ToolError
+
+    print("== content 省略は ToolError ==")
     with _silent_broadcast():
-        result = _output_display({"channel": "claude"})
-    return _assert("エラー" in result, "エラー文言")
+        try:
+            _output_display({"channel": "claude"})
+        except ToolError as exc:
+            assert str(exc) == "エラー: contentを指定してください"
+        else:
+            raise AssertionError("content 省略時は ToolError が必要")
+    return True
 
 
 def test_no_channel_returns_error():
-    print("== channel 省略はエラー返却 (既存動作) ==")
+    from core.runtime.registry import ToolError
+
+    print("== channel 省略は ToolError ==")
     with _silent_broadcast():
-        result = _output_display({"content": "hi"})
-    return all([
-        _assert("エラー" in result, "エラー文言"),
-        _assert("channel" in result, "channel 指摘"),
-    ])
+        try:
+            _output_display({"content": "hi"})
+        except ToolError as exc:
+            assert str(exc) == (
+                "エラー: channel を指定してください "
+                "(WM.channels を観察して利用可能な channel を確認)"
+            )
+        else:
+            raise AssertionError("channel 省略時は ToolError が必要")
+    return True
 
 
 # ============================================================

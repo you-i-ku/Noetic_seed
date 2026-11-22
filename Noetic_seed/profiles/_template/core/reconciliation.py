@@ -1,4 +1,4 @@
-"""reconciliation — 段階11-B Phase 3 Step 3.2-3.5。
+"""reconciliation — 段階11-B Phase 3 Step 3.2-3.5 + 段階13 Phase 0.4。
 
 memory_store 書込時に既存 fact との矛盾を LLM judge で検出し、EC 予測誤差として
 state に記録する pressure-driven reconciliation。A-MEM (NeurIPS 2025) / SSGM
@@ -9,6 +9,12 @@ state に記録する pressure-driven reconciliation。A-MEM (NeurIPS 2025) / SS
 feedback_no_biological_mimicry / P2 metacognition_as_affordance)。矛盾は
 EC 予測誤差として記録し、段階10 w_prediction_error が pressure 加算、iku が
 候補選択 (affordance)。Free Energy Principle の minimalist 実装。
+
+段階13 Phase 0.4: check_raw_subjective_gap 追加。tool 実行直後の raw event
+(物理 fact = result + args) と subjective entry (LLM 解釈 = intent + expect)
+の意味的 gap を bge-m3 cosine 距離で検出、check_on_write の sibling として
+pressure 経路に流す。閾値は entity_resolver の Tier (0.85 / 0.70) 流用 =
+新規マジックナンバー 0 維持。
 """
 import json
 import re
@@ -135,3 +141,132 @@ def check_on_write(new_entry: dict,
             contradictions.append((cand, tier, verdict))
 
     return contradictions
+
+
+# ============================================================
+# 段階13 Phase 0.4: raw event vs subjective entry gap 検出
+# ============================================================
+
+def check_raw_subjective_gap(state: dict, entry: dict, *,
+                             embed_fn: Optional[Callable] = None,
+                             cosine_fn: Optional[Callable] = None) -> Optional[dict]:
+    """tool 実行直後に raw event と subjective entry の意味的 gap を検出。
+
+    event_emitter (Phase 0.2) の subscriber として配線され、_record_entry で
+    raw_events / subjective_entries 両側に append された直後に発火 (subscribe
+    順序 snapshot 経由)。同 id の raw_part / subj_part を取得し、bge-m3 で
+    embedding 化、cosine 距離で意味的 gap を測る。
+
+    比較対象 (LLM の視界には入らない、embedding 入力専用 text):
+      raw 側 text  = result + " " + str(args)        # 物理 fact = 何が起きたか
+      subj 側 text = intent + " " + expect            # LLM 解釈 = 何のつもりで
+
+    注意 (Codex review 0.4 WARN 反映): text 組み立ては Phase 0.4 lean。`str(args)`
+    が辞書 repr で raw_text を支配したり、長い `expect` が subj_text を支配したり
+    する可能性あり。smoke で false positive 観察したら field 選択や正規化
+    (args の重要 key 抽出、expect 文字数 cap 等) を Phase 1+ で調整予定。
+
+    順序契約 (Codex review 0.4 WARN 反映): event_emitter subscribe snapshot で
+    _record_entry が先に発火する前提。_record_entry が例外で失敗した場合は
+    event_emitter の isolation で本関数も呼ばれるが、raw_part / subj_part が
+    in-memory view に反映されてない状態 = 下記 graceful skip (part 不在 → None)
+    で吸収される。Phase 0.5+ で critical observer 機構 (_record_entry を例外伝播
+    させる) を入れるなら、本関数も同期保証強化される。
+
+    閾値 (entity_resolver.py Tier 流用、新規マジックナンバー 0):
+      gap = 1 - cosine_similarity(embed(raw_text), embed(subj_text))
+      - gap >= (1 - EMBEDDING_DIFFERENT_THRESHOLD) ≒ 0.30: record (確定 gap)
+      - (1 - EMBEDDING_SAME_THRESHOLD) ≒ 0.15 <= gap < 0.30: Tier 3 ambiguous zone
+        (LLM judge 推奨ゾーン、Phase 0.4 lean では skip、Phase 1+ で拡張)
+      - gap < 0.15: 同義扱い、skip
+
+    記録 (check_on_write sibling): gap >= 0.30 で record_ec_prediction_error
+    (source="raw_subj_gap") を呼び、段階10 EC 経路 (state["prediction_error_history_ec"])
+    に magnitude 記録。pressure 加算 (w_prediction_error) で iku が gap を体感する
+    affordance 経路。
+
+    Args:
+        state: 記録先 state dict (破壊更新)
+        entry: event_emitter から渡される entry (id 経由で raw_part / subj_part 検索)
+        embed_fn: embedding 依存注入 (test mock 用、None で _embed_sync)
+        cosine_fn: cosine 依存注入 (test mock 用、None で cosine_similarity)
+
+    Returns:
+        verdict dict (id, gap, raw_excerpt, subj_excerpt) or None
+        - None: skip (id 不在 / part 不在 / 比較材料空 / embedding 不在 / gap 閾値未満)
+        - dict: gap 検出して record した
+    """
+    from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
+    from core.entity_resolver import EMBEDDING_SAME_THRESHOLD, EMBEDDING_DIFFERENT_THRESHOLD
+    from core.entropy import record_ec_prediction_error
+
+    # 軸 9: subscribe 順序 snapshot 既存契約 = _record_entry 後に発火
+    # 軸 1+2: 閾値 entity_resolver 流用、gap = 1 - cosine
+    record_threshold = 1.0 - EMBEDDING_DIFFERENT_THRESHOLD  # ≒ 0.30
+    # ambiguous_threshold は Phase 0.4 lean では未使用 (Tier 3 zone は丸ごと skip)。
+    # Phase 1+ で LLM judge 拡張する時に `if ambiguous_threshold <= gap < record_threshold`
+    # の判定で使う予定の予約変数として明示残置 (削除すると拡張時再導入忘れる)。
+    ambiguous_threshold = 1.0 - EMBEDDING_SAME_THRESHOLD   # ≒ 0.15
+    _ = ambiguous_threshold  # noqa: F841 (Phase 1+ 予約、削除しない)
+
+    entry_id = entry.get("id")
+    if not entry_id:
+        return None  # id 不在で対応取れず skip
+
+    # 同 id の raw_part / subj_part を末尾から探す (event_emitter で直前 append された)
+    raw_events = state.get("raw_events", [])
+    subj_entries = state.get("subjective_entries", [])
+    raw_part = next((e for e in reversed(raw_events) if e.get("id") == entry_id), None)
+    subj_part = next((e for e in reversed(subj_entries) if e.get("id") == entry_id), None)
+    if not raw_part or not subj_part:
+        return None  # 軸 7 graceful: part 不在で skip
+
+    # 軸 3: raw=result+args, subj=intent+expect (LLM 視界外、embedding 入力専用)
+    raw_text = (str(raw_part.get("result", "")) + " " + str(raw_part.get("args", ""))).strip()
+    subj_text = (str(subj_part.get("intent", "")) + " " + str(subj_part.get("expect", ""))).strip()
+
+    if not raw_text or not subj_text:
+        return None  # 軸 8 graceful: 比較材料空で skip
+
+    if not is_vector_ready():
+        return None  # 軸 7 graceful: embedding 不在で skip
+
+    # 軸 2: gap = 1 - cosine_similarity (bge-m3 既存基盤流用)
+    if embed_fn is None:
+        embed_fn = _embed_sync
+    if cosine_fn is None:
+        cosine_fn = cosine_similarity
+    try:
+        vecs = embed_fn([raw_text, subj_text])
+    except Exception as exc:
+        print(f"  [reconciliation] gap embed skip (error: {exc})")
+        return None
+    if not vecs or len(vecs) != 2:
+        return None
+    sim = cosine_fn(vecs[0], vecs[1])
+    gap = max(0.0, min(1.0, 1.0 - sim))
+
+    # 軸 4: Phase 0.4 lean = gap >= record_threshold のみ record、
+    # ambiguous_threshold <= gap < record_threshold は Tier 3 LLM judge ゾーンで skip
+    if gap < record_threshold:
+        return None
+
+    # 軸 6: record_ec_prediction_error (check_on_write sibling)
+    record_ec_prediction_error(
+        state,
+        source="raw_subj_gap",
+        magnitude=gap,
+        reason=f"raw vs subjective gap (id={entry_id})",
+        context={
+            "id": entry_id,
+            "raw_excerpt": raw_text[:100],
+            "subj_excerpt": subj_text[:100],
+        },
+    )
+
+    return {
+        "id": entry_id,
+        "gap": gap,
+        "raw_excerpt": raw_text[:100],
+        "subj_excerpt": subj_text[:100],
+    }

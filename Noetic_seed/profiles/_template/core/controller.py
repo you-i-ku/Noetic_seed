@@ -1,45 +1,93 @@
 """Controller（制御層）+ controller_select + intent-conditioned scoring"""
 import re
 import random
-from core.config import SANDBOX_TOOLS_DIR, WORLD_MODEL_CFG
-from core.state import load_pref
+import time  # V07.5 commit 3: debug metric timing (hot path I/O 計測)
+from core.config import WORLD_MODEL_CFG
+from core.state import load_pref, merge_log_view
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.eval import predict_result_novelty
 from core.predictor import get_predictor
+# V07.5 commit 3: argmin G(π) literal selection の literal 依存 module
+# (関数内 import から module top-level に literal move、Codex 2 周目 P3 fix bundle)
+from core.memory import load_all_subjective_entries, load_all_memories
+from core.memory_links import list_links
+from core.info_gain import compute_efe_components, CYCLE_KEY
+from core.metrics import compute_fog_metrics, _sort_entries_global_newest_first, LINKS_SCAN_LIMIT
+from core.jepa_runtime import predict_next_conditioned_batch
+# V07.5 commit 4 (A2 literal): preference_distribution は scipy 直接依存
+# (preference_distribution.py:35 `from scipy import special`)、module top-level
+# import すると scipy 必須環境化 = _rebuild_efe_C_snapshot 内に literal lazy import
+# (Codex 2 周目 P3 「関数内 import → module top-level」原則と例外、scipy 依存
+# 回避優先、production per-profile venv で literal install 済前提継承)
 
 # 段階5: Predictor インスタンス (WM 設定に従って初期化、モジュールシングルトン)
 _PREDICTOR = get_predictor(WORLD_MODEL_CFG.get("predictor_mode", "light"))
 
 
-def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tools: dict, dangerous_patterns: list, run_ai_tool_fn) -> dict:
-    """E値とenergyから構造的制約を導出。ツール解放レベルを判定。"""
-    energy = state.get("energy", 50)
-    log = state["log"]
+def _build_policy_snapshot_id(selected_candidate: dict) -> str:
+    """V07.5 commit 5 (PLAN v1.4 §3-5、selection log schema 拡張): selected candidate の
+    policy_snapshot_id 用 literal hash。tool + reason/intent を組み合わせた literal
+    identifier (12-char sha256 hex)、smoke 観察で literal policy 追跡可能化。
 
-    # --- sandbox/tools/ をスキャンしてAI製ツールを動的ロード ---
-    if SANDBOX_TOOLS_DIR.exists():
-        for tool_path in sorted(SANDBOX_TOOLS_DIR.glob("*.py")):
-            tname = tool_path.stem
-            if tname in tools_dict:
-                continue
-            try:
-                code = tool_path.read_text(encoding="utf-8")
-                dangerous = [p for p in dangerous_patterns if p in code]
-                if dangerous:
-                    print(f"  [scan] {tname}: 危険パターン検出、スキップ {dangerous}")
-                    continue
-                namespace: dict = {}
-                exec(compile(code, str(tool_path), "exec"), namespace)
-                func = namespace.get("run") or namespace.get(tname)
-                if func and callable(func):
-                    tdesc = namespace.get("DESCRIPTION", tname)
-                    ai_created_tools[tname] = func
-                    tools_dict[tname] = {
-                        "desc": f"[AI製] {tdesc}",
-                        "func": lambda a, f=func: run_ai_tool_fn(f, a),
-                    }
-            except Exception as e:
-                print(f"  [scan] {tname}: 読み込み失敗 ({e})")
+    Codex 4 turn rescue 2 turn 目 verify literal: selection log に `C_version` /
+    `policy_snapshot_id` / `basin_snapshot_id` を持たせて snapshot consistency 確保。
+    """
+    import hashlib
+    tool = str(selected_candidate.get("tool", "")) if isinstance(selected_candidate, dict) else ""
+    intent_raw = selected_candidate.get("intent") or selected_candidate.get("reason", "") if isinstance(selected_candidate, dict) else ""
+    intent = str(intent_raw) if intent_raw else ""
+    raw = f"{tool}::{intent}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _rebuild_efe_C_snapshot(state: dict) -> None:
+    """V07.5 commit 4 (A2 literal): cycle start で preference C を re-construct し
+    state["_efe_C"] に literal snapshot。cycle 中は read-only freeze、self-referential
+    loop (旧 tools/builtin.py update_self 同 action 内 C 再構築 = cycle 55 attractor
+    真因の 1 つ) を構造的に literal 解消 (PLAN v1.4 §3-4 + §6-2 literal)。
+
+    first-cycle bootstrap: state["_efe_C"] None or empty な cycle 1 でも
+    compute_C が空 state 許容 (空 self + 空 memory + 空 pending → 均一 sentinel)、
+    commit 3 controller_select の `_efe_C is None` graceful skip 依存ガードを literal 解消。
+
+    V10 Sedimentary C (2026-07-05): compute_C_from_self (identity 単源) →
+    compute_C (identity + opinion 堆積 + pending 持続関心の 3 源) に切替。
+    資格フィルタ (confidence / attempts / cap) を生き延びた蓄積だけが C の成分に
+    なる = 「評価結果の蓄積の結果として意味づけが立ち上がる」当初設計意図の配管接続。
+    cycle start snapshot + cycle 中 freeze (A2) は不変 = LLM 出力が同 cycle 内で
+    自分の選好になる self-referential loop は引き続き構造的に不可能。
+
+    Active Inference posterior observer pattern literal: cycle start で C を
+    prior preferences として固定 snapshot、cycle 中の self-referential update を禁止。
+    """
+    # lazy import: scipy 直接依存を controller.py module load 時に literal 必須化させない
+    # (preference_distribution.py:35 `from scipy import special` 経路、per-profile venv 前提)
+    from core.preference_distribution import compute_C
+    state["_efe_C"] = compute_C(state)
+    state["_efe_C_update_cycle"] = state.get("cycle_id", 0)
+
+
+def controller(state: dict, tools_dict: dict, level_tools: dict) -> dict:
+    """E値とenergyから構造的制約を導出。ツール解放レベルを判定。
+
+    段階13 Phase 6.1 (2026-05-04): exec_code / create_tool / 旧 self_modify
+    撤廃に伴い signature 簡素化 (ai_created_tools / dangerous_patterns /
+    run_ai_tool_fn 引数撤去)、sandbox/tools/ 動的 load 機構 + Level 4-6
+    昇格 logic を削除。Level 0-3 のみ残し、Level 3 = TOOLS 全 + bash + claw 系
+    を最終解放とする。
+
+    V07.5 commit 4 (A2 literal): cycle start で _efe_C を re-construct
+    (per-cycle snapshot literal、cycle 中は read-only freeze)。self-referential loop
+    (旧 update_self 同 action 内 C 再構築) を構造的に literal 解消、cycle 55 attractor
+    真因の 1 つ literal 防止。
+    """
+    # V07.5 commit 4: cycle start hook for preference C snapshot (A2 literal)
+    _rebuild_efe_C_snapshot(state)
+
+    energy = state.get("energy", 50)
+    # 段階13 Phase 0.1.D: tool 別 e2 平均で raw (tool/result) と subjective (e2)
+    # の両層 field を同時参照するため merge view を使う
+    log = merge_log_view(state)
 
     # --- ツール順序: 各ツールの過去E2平均で並べる ---
     tool_e2 = {}
@@ -60,59 +108,17 @@ def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tool
 
     ranked = sorted(tools_dict.keys(), key=lambda t: tool_avg[t], reverse=True)
 
-    # --- tool_level による段階解放 ---
+    # --- tool_level による段階解放 (Level 0-3、Phase 6.1 で 0-6 から縮約) ---
     fr = set(state.get("files_read", []))
     fw = set(state.get("files_written", []))
     lv = state.get("tool_level", 0)
     new_lv = lv
-    tc = state.get("tools_created", [])
     if lv == 0 and len(fr) >= 1:
         new_lv = 1
     elif lv == 1 and len(fr) >= 2:
         new_lv = 2
     elif lv == 2 and len(fr) >= 1 and len(fw) >= 1 and len(fr) + len(fw) >= 5:
         new_lv = 3
-    elif lv == 3 and any(f.endswith(".py") for f in fw):
-        new_lv = 4
-    elif lv == 4 and len(tc) >= 1:
-        new_lv = 5
-
-    # Level 6: bash + 全 tool fullset (旧 self_modify 解放経路、段階12 Step 7 で
-    # 撤廃。Level 5 = Level 6 = TOOLS 全部、Level 区別は将来拡張余地として残置)
-    if lv == 5:
-        ec_entries = [e for e in log if e.get("tool") == "exec_code"]
-        ct_entries = [e for e in log if e.get("tool") == "create_tool"]
-        if len(ec_entries) + len(ct_entries) >= 7 and len(ec_entries) >= 2 and len(ct_entries) >= 2:
-            if tool_avg.get("exec_code", 0) >= 65 and tool_avg.get("create_tool", 0) >= 65:
-                def _e2_list(entries):
-                    result = []
-                    for e in entries:
-                        m = re.search(r'(\d+)%', str(e.get("e2", "")))
-                        if m:
-                            result.append(int(m.group(1)))
-                    return result
-                def _std(vals):
-                    if len(vals) < 2:
-                        return 0.0
-                    mean = sum(vals) / len(vals)
-                    return (sum((x - mean) ** 2 for x in vals) / len(vals)) ** 0.5
-                ec_std = _std(_e2_list(ec_entries[-3:]))
-                ct_std = _std(_e2_list(ct_entries[-3:]))
-                if ec_std < 20 and ct_std < 20:
-                    def _err_rate(entries, tool):
-                        valid = [e for e in entries if not str(e.get("result", "")).startswith("キャンセル")]
-                        if not valid:
-                            return 1.0
-                        if tool == "exec_code":
-                            errs = [e for e in valid if
-                                    str(e.get("result", "")).startswith("タイムアウト") or
-                                    "[stderr]" in str(e.get("result", ""))]
-                        else:
-                            errs = [e for e in valid if
-                                    str(e.get("result", "")).startswith(("コンパイルエラー", "エラー:"))]
-                        return len(errs) / len(valid)
-                    if _err_rate(ec_entries, "exec_code") <= 0.3 and _err_rate(ct_entries, "create_tool") <= 0.3:
-                        new_lv = 6
 
     allowed = set(level_tools[new_lv])
 
@@ -143,9 +149,119 @@ def controller(state: dict, tools_dict: dict, level_tools: dict, ai_created_tool
     }
 
 
+# ============================================================
+# 段階14 Step B: Attractor Cosine Redundancy Detection
+# ============================================================
+#
+# STAGE14 PLAN §4 の実装。LLM① 候補中で「同 tool / 異 reason」を別経路
+# attack と扱わず、attractor 空間の縮退として検出する。Spisak & Friston 2025
+# の Self-orthogonalizing Attractor Networks 直交性 FEP 帰結を候補生成段階に
+# 適用、cluster 縮退で weight 圧縮 = 罰でなく FEP 自然帰結。
+#
+# PLAN §4 literal の `_embedding` / `_cosine` は概念呼称、実装は controller.py
+# 既存 pattern (core.embedding._embed_sync + cosine_similarity) を流用。
+
+REDUNDANCY_THRESHOLD = 0.85  # PLAN §4-2 / §10-7 確定値 (entity_resolver SAME_THRESHOLD 整合)
+
+
+def _detect_attractor_redundancy(
+    candidates: list,
+    threshold: float = REDUNDANCY_THRESHOLD,
+) -> dict:
+    """候補の reason embedding を cosine 比較し、redundancy cluster を返す。
+
+    PLAN §4-2 literal: 同 tool / 異 reason を別経路と扱わず attractor 空間の
+    縮退として検出。union-find で cluster 数算出、diversity_score = cluster
+    数 / N で controller_select の weight 圧縮入力とする。
+
+    Args:
+        candidates: LLM① の候補 list、各 dict に "tool" / "reason" key 想定
+        threshold: cosine 同一視の閾値 (default 0.85)
+
+    Returns:
+        {
+            "redundancy_pairs": [(i, j, cosine), ...],  # 閾値超ペア
+            "cluster_count": int,                        # 独立 cluster 数 (ideal=N)
+            "redundant_tool_set": set[str],              # 縮退 tool 名
+            "diversity_score": float,                    # cluster_count / N (0.2-1.0)
+        }
+
+    Embedding 未起動 / 失敗時は redundancy なし扱い (cluster_count=N,
+    diversity=1.0) で fallback、controller_select の補正は発火しない。
+    """
+    n = len(candidates)
+    if n == 0:
+        return {
+            "redundancy_pairs": [],
+            "cluster_count": 0,
+            "redundant_tool_set": set(),
+            "diversity_score": 0.0,
+        }
+
+    # Embedding 未起動 → redundancy 検出 skip (構造 fallback、PLAN §1 LLM as
+    # brain 整合)
+    if not is_vector_ready():
+        return {
+            "redundancy_pairs": [],
+            "cluster_count": n,
+            "redundant_tool_set": set(),
+            "diversity_score": 1.0,
+        }
+
+    reasons = [str(c.get("reason", "")) for c in candidates]
+    vecs = _embed_sync(reasons)
+    # Codex review P2-b fix: malformed (length 不一致) vector list でも fallback
+    if not vecs or len(vecs) != n:
+        return {
+            "redundancy_pairs": [],
+            "cluster_count": n,
+            "redundant_tool_set": set(),
+            "diversity_score": 1.0,
+        }
+
+    # 閾値超 cosine pair 抽出
+    pairs = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            cos = cosine_similarity(vecs[i], vecs[j])
+            if cos > threshold:
+                pairs.append((i, j, cos))
+
+    # union-find ライト (PLAN §4-2 literal、5 候補で再帰深度安全)
+    parent = list(range(n))
+
+    def find(x):
+        return x if parent[x] == x else find(parent[x])
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    for i, j, _ in pairs:
+        union(i, j)
+    cluster_count = len(set(find(x) for x in range(n)))
+
+    # 縮退 tool 集合: 同 tool 名の pair が縮退してる場合を記録
+    redundant_tools = set()
+    for i, j, _ in pairs:
+        if candidates[i].get("tool") == candidates[j].get("tool"):
+            tool_name = candidates[i].get("tool")
+            if tool_name:
+                redundant_tools.add(tool_name)
+
+    return {
+        "redundancy_pairs": pairs,
+        "cluster_count": cluster_count,
+        "redundant_tool_set": redundant_tools,
+        "diversity_score": cluster_count / max(1, n),
+    }
+
+
 def _intent_conditioned_scores(candidates: list, state: dict) -> list:
     """候補ごとに、過去の類似intent×同toolのE2加重平均を返す。"""
-    log = state.get("log", [])
+    # 段階13 Phase 0.1.D: intent (subj) + tool (raw) + e2 (subj) を同時参照のため merge
+    log = merge_log_view(state)
     if not log or not is_vector_ready():
         return [50.0] * len(candidates)
 
@@ -317,63 +433,171 @@ def _predicted_outcome_multiplier(prediction: dict, candidate: dict,
         # predicted_ec 欠如 (Light fallback や古い LLM 応答) は段階9 挙動維持
         combined = pe2_ratio
 
+    # 段階14 Step C: β を pragmatic value に逆作用 (β 高 = pragmatic 抑制)、
+    # Curiosity is Knowledge 2026 の lower bound 不等式直訳 (PLAN §5-2 literal)。
+    from core.predictor import _compute_dynamic_beta
+    beta = _compute_dynamic_beta(state, candidate)
     floor = float(cfg.get("predicted_e2_floor", 0.05))
-    mult = max(floor, combined)
+    mult = max(floor, combined / beta)
     if combined < 0.4:
-        candidate.setdefault("penalties", []).append(f"low_outcome={round(combined, 3)}")
+        candidate.setdefault("penalties", []).append(
+            f"low_outcome={round(combined, 3)} beta={round(beta, 2)}"
+        )
     return mult
 
 
-def controller_select(candidates: list, ctrl: dict, state: dict) -> dict:
-    """D-4設計 + intent-conditioned scoring + entropy認知品質 + UPS v2 priority"""
-    energy = state.get("energy", 50) / 100.0
-    entropy = state.get("entropy", 0.65)
-    tool_rank = ctrl.get("tool_rank", {})
-    n = len(candidates)
+def controller_select(candidates: list, ctrl: dict, state: dict,
+                      observe: dict | None = None) -> dict:
+    """V07.5 commit 3: argmin_π G(π) literal selection (paradigm shift 核心)。
 
+    旧 multiplicative chain (tool_rank / intent_scores / sharpness / novelty /
+    _pending_priority_boost / _channel_mismatch_multiplier / _predicted_outcome_multiplier
+    / attractor_redundancy 圧縮 / random.random sampling) を literal 撤去、
+    EFE 9 成分 (commit 2.5 統一 signature) + JEPA predict_next_conditioned_batch (commit 1)
+    で **argmin_π G(π)** literal selection 達成 (PLAN v1.4 §3-1 + §4-1 commit 3 literal)。
+
+    撤去 5 経路 (tool_rank / intent_scores / _pending_priority_boost /
+    _channel_mismatch_multiplier / attractor_redundancy 圧縮) の **機構自体は維持** =
+    selection multiplier から外すのみ。各機構の state field 化 (telemetry) は保持、
+    selection には literal 流さない (Codex 軸 1 OK + 軸 4 GAP literal 反映)。
+
+    natural emergence: centroid_stuck → attractor_redundancy のみ literal 確認済
+    (commit 2.5 `_centroid_stuck` 経由)、他 4 経路 (pending/channel/tool_rank/intent) は
+    EFE 9 成分に未接続 = smoke 観察対象 (PLAN v1.4 §8-5 literal):
+    - pending 解消遅延 / channel 応答外れ / tool 選択不安定化 を smoke で監視
+    - 実害化時 hotfix (該当経路を G の項に literal 統合、別 commit)
+
+    撤去 1 経路 (_predicted_outcome_multiplier、pressure 由来) は A3 literal で完全撤去
+    (cycle 55 attractor 真因の中核解消、PLAN §1-3 literal)。
+    pressure 機構自体は維持 (`main.py:1202, 1211` の calc_pressure_signals + 累積式、
+    `reflection.py:64-82` 前倒し reflection、内発駆動 device、Codex AXIS 3 Blocker 死守)。
+
+    Codex commit 2.5 P3 #1 literal 反映: shallow copy `dict(state)` で `_efe_*_view`
+    一時 field の元 state pollution 回避。C None graceful skip (cycle 1 bootstrap
+    依存ガード、commit 4 並走不要、Codex 軸 7 GAP literal 反映)。
+
+    observe 指定時だけ独立した辞書に候補 tools・G・選択位置を渡す。state と戻り値は不変。
+    """
+    # 機構保持 (state field 化のみ、selection には流さない、telemetry 用途)
     intent_scores = _intent_conditioned_scores(candidates, state)
-
-    sharpness = (1 - energy) * (1 - entropy)
-
-    weights = []
     for i, c in enumerate(candidates):
-        base = tool_rank.get(c["tool"], 50) / 100.0
-        ics = intent_scores[i] / 100.0
-        score = (base + ics) / 2.0
-        w = score * sharpness + (1.0 / n) * (1 - sharpness)
-        # 事前シミュレーション（報酬予測誤差）: 予測結果新規性が低い → 動機が生まれない
-        novelty = predict_result_novelty(state, c["tool"], c.get("reason", ""))
-        w *= max(0.05, novelty)
-        # UPS v2 priority boost: 未消化 pending を解消する候補を優先
-        w *= _pending_priority_boost(state, c)
-        # 段階5: channel_mismatch 乗算 (PLAN §4-1)
-        w *= _channel_mismatch_multiplier(c, state, WORLD_MODEL_CFG)
-        # 段階5→9: Predictor による predicted_e2 乗算 (pragmatic value of EFE)。
-        # 段階9 で category 離散から predicted_e2 連続値に置換、既存 novelty
-        # (epistemic value) と同形式 max(floor, x) で統合乗算。
-        # in-context world model (NAACL 2025) の direct instance。
+        c["_intent_score"] = intent_scores[i]  # telemetry only
+
+    # 段階14 Step B: attractor redundancy 検出 + state field 化 (telemetry)、
+    # selection 圧縮乗算は撤去 (natural emergence: centroid_stuck → attractor_redundancy literal)
+    redundancy = _detect_attractor_redundancy(candidates)
+    state["last_redundancy"] = {
+        "redundancy_pairs": [list(p) for p in redundancy["redundancy_pairs"]],
+        "cluster_count": redundancy["cluster_count"],
+        "redundant_tool_set": sorted(redundancy["redundant_tool_set"]),
+        "diversity_score": redundancy["diversity_score"],
+    }
+
+    # predictor.predict (state field 化保持、selection 経路の predicted_outcome_multiplier
+    # は A3 literal 撤去、predicted_e2 / predicted_ec は main.py で prediction_error 計算継続)
+    for c in candidates:
         prediction = _PREDICTOR.predict(c, state, state.get("world_model"))
         c["predicted_outcome"] = prediction
-        # 段階9: 予測誤差計測のため candidate に記録 (main.py で log entry に転写)
-        c["_predicted_e2"] = prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
-        # 段階10 柱 C: predicted_ec も同様 (main.py で prediction_error_ec 計算に使用)
-        c["_predicted_ec"] = prediction.get("predicted_ec") if isinstance(prediction, dict) else None
-        w *= _predicted_outcome_multiplier(prediction, c, state, WORLD_MODEL_CFG)
-        if novelty < 0.5:
-            try:
-                from core.config import RESOLUTION_LOG
-                with open(RESOLUTION_LOG, "a", encoding="utf-8") as _f:
-                    _f.write(f"  [predict] {c['tool']} novelty={novelty:.2f} "
-                             f"reason={c.get('reason','')[:40]}\n")
-            except Exception:
-                pass
-        weights.append(w)
+        c["_predicted_e2"] = (
+            prediction.get("predicted_e2", 50) if isinstance(prediction, dict) else 50
+        )
+        c["_predicted_ec"] = (
+            prediction.get("predicted_ec") if isinstance(prediction, dict) else None
+        )
 
-    total = sum(weights)
-    r = random.random() * total
-    cumul = 0.0
-    for i, w in enumerate(weights):
-        cumul += w
-        if r <= cumul:
-            return candidates[i]
-    return candidates[-1]
+    # V07.5 commit 3: argmin_π G(π) literal selection
+    # 1. entries / links / fog_now を取得 (metrics.py と同経路、newest first sort)
+    #
+    # V07.5 commit 3 debt track + observability (Codex review 1 周目 P2-2 reference、
+    # commit 4/6 で cycle-level cache 経路追加予定): 本 hot path I/O は metrics.py
+    # cycle 末計算と literal 重複 (両者で load_all_subjective_entries +
+    # load_all_memories + list_links + compute_fog_metrics を別タイミングで実行)。
+    # `_v07_5_io_elapsed_ms` で計測して smoke 観察可能化、実害化時 (cycle 時間延伸
+    # literal 観察) は cycle-level cache に commit 4/6 で経路追加。
+    _io_t0 = time.time()
+    entries_with_embedding = [
+        e for e in load_all_subjective_entries()
+        if isinstance(e.get("embedding"), list)
+    ] + [
+        e for e in load_all_memories()
+        if isinstance(e.get("embedding"), list)
+    ]
+    _sort_entries_global_newest_first(entries_with_embedding)
+    links = list_links(limit=LINKS_SCAN_LIMIT)
+    fog_now = compute_fog_metrics(state, entries_with_embedding, links)
+    state["_v07_5_io_elapsed_ms"] = round((time.time() - _io_t0) * 1000, 2)
+    prev_snapshot = state.get(CYCLE_KEY, {}) or {}
+
+    # 2. JEPA predict_next_conditioned_batch (commit 1) で各 candidate の predicted_embedding 取得
+    # graceful skip: torch 未 install / bge-m3 未起動 / sequence 不足で None
+    predicted_embeddings = predict_next_conditioned_batch(state, candidates)
+
+    # 3. 各 candidate の G(π) literal 計算
+    # C None graceful skip: state["_efe_C"] 未構築 cycle 1 で compute_efe_components が
+    # pragmatic value 経路を 0.0 で graceful return、G 計算継続 (commit 4 並走不要)
+    g_values = []
+    for i, c in enumerate(candidates):
+        pred_emb = (
+            predicted_embeddings[i]
+            if (predicted_embeddings is not None and i < len(predicted_embeddings))
+            else None
+        )
+        hypothetical_next = {
+            "predicted_embedding": pred_emb,
+            "candidate": c,
+        }
+        efe = compute_efe_components(
+            state,
+            prev_snapshot,
+            entries_with_embedding=entries_with_embedding,
+            links=links,
+            fog_now=fog_now,
+            hypothetical_next=hypothetical_next,
+        )
+        g_values.append(efe.get("G", 0.0))
+        c["_efe_G"] = efe.get("G", 0.0)  # telemetry: 各 candidate の G 値を保持
+
+    # 4. argmin_π G(π) literal selection (Friston FEP literal、最小化対象)
+    if not g_values:
+        return candidates[-1]
+    min_idx = g_values.index(min(g_values))
+
+    # V07.5 commit 3 P2-1 fix (Codex 1 周目 literal): 全 G 値タイ縮退検出
+    # JEPA 未起動 + 全候補同 tool 等で各 helper が同一 graceful 0.0 を返す literal case では
+    # g_values が全タイ → argmin が first-candidate 任意選択 literal 縮退。
+    # smoke で degraded=True が頻発する場合は paradigm shift literal の前提が崩れてる
+    # signal (= candidates 生成側 / JEPA / EFE 計算経路の literal 不全)、hotfix 必要。
+    g_min = min(g_values)
+    g_max = max(g_values)
+    g_spread = g_max - g_min
+    g_degraded = g_spread < 1e-6  # tie 検出 threshold (numerical noise level literal)
+
+    # selection log (V07.5 commit 5: C_version / policy_snapshot_id / basin_snapshot_id 拡張完了)
+    # snapshot consistency literal (Codex 4 turn rescue 2 turn 目 verify):
+    # - C_version: cycle start hook で更新された _efe_C の cycle_id (commit 4 lifecycle 経由)
+    # - policy_snapshot_id: selected candidate の tool + intent hash (smoke で policy 追跡)
+    # - basin_snapshot_id: 現 basin id (commit 5 world_model.py:423 fix 後の堅牢化 basin)
+    state["last_selection_log"] = {
+        "g_values": [round(g, 6) for g in g_values],
+        "selected_idx": min_idx,
+        "selected_tool": candidates[min_idx].get("tool", ""),
+        "selection_method": "argmin_G",  # V07.5 paradigm shift literal marker
+        "degraded": g_degraded,  # P2-1 fix: 全 G タイ縮退 literal observability
+        "g_spread": round(g_spread, 6),  # G 値の literal な散らばり (smoke 観察用)
+        # V07.5 commit 5: snapshot consistency 3 field
+        "C_version": state.get("_efe_C_update_cycle", -1),
+        "policy_snapshot_id": _build_policy_snapshot_id(candidates[min_idx]),
+        "basin_snapshot_id": state.get("basin_state", {}).get("current_basin_id", ""),
+    }
+
+    if observe is not None:
+        try:
+            observe.update({
+                "candidate_tools": [list(c.get("tools", [c.get("tool", "")]))
+                                    for c in candidates],
+                "g_values": list(g_values),
+                "selected_idx": min_idx,
+            })
+        except Exception as e:
+            print(f"  [outward] selection observation skip: {e}")
+    return candidates[min_idx]

@@ -20,14 +20,14 @@ def _approval_props() -> dict:
             "type": "string",
             "description": "期待する結果 (1 文、80 字目安)",
         },
-        "message": {
+        "note": {
             "type": "string",
-            "description": "端末前の協力者への一言 (承認時の依頼理由に使われる)",
+            "description": "自由に書ける欄",
         },
     }
 
 
-_APPROVAL_REQUIRED = ["tool_intent", "tool_expected_outcome", "message"]
+_APPROVAL_REQUIRED = ["tool_intent", "tool_expected_outcome"]
 
 
 def _build_specs(tools_dict: dict) -> list:
@@ -86,7 +86,6 @@ def _build_specs(tools_dict: dict) -> list:
             name="mic_record",
             description=(
                 "端末のマイクで同期録音し、speech 書き起こしと環境音分類を返す。"
-                "承認必須 (装置作動)。"
             ),
             input_schema={
                 "type": "object",
@@ -101,6 +100,10 @@ def _build_specs(tools_dict: dict) -> list:
                         "type": "string",
                         "description": "言語 hint (省略時は自動検出)",
                     },
+                    "message": {
+                        "type": "string",
+                        "description": "操作に添える説明 (省略可)",
+                    },
                     **_approval_props(),
                 },
                 "required": ["duration_sec", *_APPROVAL_REQUIRED],
@@ -113,7 +116,7 @@ def _build_specs(tools_dict: dict) -> list:
             name="camera_stream",
             description=(
                 "端末カメラで連続撮影を非同期に開始する。最初のフレームは同期で "
-                "描写取得、後続は rolling buffer に蓄積。承認必須。"
+                "描写取得、後続は rolling buffer に蓄積。"
             ),
             input_schema={
                 "type": "object",
@@ -134,6 +137,10 @@ def _build_specs(tools_dict: dict) -> list:
                         "minimum": 0.3,
                         "maximum": 5.0,
                         "description": "撮影間隔 (秒、0.3-5.0、default 1.0)",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "操作に添える説明 (省略可)",
                     },
                     **_approval_props(),
                 },
@@ -161,7 +168,6 @@ def _build_specs(tools_dict: dict) -> list:
             name="screen_peek",
             description=(
                 "端末のスクリーンを非同期でキャプチャする (camera_stream の画面版)。"
-                "MediaProjection 許可ダイアログあり。承認必須。"
             ),
             input_schema={
                 "type": "object",
@@ -177,6 +183,10 @@ def _build_specs(tools_dict: dict) -> list:
                         "minimum": 0.3,
                         "maximum": 5.0,
                         "description": "キャプチャ間隔 (秒、default 1.0)",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "操作に添える説明 (省略可)",
                     },
                     **_approval_props(),
                 },

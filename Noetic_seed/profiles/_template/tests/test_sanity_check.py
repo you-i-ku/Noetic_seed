@@ -3,22 +3,26 @@
 検査項目:
   - _check_state_json: 正常 / JSON 破損 / 必須キー欠落 / 不存在 (初回起動)
   - _check_memory_jsons: 正常 / 破損 JSON あり / memory/ 不存在 (初回起動)
-  - _check_imports: 実 module を mock (importlib + sys.modules)
+  - _check_imports: 別プロセスの実 import、構文・実行時例外、起動失敗・timeout
+  - _enumerate_runtime_modules: 実 walk + package broken 検出 (Issue 5 fix)
   - enforce_sanity_check: 成功経路 / 失敗 + revert 成功 / 失敗 + stash なし /
     auto_revert=False 失敗
 
-実 module の import / 実 git 操作はせず、_run_all_checks や
-_try_auto_revert_from_stash を mock してフロー検証する。
+一時 profile で検査し、実 git 操作はしない。
+_try_auto_revert_from_stash を mock して復元後の再検査も検証する。
 
 使い方:
   cd Noetic_seed/profiles/_template
   python tests/test_sanity_check.py
 """
+import importlib
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -27,6 +31,8 @@ from core.sanity_check import (
     SanityCheckError,
     _check_state_json,
     _check_memory_jsons,
+    _check_imports,
+    _enumerate_runtime_modules,
     enforce_sanity_check,
 )
 
@@ -51,7 +57,7 @@ def _setup_profile(state_content=None, memory_jsons=None):
 
 def test_state_json_valid():
     print("== state.json 正常 ==")
-    valid = json.dumps({"cycle_id": 1, "tool_level": 0, "log": []})
+    valid = json.dumps({"cycle_id": 1, "tool_level": 0, "subjective_entries": []})
     tmp = _setup_profile(state_content=valid)
     try:
         _check_state_json(tmp)
@@ -129,6 +135,119 @@ def test_memory_dir_absent():
         return _assert(False, f"raise 想定外: {e}")
 
 
+def test_enumerate_runtime_modules_lists_known_files():
+    """Issue 5 fix (2026-05-02): _enumerate_runtime_modules が
+    core/runtime/ 配下の既知 module を含む list を返すか (実 walk)。
+    """
+    print("== _enumerate_runtime_modules: core.runtime 配下を実列挙 ==")
+    modules = _enumerate_runtime_modules()
+    expected_present = (
+        "core.runtime.hooks",
+        "core.runtime.permissions",
+        "core.runtime.config",
+    )
+    return all([
+        _assert(isinstance(modules, list), "list 型を返す"),
+        _assert(
+            all(m in modules for m in expected_present),
+            f"既知の runtime module を含む (期待: {expected_present}, "
+            f"実測 {len(modules)} 件)",
+        ),
+        _assert(
+            all(m.startswith("core.runtime.") for m in modules),
+            "全 module が 'core.runtime.' prefix",
+        ),
+    ])
+
+
+def test_enumerate_runtime_pkg_import_failure_raises():
+    """core.runtime package 自体の import 失敗 → SanityCheckError raise。"""
+    print("== _enumerate_runtime_modules: package import 失敗で raise ==")
+
+    def fake_import(name):
+        if name == "core.runtime":
+            raise ImportError("simulate package broken")
+        return importlib.import_module(name)
+
+    with patch.object(sanity_check.importlib, "import_module",
+                      side_effect=fake_import):
+        try:
+            _enumerate_runtime_modules()
+            return _assert(False, "raise されるべき")
+        except SanityCheckError as e:
+            return _assert(
+                "core.runtime package" in str(e),
+                f"reason に 'core.runtime package' 含む (実測: {e})",
+            )
+
+
+def test_check_imports_runtime_module_failure_detected():
+    """Issue 5 fix の核心動作: core.runtime.* の import 失敗を検出。
+
+    旧版は hardcoded "core.controller" / "tools" のみ検査で、
+    core/runtime/util.py 等の SyntaxError を素通りさせていた (smoke12
+    シナリオ C で発覚)。Fix 後は pkgutil.iter_modules で core/runtime/
+    配下を walk して検出する。
+    """
+    print("== _check_imports: core.runtime.* の import 失敗を検出 ==")
+
+    result = subprocess.CompletedProcess([], 1, "", "SyntaxError: core.runtime.fake_broken")
+    with patch.object(sanity_check.subprocess, "run", return_value=result):
+        try:
+            _check_imports()
+            return _assert(False, "raise されるべき")
+        except SanityCheckError as e:
+            return _assert(
+                "core.runtime.fake_broken" in str(e),
+                f"reason に 'core.runtime.fake_broken' 含む (実測: {e})",
+            )
+
+
+@pytest.mark.parametrize("source,diagnostic", [
+    ("def invalid(:\n", "SyntaxError"),
+    ("raise RuntimeError('import-time failure')\n", "import-time failure"),
+])
+def test_fresh_child_detects_disk_errors_and_revert_rechecks(tmp_path, monkeypatch, source, diagnostic):
+    # A miniature profile runs the real subprocess path, without external APIs.
+    for relative in ("core/__init__.py", "core/controller.py", "core/runtime/__init__.py", "tools/__init__.py"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    target = tmp_path / "core/runtime/broken.py"
+    target.write_text(source, encoding="utf-8")
+    checker = tmp_path / "core/sanity_check.py"
+    checker.write_text(Path(sanity_check.__file__).read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(sanity_check, "__file__", str(checker))
+    with pytest.raises(SanityCheckError, match=diagnostic):
+        sanity_check._check_imports()
+    def revert(*args):
+        target.write_text("answer = 42\n", encoding="utf-8")
+        return True
+    with patch.object(sanity_check, "_try_auto_revert_from_stash", side_effect=revert) as restore:
+        sanity_check.enforce_sanity_check(tmp_path, "test")
+        restore.assert_called_once()
+    assert not list(tmp_path.rglob("*.pyc"))
+
+
+@pytest.mark.parametrize("error", [OSError("cannot launch"), subprocess.TimeoutExpired("python", 60)])
+def test_import_probe_launch_failure_and_timeout(error):
+    with patch.object(sanity_check.subprocess, "run", side_effect=error):
+        with pytest.raises(SanityCheckError, match=type(error).__name__):
+            sanity_check._check_imports()
+
+
+def test_import_probe_uses_profile_interpreter_and_no_parent_reload():
+    result = subprocess.CompletedProcess([], 0, "", "")
+    with patch.object(sanity_check.subprocess, "run", return_value=result) as run, \
+         patch.object(sanity_check.importlib, "reload", side_effect=AssertionError("live reload")):
+        sanity_check._check_imports()
+    args, kwargs = run.call_args
+    assert args[0][:3] == [sys.executable, "-B", "-c"]
+    assert "_enumerate_runtime_modules" in args[0][3]
+    assert kwargs["cwd"] == Path(sanity_check.__file__).resolve().parents[1]
+    assert kwargs["timeout"] == 60
+
+
 def test_enforce_success_returns_none():
     print("== enforce_sanity_check 全 OK で None 返り (起動続行) ==")
     tmp = Path(tempfile.mkdtemp(prefix="noetic_sanity_enforce_"))
@@ -201,6 +320,12 @@ if __name__ == "__main__":
         ("memory/ 全 JSON 正常", test_memory_jsons_all_valid),
         ("memory/ 壊れた JSON あり", test_memory_jsons_broken),
         ("memory/ 不存在 (初回起動)", test_memory_dir_absent),
+        ("Issue 5 fix: _enumerate_runtime_modules 実列挙",
+         test_enumerate_runtime_modules_lists_known_files),
+        ("Issue 5 fix: core.runtime package import 失敗で raise",
+         test_enumerate_runtime_pkg_import_failure_raises),
+        ("Issue 5 fix: core.runtime.* import 失敗を検出",
+         test_check_imports_runtime_module_failure_detected),
         ("enforce 全 OK で続行", test_enforce_success_returns_none),
         ("enforce 失敗 + revert 成功 + 再 check 成功 で続行",
          test_enforce_failure_with_revert_success),

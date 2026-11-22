@@ -1,4 +1,6 @@
 """長期記憶管理（アーカイブ・要約・圧縮 + Entity/Opinionネットワーク）"""
+from core.runtime.registry import result_redactor
+
 import json
 import re
 import uuid
@@ -10,6 +12,8 @@ from core.llm import call_llm
 from core.embedding import is_vector_ready, _embed_sync, cosine_similarity
 from core.tag_registry import is_tag_registered, list_registered_tags, get_tag_rules
 from core.perspective import Perspective, default_self_perspective
+from core.memory_read import MemoryReadReport, read_memory_jsonl
+from core.runtime.registry import ToolError
 
 # === Entity/Opinion Network (段階7: tag_registry で動的管理) ===
 # 段階6-C まで: _VALID_NETWORKS = {"experience", "opinion", "entity"} (ハードコード)
@@ -17,6 +21,30 @@ from core.perspective import Perspective, default_self_perspective
 
 
 UNTAGGED_NETWORK = "_untagged"
+
+
+# === 段階13 Phase 0.1.A: raw / subjective 二層分離 field set ===
+# 判断軸 7 (PLAN §20-2 / handoff memo) に従って entry field を分配する。
+# id は両側に重複、perspective / to_perspective は partition meta として両側保持。
+# 未知 field は raw 寄せ + _unclassified_fields マーカー (SCHEMA_META_FIELDS) で
+# 明示し、schema_warnings.jsonl に記録する (cap SCHEMA_WARNINGS_CAP 超で archive)。
+RAW_FIELDS = frozenset({
+    "id", "time", "channel", "tool", "args", "result", "type", "invocations",
+})
+SUBJECTIVE_FIELDS = frozenset({
+    "id", "intent", "expect",
+    "e1", "e2", "e3", "e4",
+    "predicted_e2", "predicted_ec",
+    "actual_e2", "actual_ec",
+    "prediction_error", "prediction_error_ec",
+    "per_tool", "parse_error",
+    # 段階13 Phase 1: Layer B enrichment (memory.jsonl と同名で統一、
+    # _enrich_subjective_inline で entry mutate 経由 inline 注入される)
+    "keywords", "contextual_description", "embedding",
+})
+PARTITION_META_FIELDS = frozenset({"perspective", "to_perspective"})
+SCHEMA_META_FIELDS = frozenset({"_unclassified_fields"})
+SCHEMA_WARNINGS_CAP = 1000
 
 
 def _network_file(network):
@@ -105,7 +133,8 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
                  _reconcile_embed_fn: Optional[object] = None,
                  _reconcile_cosine_fn: Optional[object] = None,
                  _reconcile_llm_fn: Optional[object] = None,
-                 _link_generation_enabled: bool = True) -> dict:
+                 _link_generation_enabled: bool = True,
+                 _post_save_failures: Optional[list] = None) -> dict:
     """記憶を保存。origin=生成きっかけ、source_context=根拠の出処。
 
     段階11-A: perspective kwarg を専用キーとして entry に昇格 (metadata と並列、
@@ -141,8 +170,10 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
             _meta = _generate_memory_metadata(content, network)
             keywords = _meta.get("keywords", [])
             contextual_description = _meta.get("contextual_description", "")
+        except ToolError:
+            raise
         except Exception as e:
-            print(f"  [memory] metadata 自動生成 skip (error: {e})")
+            print(f"  [memory] metadata 自動生成 skip (error: {result_redactor()(str(e))})")
             keywords = []
             contextual_description = ""
     else:
@@ -172,9 +203,15 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
     if _state is not None:
         _ef = _reconcile_embed_fn
         _cf = _reconcile_cosine_fn
-        if _ef is None and is_vector_ready():
-            _ef = _embed_sync
-            _cf = cosine_similarity
+        try:
+            if _ef is None and is_vector_ready():
+                _ef = _embed_sync
+                _cf = cosine_similarity
+        except Exception as e:
+            if _post_save_failures is None:
+                raise
+            _post_save_failures.append({"phase": "post_save_setup", "exception_type": type(e).__name__, "message": str(e)})
+            return entry
 
         # Phase 3 Step 3.3: reconciliation (矛盾検出 → EC 誤差)
         # bitemporal 凍結原則: 既存 fact は書き換えない
@@ -187,7 +224,9 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
                 llm_call_fn=_reconcile_llm_fn,
             )
         except Exception as e:
-            print(f"  [reconciliation] skip (error: {e})")
+            if _post_save_failures is not None:
+                _post_save_failures.append({"phase": "reconciliation", "exception_type": type(e).__name__, "message": str(e)})
+            print(f"  [reconciliation] skip (error: {result_redactor()(str(e))})")
 
         # Phase 4 Step 4.3: memory_links 同期生成 (近傍 top-K)
         if _link_generation_enabled:
@@ -198,64 +237,90 @@ def memory_store(network: Optional[str] = None, content: str = "", metadata: dic
                     embed_fn=_ef,
                     cosine_fn=_cf,
                     llm_call_fn=_reconcile_llm_fn,
+                    **({"failures": _post_save_failures} if _post_save_failures is not None else {}),
                 )
             except Exception as e:
-                print(f"  [memory_links] skip (error: {e})")
+                if _post_save_failures is not None:
+                    _post_save_failures.append({"phase": "links", "exception_type": type(e).__name__, "message": str(e)})
+                print(f"  [memory_links] skip (error: {result_redactor()(str(e))})")
 
     return entry
 
 
-def memory_update(memory_id: str, content: str = None, metadata: dict = None) -> str:
-    """既存記憶を更新。
+def memory_update(memory_id: str, content: str = None, metadata: dict = None,
+                  *, read_report=None) -> str:
+    """Update a matching ID, retaining unreadable rows unchanged."""
+    def update(entry):
+        if content is not None:
+            entry["content"] = content
+        if metadata is not None:
+            entry.setdefault("metadata", {}).update(metadata)
+        entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return entry
+    found, searched = _mutate_memory(memory_id, update, read_report=read_report)
+    if not found:
+        raise ToolError(f"エラー: {memory_id} が見つかりません",
+                        detail={"memory_id": memory_id, "networks_searched": searched,
+                                **(vars(read_report) if read_report is not None else {})})
+    return f"更新完了: {memory_id}"
 
-    段階11-D Phase 1 (Step 1.1): UNTAGGED_NETWORK も走査対象に追加。
-    """
+
+def memory_forget(memory_id: str, *, read_report=None) -> str:
+    """Delete a matching ID; content substrings and blank rows are not IDs."""
+    found, searched = _mutate_memory(memory_id, lambda entry: None, read_report=read_report)
+    if not found:
+        raise ToolError(f"エラー: {memory_id} が見つかりません",
+                        detail={"memory_id": memory_id, "networks_searched": searched,
+                                **(vars(read_report) if read_report is not None else {})})
+    return f"削除完了: {memory_id}"
+
+
+def _mutate_memory(memory_id, mutate, *, read_report=None):
+    report = read_report if read_report is not None else MemoryReadReport()
+    searched = 0
     for network in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
-        fpath = _network_file(network)
-        if not fpath.exists():
+        searched += 1
+        path = _network_file(network)
+        if not path.exists():
             continue
-        lines = fpath.read_text(encoding="utf-8").splitlines()
-        updated = False
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            if read_report is None:
+                raise
+            report.files_unreadable += 1
+            continue
+        if not any(line.strip() for line in lines):
+            report.empty_files += 1
+        found = False
         new_lines = []
         for line in lines:
             if not line.strip():
+                new_lines.append(line)
                 continue
             try:
                 entry = json.loads(line)
-                if entry.get("id") == memory_id:
-                    if content is not None:
-                        entry["content"] = content
-                    if metadata is not None:
-                        entry["metadata"].update(metadata)
-                    entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    updated = True
-                new_lines.append(json.dumps(entry, ensure_ascii=False))
-            except Exception:
+                if not isinstance(entry, dict):
+                    raise ValueError("memory row is not an object")
+            except ValueError:
+                report.rows_unreadable += 1
                 new_lines.append(line)
-        if updated:
-            fpath.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-            return f"更新完了: {memory_id}"
-    return f"エラー: {memory_id} が見つかりません"
+                continue
+            report.records_read += 1
+            if entry.get("id") != memory_id:
+                new_lines.append(line)
+                continue
+            updated = mutate(entry)
+            found = True
+            if updated is not None:
+                new_lines.append(json.dumps(updated, ensure_ascii=False))
+        if found:
+            path.write_text("\n".join(new_lines) + "\n" if new_lines else "", encoding="utf-8")
+            return True, searched
+    return False, searched
 
 
-def memory_forget(memory_id: str) -> str:
-    """記憶を削除。
-
-    段階11-D Phase 1 (Step 1.1): UNTAGGED_NETWORK も走査対象に追加。
-    """
-    for network in list(list_registered_tags()) + [UNTAGGED_NETWORK]:
-        fpath = _network_file(network)
-        if not fpath.exists():
-            continue
-        lines = fpath.read_text(encoding="utf-8").splitlines()
-        new_lines = [l for l in lines if l.strip() and memory_id not in l]
-        if len(new_lines) < len(lines):
-            fpath.write_text("\n".join(new_lines) + "\n" if new_lines else "", encoding="utf-8")
-            return f"削除完了: {memory_id}"
-    return f"エラー: {memory_id} が見つかりません"
-
-
-def load_all_memories() -> list:
+def load_all_memories(*, read_report=None) -> list:
     """全 network (UNTAGGED 含む) の memory entry を 1 list に集めて返す。
 
     段階11-D Phase 5 Step 5.2: cluster 推定 (estimate_clusters) の入力源。
@@ -277,21 +342,68 @@ def load_all_memories() -> list:
         fpath = _network_file(network)
         if not fpath.exists():
             continue
-        try:
-            lines = fpath.read_text(encoding="utf-8").splitlines()
-        except Exception:
-            continue
-        for line in reversed(lines):
-            if not line.strip():
-                continue
-            try:
-                all_entries.append(json.loads(line))
-            except Exception:
-                continue
+        all_entries.extend(read_memory_jsonl(fpath, report=read_report, reverse=True))
     return all_entries
 
 
-def list_records(network, limit: int = 20) -> list:
+def non_empty_subjective_entries(entries: list) -> list:
+    """段階13 Phase 1: subj entries list から intent / expect どちらか non-empty のみ抽出。
+
+    raw/subj 二層化 (Phase 0.1.A) で blank subj entry (id-only、raw event 起源) が
+    日常的に存在する構造 (`_split_entry_fields` の SUBJECTIVE_FIELDS に id 含まれる)
+    のため、subj 消費者は「filter → slice/limit」順序を必須とする。
+
+    本 helper で全消費者の semantic 契約を集約 (Phase 0 設計対称性継承、
+    Phase 2-7 で Layer C/D 消費者追加時にも再利用想定):
+      - state["subjective_entries"] (in-memory view) でも
+      - load_all_subjective_entries() (jsonl 全件) でも
+      同関数で扱えるよう list 経由 signature。
+
+    順序は元 list の順序維持 (slice/limit は呼出側で合わせる)。
+
+    Args:
+        entries: subj entry list (state["subjective_entries"] or
+                 load_all_subjective_entries() の出力等)
+    Returns:
+        intent または expect が non-empty な subj entry の list (元順序)
+    """
+    return [s for s in entries if (s.get("intent") or s.get("expect"))]
+
+
+def load_all_subjective_entries() -> list:
+    """段階13 Phase 1: subjective_entries.jsonl を全件 read して list で返す。
+
+    `load_all_memories` と同型 (cap なし、全件 reverse 順 = 新しい順)。
+    `find_similar_subjective` (entity_resolver) と get_relevant_memories の
+    subj 拡張で消費される。
+
+    cap なし設計 (Q2 ゆう判断 2026-04-26 継承): 「先に固定値を決めず観察 log で
+    cap 必要性を実証判断」=PLAN §11-4「マジックナンバー 0」精神延長。
+
+    Returns:
+        全 subjective entry の list (新しい順)。ファイル不在 / 読取失敗 / 壊れ
+        行は graceful skip (load_all_memories と同 isolation)。
+    """
+    MEMORY_DIR.mkdir(exist_ok=True)
+    fpath = MEMORY_DIR / "subjective_entries.jsonl"
+    if not fpath.exists():
+        return []
+    try:
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    entries: list = []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+    return entries
+
+
+def list_records(network, limit: int = 20, *, read_report=None) -> list:
     """指定ネットワークの jsonl を新しい順に読んで直近 limit 件を返す。
     WM の C-gradual 同期 (段階3) 等、検索ではなく全件走査系の消費者向け。
 
@@ -301,27 +413,11 @@ def list_records(network, limit: int = 20) -> list:
     if network != UNTAGGED_NETWORK and not is_tag_registered(network):
         return []
     fpath = _network_file(network)
-    if not fpath.exists():
-        return []
-    try:
-        lines = fpath.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return []
-    records = []
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            records.append(json.loads(line))
-        except Exception:
-            continue
-        if len(records) >= limit:
-            break
-    return records
+    return read_memory_jsonl(fpath, report=read_report, reverse=True, limit=limit)
 
 
 def memory_network_search(query: str, networks: list = None, limit: int = 5,
-                           view_filter: Optional[dict] = None) -> list:
+                           view_filter: Optional[dict] = None, *, read_report=None) -> list:
     """Entity/Opinionネットワークをベクトル検索。
 
     段階11-A Step 6: view_filter kwarg 追加 (perspective filter)。
@@ -342,15 +438,7 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5,
         if network != UNTAGGED_NETWORK and not is_tag_registered(network):
             continue
         fpath = _network_file(network)
-        if not fpath.exists():
-            continue
-        for line in fpath.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                all_entries.append(json.loads(line))
-            except Exception:
-                pass
+        all_entries.extend(read_memory_jsonl(fpath, report=read_report))
     if not all_entries:
         return []
 
@@ -375,6 +463,8 @@ def memory_network_search(query: str, networks: list = None, limit: int = 5,
                           for i in range(len(all_entries))]
                 scored.sort(key=lambda x: x[0], reverse=True)
                 return [{"score": s, **e} for s, e in scored[:limit]]
+        except ToolError:
+            raise
         except Exception:
             pass
     # フォールバック: キーワード
@@ -400,6 +490,9 @@ def get_relevant_memories(
     """プロンプト用: 直近intentに関連する記憶を取得。
     4ネットワーク検索 + archive の直近外部入力を合わせて返す。
     外部入力は優先的に先頭へ入れる（外部からの会話は忘却耐性を与える）。
+    主観記録は空を除いた末尾3件からIDあり・未採用のものを追加。
+    抜粋は intent 優先、なければ expect の
+    先頭80字（超過時は …）、通常の記憶は content。抜粋付与はコピーに行う。
 
     段階11-C G-lite Phase 1: use_links=True で memory_links graph 経由の
     近傍 memory を merge (既存 semantic search と併用、opt-in)。
@@ -414,7 +507,13 @@ def get_relevant_memories(
       use_links=True と組み合わせて 3 経路 (semantic / link / tag-filtered)
       hybrid retrieval が成立。経路別 top-k=5 / 統合 top-k=8 (PLAN §11-1)。
     """
-    recent_intents = [e.get("intent", "") for e in state.get("log", [])[-5:] if e.get("intent")]
+    # 段階13 Phase 1: filter 順序 (filter → slice) を non_empty_subjective_entries
+    # 経由で集約 (raw event 起源の blank subj 混入時に query が空になるのを防ぐ、
+    # Codex review 2 周目指摘の同型 bug fix を本箇所にも適用)。
+    recent_intents = [
+        e["intent"] for e in non_empty_subjective_entries(state.get("subjective_entries", []))[-5:]
+        if e.get("intent")
+    ]
 
     # archive からの最近の [external] 入力を優先的に取得
     external_mems = _recent_externals_from_archive(limit=3)
@@ -422,15 +521,13 @@ def get_relevant_memories(
     query_parts = [i for i in recent_intents if i]
     # external 原文も query に混ぜて類似度検索の精度を上げる
     query_parts.extend(str(m.get("content", "")) for m in external_mems)
-    if not query_parts:
-        return external_mems
-
     query = " ".join(query_parts)[:500]
     # 段階11-D Phase 7 Step 7.1: tag_filter=None で全 networks (UNTAGGED 含む)、
     # list 指定で絞込 (memory_network_search 内部で list_registered_tags +
     # UNTAGGED_NETWORK fallback、明示 list は list_registered_tags 経由で
     # is_tag_registered フィルタ)
-    network_mems = memory_network_search(query, networks=tag_filter, limit=limit)
+    network_mems = (memory_network_search(query, networks=tag_filter, limit=limit)
+                    if query_parts else [])
 
     # 外部入力を先頭に（重複除去）
     seen_ids = {m.get("id") for m in external_mems if m.get("id")}
@@ -447,9 +544,25 @@ def get_relevant_memories(
 
     # 段階11-C G-lite Phase 1: link 経由の近傍 memory を merge (opt-in)
     # 段階11-D Phase 3 Step 3.3: 経由 link の strength を update (Physarum rule)
+    # v0.5 Phase 5 Slice 4 F-001: EC prediction error を modulator として渡す
+    # (Phase 4 で signature 拡張済、本 Slice で production wiring)。
+    # state["prediction_error_history_ec"] の **前 cycle 末尾値 (latest
+    # completed-cycle value)** を使用、空なら None で modulator なし fallback
+    # (Phase 4 既存 graceful 経路、E2 fallback は feedback_predicted_metric_e2_vs_ec
+    # literal で EC 優先のため案 A)。
+    #
+    # timing = **前 cycle modulation** (Codex Slice 4 review P1-1 確認 2026-05-10):
+    # cycle 構造上 retrieval は cycle 序盤、prediction_error history 書込は cycle
+    # 末 (main.py:1080)。つまり今 cycle の retrieval は前 cycle の error を
+    # modulator として使う。これは RL/Active Inference 文献の標準パターン
+    # (TD error / FEP 学習則 = 過去誤差 → 現在 policy 更新) と整合、cycle 1
+    # bootstrap も history=[] → None graceful で自然。同 cycle modulation 化は
+    # cycle 構造改修 + bootstrap special case 必要のため採用しない。
     if use_links and network_mems:
         from core.memory_links import follow_links, update_link_strength_used
         current_cycle = state.get("cycle_id") if isinstance(state, dict) else None
+        ec_history = state.get("prediction_error_history_ec", []) if isinstance(state, dict) else []
+        current_pe = float(ec_history[-1]) if ec_history else None
         for origin_mem in network_mems[:link_top_n]:
             origin_id = origin_mem.get("id")
             if not origin_id:
@@ -475,11 +588,76 @@ def get_relevant_memories(
                 link_id = via_link.get("id")
                 if link_id:
                     try:
-                        update_link_strength_used(link_id, current_cycle=current_cycle)
+                        update_link_strength_used(link_id,
+                                                  current_cycle=current_cycle,
+                                                  prediction_error=current_pe)
                     except Exception as e:
-                        print(f"  [memory_links] strength update skip (error: {e})")
+                        print(f"  [memory_links] strength update skip (error: {result_redactor()(str(e))})")
                 merged.append(entry)
                 seen_ids.add(eid)
+
+        # v0.5 Phase 5 Slice 4 F-002: high EC error 時、retrieved memory 群
+        # から co_activation link を構造的生成 (LLM 通さず、Phase 4 trigger
+        # 関数経由)。current_pe が None (history 空) の時は trigger 評価 skip。
+        # 候補は network_mems 上位 top_n のみ (external mem は混入させない、
+        # PLAN_CODE_TRACEABILITY §3.1 F-002 literal「conservative first pass」
+        # + Phase 4 status §5-2 判断 I「実発火は smoke 観察後判断」整合)。
+        #
+        # P1-2 fix (Codex Slice 4 review 2026-05-10): current_pe は
+        # state['prediction_error_history_ec'][-1] = history tail なので、
+        # should_explore_new_links に state 直渡しすると tail 自身が percentile
+        # threshold 計算に self-include されて high-error trigger が抑制される。
+        # tail 抜きの shallow view を渡して current_pe を独立評価する。
+        if current_pe is not None and len(network_mems) >= 2:
+            try:
+                from core.memory_links import (
+                    should_explore_new_links,
+                    generate_co_activation_links,
+                )
+                ec_history_for_explore = ec_history[:-1] if ec_history else []
+                state_for_explore = dict(state) if isinstance(state, dict) else {}
+                state_for_explore["prediction_error_history_ec"] = ec_history_for_explore
+                if should_explore_new_links(state_for_explore, current_pe):
+                    generate_co_activation_links(
+                        network_mems,
+                        current_cycle=current_cycle,
+                    )
+            except Exception as e:
+                print(f"  [memory_links] co_activation hook skip (error: {result_redactor()(str(e))})")
+
+    # 段階13 Phase 1: subjective entry 直近 N 件を kind='subjective' marker で append。
+    # PLAN §21-6 (d) literal「結果 list に subj entry も append」+ 案 b (concept-perception
+    # alignment) literal: subj は memory と概念分離、prompt 表示でも分離。
+    # Phase 1 lean = recent 直近 (find_similar_subjective による hybrid 統合は Phase 1+ で
+    # 別経路、memo §実装案 d-2 lean 採用)。固定 3 件 (limit の保守的な比率、未来の調整は
+    # kwarg 化で対応、Phase 1 では新規 kwarg 追加しない方針)。
+    # ★ Codex review 2 周目反映: filter 順序 (filter → slice) を non_empty_subjective_entries
+    # 経由で集約。slice 先 → blank skip だと「直近 3 件全部 raw event 起源」の場合に subj
+    # context 1 件も拾えない bug を解消 (filter 後に slice すれば real subj が常に直近 3 件
+    # 取得される、Phase 0.1.A 設計の構造的帰結への対応)。
+    for s in non_empty_subjective_entries(state.get("subjective_entries", []))[-3:]:
+        sid = s.get("id")
+        if not sid or sid in seen_ids:
+            continue
+        merged.append({**s, "kind": "subjective"})
+        seen_ids.add(sid)
+
+    # V07 Phase 2 commit 5 (Codex audit 2026-05-14 P2-04 additive-only fix):
+    # excerpt_80chars field を全 entry に付与。既存 field は一切変更しない
+    # (subjective_view._related_memory が hybrid 80 字抜粋を直 read 可能、
+    # format_memories_for_prompt 等の既存 caller は本 field を consume しない
+    # ので後方互換、PLAN §4 Phase 2 commit 5 literal)。
+    # 境界: <=80 字は marker なし、>80 字は先頭 80 字 + "…" marker。
+    for i, entry in enumerate(merged):
+        m = dict(entry)
+        merged[i] = m
+        content = ((m.get("intent") or m.get("expect", ""))
+                   if m.get("kind") == "subjective" else m.get("content", ""))
+        content_str = str(content) if content else ""
+        if len(content_str) > 80:
+            m["excerpt_80chars"] = content_str[:80] + "…"
+        else:
+            m["excerpt_80chars"] = content_str
 
     return merged
 
@@ -536,6 +714,18 @@ def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
     lines = []
     total = 0
     for m in memories:
+        # 段階13 Phase 1: subjective entry の専用 render 分岐 (案 b = concept-perception
+        # alignment、ゆう判断 2026-05-03)。memory との概念分離を prompt 上でも明示。
+        # subj entry は intent / expect 構造、memory の content とは別 schema。
+        if m.get("kind") == "subjective":
+            intent = (m.get("intent", "") or "")[:200]
+            expect = (m.get("expect", "") or "")[:200]
+            line = f"  [subjective] intent={intent} | expect={expect}"
+            if total + len(line) > max_chars:
+                break
+            lines.append(line)
+            total += len(line)
+            continue
         network = m.get("network", "?")
         content = m.get("content", "")[:300]
         meta = m.get("metadata", {})
@@ -569,30 +759,249 @@ def format_memories_for_prompt(memories: list, max_chars: int = 2000) -> str:
     return "\n".join(lines)
 
 
-def _archive_entries(entries: list):
-    """エントリ群をmemory/archive_YYYYMMDD.jsonlに追記しindex.jsonを更新"""
+def invocation_result(entry: dict, invocation: dict) -> str:
+    """個別 result (空文字も含む) を優先し、無ければ result_ref の文字位置で復元。
+
+    result_ref は保存・再読込後の entry.result に対する Python 文字列の位置と長さ。
+    どちらも無い旧記録は空文字を返す。
+    """
+    if "result" in invocation:
+        return invocation["result"]
+    ref = invocation.get("result_ref")
+    if ref is not None:
+        return entry.get("result", "")[ref["start"]:ref["start"] + ref["length"]]
+    return ""
+
+
+def _split_entry_fields(entry: dict):
+    """段階13 Phase 0.1.A: entry を raw / subjective に分配する。
+
+    判断軸 7 に従って RAW_FIELDS は raw 側、SUBJECTIVE_FIELDS は subjective 側、
+    PARTITION_META_FIELDS (perspective / to_perspective) は両側に重複保持する。
+    未知 field は raw 寄せで保全 + raw["_unclassified_fields"] にリスト化して
+    マーカーを刻む (default policy: raw 寄せ、PLAN §20-2 軸 6 「迷ったら raw 側」)。
+
+    V07.5 commit 1 (Codex AXIS 2 High fix): id は RAW_FIELDS / SUBJECTIVE_FIELDS
+    両方に literal 含まれてるが (line 27-40)、将来 schema 変更時の regression
+    防止のため id 両側 literal 一致を assertion で防壁化する。これは V07.5
+    Proposal 2 の raw+subj id join training pair 構築 (jepa_runtime._collect_training_pairs)
+    の literal 基盤、id 1:1 対応が崩れたら Proposal 2 の training data
+    経路が成立しない (PLAN §6-7 literal)。
+
+    Returns:
+        (raw_part, subjective_part, unknown_fields)
+    """
+    raw = {k: v for k, v in entry.items() if k in RAW_FIELDS}
+    subj = {k: v for k, v in entry.items() if k in SUBJECTIVE_FIELDS}
+    for k in PARTITION_META_FIELDS:
+        if k in entry:
+            raw[k] = entry[k]
+            subj[k] = entry[k]
+    known = RAW_FIELDS | SUBJECTIVE_FIELDS | PARTITION_META_FIELDS | SCHEMA_META_FIELDS
+    unknown = [k for k in entry.keys() if k not in known]
+    if unknown:
+        for k in unknown:
+            raw[k] = entry[k]
+        raw["_unclassified_fields"] = list(unknown)
+    # V07.5 commit 1 (Codex AXIS 2 High): id 1:1 完全性 assertion (PLAN §6-7 literal)
+    if "id" in entry:
+        assert raw.get("id") == subj.get("id") == entry["id"], (
+            f"raw/subj id mismatch: raw={raw.get('id')!r} subj={subj.get('id')!r} "
+            f"entry={entry.get('id')!r} — RAW_FIELDS/SUBJECTIVE_FIELDS の id 経路が破壊された "
+            f"(V07.5 Proposal 2 training pair literal 基盤違反)"
+        )
+    return raw, subj, unknown
+
+
+def _emit_raw_event(raw_part: dict):
+    """段階13 Phase 0.1.A: raw event を memory/raw_events.jsonl に append-only で記録。
+
+    raw_events は source of truth (PLAN §18-2)、永続維持・compaction 対象外。
+    """
     MEMORY_DIR.mkdir(exist_ok=True)
-    today = datetime.now().strftime("%Y%m%d")
-    archive_file = MEMORY_DIR / f"archive_{today}.jsonl"
+    target = MEMORY_DIR / "raw_events.jsonl"
+    with open(target, "a", encoding="utf-8") as f:
+        f.write(json.dumps(raw_part, ensure_ascii=False) + "\n")
+
+
+def _emit_subjective_entry(subjective_part: dict):
+    """段階13 Phase 0.1.A: subjective entry を memory/subjective_entries.jsonl に append。
+
+    subjective_entries は LLM 解釈の materialized view (PLAN §18-2)、
+    rebuild 可・compaction 対象 (Phase 0.1.B 以降で扱う、本 phase は append のみ)。
+    """
+    MEMORY_DIR.mkdir(exist_ok=True)
+    target = MEMORY_DIR / "subjective_entries.jsonl"
+    with open(target, "a", encoding="utf-8") as f:
+        f.write(json.dumps(subjective_part, ensure_ascii=False) + "\n")
+
+
+def _record_schema_warning(entry_id: str, unknown_fields: list):
+    """段階13 Phase 0.1.A: schema 未分類 field を schema_warnings.jsonl に記録。
+
+    SCHEMA_WARNINGS_CAP 件超で archive_schema_warnings.jsonl に move して
+    schema_warnings.jsonl を新規スタート (maybe_compress_log 流儀の軽量版)。
+    気付き 2 段機構の永続側 (即時 print は呼出側で実施)。
+    """
+    MEMORY_DIR.mkdir(exist_ok=True)
+    warnings_file = MEMORY_DIR / "schema_warnings.jsonl"
+    archive_file = MEMORY_DIR / "archive_schema_warnings.jsonl"
+    if warnings_file.exists():
+        try:
+            existing = warnings_file.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            existing = []
+        if len(existing) >= SCHEMA_WARNINGS_CAP:
+            with open(archive_file, "a", encoding="utf-8") as f:
+                for line in existing:
+                    if line.strip():
+                        f.write(line + "\n")
+            warnings_file.unlink()
+    record = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "entry_id": entry_id,
+        "fields": list(unknown_fields),
+    }
+    with open(warnings_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _update_jsonl_index(filename: str, entries: list):
+    """段階13 Phase 0.1.B: index.json の filename entry を count/from/to 更新する。
+
+    既存 _archive_entries の inline index 更新ロジック (旧 line 686-700) を
+    関数化したもの。archive_YYYYMMDD.jsonl / raw_events.jsonl /
+    subjective_entries.jsonl の 3 経路で共通使用する (DRY)。
+    entries は元 entry list (subj_part に time field がないため raw / subj 両方
+    の index 更新に元 entry の time を使う)、empty なら no-op。
+    """
+    if not entries:
+        return
+    MEMORY_DIR.mkdir(exist_ok=True)
     index_file = MEMORY_DIR / "index.json"
-    with open(archive_file, "a", encoding="utf-8") as f:
-        for entry in entries:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     index = {}
     if index_file.exists():
         try:
             index = json.loads(index_file.read_text(encoding="utf-8"))
         except Exception:
             pass
-    fname = archive_file.name
-    if fname not in index:
-        index[fname] = {"count": 0, "from": "", "to": ""}
-    index[fname]["count"] += len(entries)
-    if not index[fname]["from"] and entries:
-        index[fname]["from"] = entries[0].get("time", "")
-    if entries:
-        index[fname]["to"] = entries[-1].get("time", "")
+    if filename not in index:
+        index[filename] = {"count": 0, "from": "", "to": ""}
+    index[filename]["count"] += len(entries)
+    if not index[filename]["from"]:
+        index[filename]["from"] = entries[0].get("time", "")
+    index[filename]["to"] = entries[-1].get("time", "")
     index_file.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _archive_entries(entries: list):
+    """エントリ群をmemory/archive_YYYYMMDD.jsonlに追記しindex.jsonを更新。
+
+    段階13 Phase 0.1.A: 既存 archive_YYYYMMDD 経路は 0.1.E 完了まで温存。
+    並走で raw_events.jsonl + subjective_entries.jsonl への dual emit を行う
+    (PLAN §18-2 段階7 materialized view パターン)。
+
+    段階13 Phase 0.1.B: index 更新を _update_jsonl_index に集約 (DRY)、
+    raw_events.jsonl / subjective_entries.jsonl も同 index に追跡される
+    (count/from/to)。view rebuild は load_state 側で行う。
+    """
+    MEMORY_DIR.mkdir(exist_ok=True)
+    today = datetime.now().strftime("%Y%m%d")
+    archive_file = MEMORY_DIR / f"archive_{today}.jsonl"
+    with open(archive_file, "a", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _update_jsonl_index(archive_file.name, entries)
+
+    # 段階13 Phase 0.1.A: raw / subjective dual emit (並走経路)
+    for entry in entries:
+        raw_part, subj_part, unknown = _split_entry_fields(entry)
+        if unknown:
+            print(
+                f"[schema] ★ unclassified fields: {unknown} "
+                f"(id={entry.get('id', '?')})"
+            )
+            _record_schema_warning(str(entry.get("id", "")), unknown)
+        _emit_raw_event(raw_part)
+        _emit_subjective_entry(subj_part)
+
+    # 段階13 Phase 0.1.B: raw_events.jsonl / subjective_entries.jsonl の
+    # index も追跡 (subj_part に time field がないため元 entries を渡す)
+    _update_jsonl_index("raw_events.jsonl", entries)
+    _update_jsonl_index("subjective_entries.jsonl", entries)
+
+
+def _enrich_subjective_inline(entry: dict) -> None:
+    """段階13 Phase 1: entry を mutate して subj 部分に keywords / contextual_description
+    / embedding を inline 注入する (Layer B enrichment)。
+
+    PLAN §18-A4 (iv') literal: 既存 _generate_memory_metadata (A-MEM 準拠) と
+    _embed_sync (bge-m3) を直流用、新規実装ほぼゼロ。
+
+    text 組み立ては `intent + expect` (Phase 0.4 check_raw_subjective_gap と
+    同 subj 側 text、PLAN §21-2 流用)。
+
+    graceful skip:
+      - intent / expect 両方空 → skip (raw event のみ entry も既存)
+      - LLM / embedding 失敗 → print + 該当 field 空 / 未注入で進む
+        (memory_store の既存 graceful pattern 流用、reflect 継続原則)
+      - is_vector_ready() False → embedding skip
+
+    entry を mutate するため、後続の _archive_entries / _record_entry の
+    _split_entry_fields で両端 (jsonl + state) に同 enriched subj_part が反映
+    される (Phase 0.1.D の id 共有契約維持、二重不整合リスク回避)。
+    """
+    intent = entry.get("intent", "") or ""
+    expect = entry.get("expect", "") or ""
+    if not intent and not expect:
+        return  # subj field なし、enrich 対象外
+
+    text = f"intent: {intent}\nexpect: {expect}"
+
+    # keywords + contextual_description (LLM 同期、A-MEM 準拠 _generate_memory_metadata 直流用)
+    if entry.get("keywords") is None and entry.get("contextual_description") is None:
+        try:
+            metadata = _generate_memory_metadata(text, "(subjective)")
+            entry["keywords"] = metadata.get("keywords", [])
+            entry["contextual_description"] = metadata.get("contextual_description", "")
+        except Exception as e:
+            print(f"  [phase1] subj metadata 生成 skip (error: {result_redactor()(str(e))})")
+            entry["keywords"] = []
+            entry["contextual_description"] = ""
+
+    # embedding (bge-m3、is_vector_ready チェック込み graceful)
+    if entry.get("embedding") is None and is_vector_ready():
+        try:
+            vecs = _embed_sync([text])
+            if vecs and len(vecs) == 1:
+                entry["embedding"] = list(vecs[0])
+        except Exception as e:
+            print(f"  [phase1] subj embedding 生成 skip (error: {result_redactor()(str(e))})")
+
+
+def _record_entry(state: dict, entry: dict) -> None:
+    """段階13 Phase 0.1.D: entry を archive + raw/subj jsonl + in-memory views に同期記録。
+
+    呼出側 (main.py × 5 site) を 1 行に集約 (Option A 精神継承)。
+
+    挙動:
+      0. (段階13 Phase 1) _enrich_subjective_inline(entry): entry mutate で
+         subj 部分に keywords / contextual_description / embedding を inline 注入。
+         intent / expect 両方空なら skip (raw event のみ)。
+      1. _archive_entries([entry]): archive_YYYYMMDD.jsonl + raw_events.jsonl
+         + subjective_entries.jsonl + index.json (0.1.A dual emit + 0.1.B index)
+      2. state["raw_events"].append(raw_part) + state["subjective_entries"]
+         .append(subj_part): in-memory view を cycle 中 sync (起動時
+         _rebuild_views_from_jsonl と同じ partition で更新)。raw / subjective
+         両層は id を共有、read 側は merge_log_view で合本 view を組む。
+
+    save_state は呼出側責務 (site 毎に呼ぶ/呼ばない判断が異なる)。
+    """
+    _enrich_subjective_inline(entry)
+    _archive_entries([entry])
+    raw_part, subj_part, _ = _split_entry_fields(entry)
+    state["raw_events"].append(raw_part)
+    state["subjective_entries"].append(subj_part)
 
 
 def _summarize_entries(entries: list, label: str = "要約") -> dict:
@@ -671,17 +1080,26 @@ def _archive_summary(summary: dict):
 
 def maybe_compress_log(state: dict, tool_names: set = None):
     """
-    Trigger1: log >= LOG_HARD_LIMIT(150) → 古い (LOG_HARD_LIMIT - LOG_KEEP) 件を要約
+    段階13 Phase 0.1.D: subjective_entries (LLM 解釈、materialized view) のみ
+    compaction。raw_events (source of truth) は永続不変 (PLAN §20-2 #4)。
+
+    Trigger1: subjective >= LOG_HARD_LIMIT(150) → 古い (HARD - KEEP) 件を要約
               → 直近 LOG_KEEP(120) 件を保持
-              ※ [external] エントリは要約対象外で保持（外部からの会話は高価値情報として永続）
-    Trigger2: summaries >= 10 → メタ要約（全 summary + 直近 raw 数件） → summaries = [1件]
+              ※ [external] エントリは要約対象外で保持 (外部からの会話の永続化)
+    Trigger2: summaries >= 10 → メタ要約 (全 summary + 直近 raw 数件) → summaries=[1]
+
+    要約材料は raw + subjective を id zip した合本 view で組む (tool/result は raw、
+    intent/e2 は subjective、_summarize_entries が両層 field 同時参照のため)。
     """
+    from core.state import merge_log_view
+
     state.setdefault("summaries", [])
 
-    if len(state["log"]) >= LOG_HARD_LIMIT:
+    if len(state["subjective_entries"]) >= LOG_HARD_LIMIT:
         compress_count = max(1, LOG_HARD_LIMIT - LOG_KEEP)
-        old_section = state["log"][:compress_count]
-        # [external] 入力は要約せず保持（外部からの会話の永続化）
+        merged = merge_log_view(state)
+        old_section = merged[:compress_count]
+        # [external] 入力は要約せず保持 (外部からの会話の永続化)
         to_preserve = [e for e in old_section if e.get("type") == "external"]
         to_summarize = [e for e in old_section if e.get("type") != "external"]
 
@@ -704,17 +1122,28 @@ def maybe_compress_log(state: dict, tool_names: set = None):
             _archive_summary(summary)
             state["summaries"].append(summary)
 
-        # 残り = 保持対象 external + 直近 LOG_KEEP 件
-        state["log"] = to_preserve + state["log"][compress_count:]
+        # subjective_entries trim: external 対応 entry の subjective 部のみ前段保持
+        preserve_ids = {e.get("id") for e in to_preserve if e.get("id")}
+        state["subjective_entries"] = (
+            [s for s in state["subjective_entries"][:compress_count]
+             if s.get("id") in preserve_ids]
+            + state["subjective_entries"][compress_count:]
+        )
+        # F-005: subjective_entries.jsonl は materialized view、compaction を
+        # mutate しただけでは再起動で undo される。dirty 立てて cycle 末で
+        # atomic rewrite する (本 mutation 自体は state のみ、persist は flush)。
+        from core.view_persistence import mark_view_dirty
+        mark_view_dirty("subjective_entries")
         print(
             f"  [memory] Trigger1: {len(to_summarize)}件→要約 "
             f"({len(to_preserve)}件のexternal保持), "
-            f"log={len(state['log'])}件, summaries={len(state['summaries'])}件"
+            f"subj={len(state['subjective_entries'])}件, summaries={len(state['summaries'])}件"
         )
 
     if len(state["summaries"]) >= SUMMARY_HARD_LIMIT:
-        n_raw = min(META_SUMMARY_RAW, len(state["log"]))
-        raw_for_meta = state["log"][:n_raw]
+        n_raw = min(META_SUMMARY_RAW, len(state["subjective_entries"]))
+        # メタ要約材料は merge view から (tool/result + intent 両層必要)
+        raw_for_meta = merge_log_view(state)[:n_raw]
         meta_input = []
         for s in state["summaries"]:
             meta_input.append({
@@ -729,5 +1158,8 @@ def maybe_compress_log(state: dict, tool_names: set = None):
         meta_summary["covers_raw"] = n_raw
         _archive_summary(meta_summary)
         state["summaries"] = [meta_summary]
-        state["log"] = state["log"][n_raw:]
-        print(f"  [memory] Trigger2: メタ要約, log={len(state['log'])}件, summaries=1件")
+        state["subjective_entries"] = state["subjective_entries"][n_raw:]
+        # F-005: Trigger2 (メタ要約) も同 mutation で persist 必須
+        from core.view_persistence import mark_view_dirty
+        mark_view_dirty("subjective_entries")
+        print(f"  [memory] Trigger2: メタ要約, subj={len(state['subjective_entries'])}件, summaries=1件")

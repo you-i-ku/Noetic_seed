@@ -28,6 +28,7 @@ load_state で再構成して cycle_id 等を継続する。
      Windows で空白パスをクォートしない問題への対策)
   6. os._exit(0) で旧プロセスを即時終了 (httpx 等のブロッキングも確実に殺す)
 """
+from core.runtime.registry import ToolError
 import os
 import subprocess
 import sys
@@ -45,7 +46,7 @@ def _reboot(args: dict) -> str:
         args: 任意の dict。args.get("message") を承認 preview に挿入する。
 
     Returns:
-        承認 reject 時のキャンセル message。承認 accept 時は os._exit で
+        承認 reject 時はキャンセル文の ToolError。承認 accept 時は os._exit で
         本関数からは return しない (新プロセスが起動して旧プロセスは終了)。
     """
     preview = (
@@ -56,10 +57,11 @@ def _reboot(args: dict) -> str:
     if msg:
         preview += f"\nメッセージ: {msg}"
     if not request_approval("reboot", preview):
-        return "キャンセル: 再起動を見送りました"
+        raise ToolError("キャンセル: 再起動を見送りました")
 
     # state を disk に再保存 (新プロセスが load_state で再構成する保険)
-    save_state(load_state())
+    if not save_state(load_state()):
+        raise ToolError("state persistence failed; reboot cancelled")
 
     # WebSocket port 8765 を release (CLAUDE.md handoff 原則、daemon thread の
     # ws_server がポートを掴みっぱなしで新プロセスが bind 失敗しないように)

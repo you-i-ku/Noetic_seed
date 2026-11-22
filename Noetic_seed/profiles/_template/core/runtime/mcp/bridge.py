@@ -115,7 +115,13 @@ class McpToolBridge:
     def list_resources(self, server_name: str) -> list:
         mgr = self._managers.get(server_name)
         if mgr is None:
-            return []
+            from core.runtime.registry import ToolError
+            raise ToolError(f"No resources on server '{server_name}'",
+                            detail={"server": server_name, "registered": False})
+        if mgr.resources_error is not None:
+            from core.runtime.registry import ToolError
+            raise ToolError(f"No resources on server '{server_name}'",
+                            detail={"server": server_name, "error": mgr.resources_error})
         return mgr.resources
 
     def read_resource(self, server_name: str, uri: str) -> dict:
@@ -169,29 +175,7 @@ class McpToolBridge:
     def _make_handler(self, server_name: str, tool_name: str):
         """MCP tool を呼び出すクロージャを生成 (ToolSpec.handler 用)。"""
         def _handler(inp: dict) -> str:
-            import json as _json
-            r = self.call(server_name, tool_name, inp)
-            if "error" in r:
-                err = r["error"]
-                return (f"[MCP error {err.get('code','?')}] "
-                        f"{err.get('message','unknown')}")
-            result = r.get("result") or {}
-            # MCP tools/call response 形式:
-            #   {"content": [{"type":"text","text":"..."}, ...]}
-            content = result.get("content")
-            if isinstance(content, list):
-                parts = []
-                for c in content:
-                    if isinstance(c, dict):
-                        ct = c.get("type")
-                        if ct == "text":
-                            parts.append(c.get("text", ""))
-                        elif ct == "resource":
-                            parts.append(f"[resource: {c.get('resource', {}).get('uri', '')}]")
-                        else:
-                            parts.append(_json.dumps(c, ensure_ascii=False))
-                return "\n".join(parts) if parts else "(empty response)"
-            # plain result
-            return _json.dumps(result, ensure_ascii=False)
+            from core.runtime.tools.mcp import _format_call_result
+            return _format_call_result(self.call(server_name, tool_name, inp))
 
         return _handler

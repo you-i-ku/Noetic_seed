@@ -159,6 +159,9 @@ class IkuViewModel : ViewModel() {
     fun sendServerCommand(action: String) {
         IkuMonitorService.instance?.sendServerCommand(action)
     }
+    fun togglePetOverlay() {
+        IkuMonitorService.instance?.togglePetOverlay()
+    }
 
     fun sendWsMessage(msg: JsonObject) {
         IkuMonitorService.instance?.sendWsMessage(msg)

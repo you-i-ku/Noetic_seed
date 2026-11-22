@@ -6,7 +6,8 @@ claw-code 参照:
   - rust/crates/runtime/src/remote_trigger.rs
 
 厳密 claw-code 準拠。Noetic 既存 tools/web.py への forward は**しない**。
-WebSearch は Phase 2 では DuckDuckGo HTML endpoint を使った簡易実装。
+WebSearch は Brave Search API (auth_profiles.brave 経由)。description 取得 +
+count/offset 調整対応 (段階13 Phase 6 hotfix で DuckDuckGo HTML scrape から差替)。
 """
 import re
 from typing import Optional
@@ -15,7 +16,7 @@ from urllib.parse import quote_plus
 import httpx
 
 from core.runtime.permissions import PermissionMode
-from core.runtime.registry import ToolRegistry
+from core.runtime.registry import ToolRegistry, ToolError, result_redactor
 from core.runtime.tool_schema import ToolSpec
 
 
@@ -31,11 +32,11 @@ def web_fetch(inp: dict) -> str:
     url = (inp.get("url") or "").strip()
     prompt = (inp.get("prompt") or "").strip()
     if not url:
-        return "Error: url is required"
+        raise ToolError("Error: url is required")
     if not prompt:
-        return "Error: prompt is required"
+        raise ToolError("Error: prompt is required")
     if not (url.startswith("http://") or url.startswith("https://")):
-        return "Error: url must start with http:// or https://"
+        raise ToolError("Error: url must start with http:// or https://")
 
     try:
         resp = httpx.get(
@@ -45,11 +46,13 @@ def web_fetch(inp: dict) -> str:
         )
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
-        return f"Error: HTTP {e.response.status_code}"
+        raise ToolError(f"Error: HTTP {e.response.status_code}")
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: {type(e).__name__}: {e}"
+        raise ToolError(f"Error: {type(e).__name__}: {e}")
 
-    body = resp.text
+    body = result_redactor()(resp.text)
     if len(body.encode("utf-8", errors="replace")) > MAX_FETCH_BYTES:
         body = body[:MAX_FETCH_BYTES // 4]
 
@@ -90,55 +93,90 @@ def _html_to_text(html: str) -> str:
 def web_search(inp: dict) -> str:
     query = (inp.get("query") or "").strip()
     if not query:
-        return "Error: query is required"
+        raise ToolError("Error: query is required")
+
+    # 副次改善 D: count / offset 調整可能 (Brave 仕様 count 1-20 / offset 0-9)
+    raw_count = inp.get("count", 10)
+    try:
+        count = int(raw_count) if raw_count is not None else 10
+    except (ValueError, TypeError):
+        raise ToolError("Error: count must be an integer (1-20)")
+    count = max(1, min(20, count))
+
+    raw_offset = inp.get("offset", 0)
+    try:
+        offset = int(raw_offset) if raw_offset is not None else 0
+    except (ValueError, TypeError):
+        raise ToolError("Error: offset must be an integer (0-9)")
+    offset = max(0, min(9, offset))
 
     allowed = inp.get("allowed_domains") or []
     blocked = inp.get("blocked_domains") or []
 
+    # 認証 (auth_profiles.brave から API key 取得)
+    from core.auth import apply_auth
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    params = {"q": query, "count": count, "offset": offset}
+    headers, params, err = apply_auth(headers, params, "brave")
+    if err:
+        raise ToolError((f"Error: {err}。secrets.json の auth_profiles.brave.key に "
+                f"Brave Search API key を設定してください "
+                f"(取得元: https://api-dashboard.search.brave.com)。"))
+
     try:
         resp = httpx.get(
-            f"https://html.duckduckgo.com/html/?q={quote_plus(query)}",
+            "https://api.search.brave.com/res/v1/web/search",
+            headers=headers,
+            params=params,
             timeout=30,
-            headers={"User-Agent": USER_AGENT},
             follow_redirects=True,
         )
         resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            raise ToolError(("Error: Brave Search rate limit (429)。"
+                    "1 req/sec 制限を超過しました。数秒待ってから再試行してください。"))
+        if e.response.status_code in (401, 403):
+            raise ToolError((f"Error: Brave 認証失敗 (HTTP {e.response.status_code})。"
+                    f"secrets.json の auth_profiles.brave.key を確認してください。"))
+        raise ToolError(f"Error: Brave HTTP {e.response.status_code}")
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: {type(e).__name__}: {e}"
+        raise ToolError(f"Error: {type(e).__name__}: {e}")
 
-    # 簡易パース: <a class="result__a" href="..." ... > title </a>
+    try:
+        data = resp.json()
+    except ValueError as e:
+        raise ToolError(f"Error: Brave JSON parse 失敗: {e}")
+
+    web_results = (data.get("web") or {}).get("results") or []
+
+    # 副次改善 C: description (抜粋) を含めて返す
     results: list = []
-    pattern = re.compile(
-        r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.+?)</a>',
-        re.IGNORECASE | re.DOTALL,
-    )
-    for m in pattern.finditer(resp.text):
-        raw_url = m.group(1)
-        title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        # DuckDuckGo は uddg= でリダイレクト URL を返すことがある
-        redirect = re.search(r"uddg=([^&]+)", raw_url)
-        if redirect:
-            from urllib.parse import unquote
-            actual_url = unquote(redirect.group(1))
-        else:
-            actual_url = raw_url
+    for r in web_results:
+        url = r.get("url") or ""
+        title = (r.get("title") or "").strip()
+        description = (r.get("description") or "").strip()
+        # description には <strong> 等のハイライトタグが混じる場合があるため除去
+        description = re.sub(r"<[^>]+>", "", description).strip()
 
-        if allowed and not any(d in actual_url for d in allowed):
+        if allowed and not any(d in url for d in allowed):
             continue
-        if blocked and any(d in actual_url for d in blocked):
+        if blocked and any(d in url for d in blocked):
             continue
 
-        results.append((title, actual_url))
-        if len(results) >= 10:
-            break
+        results.append((title, url, description))
 
     if not results:
         return f"No search results for: {query}"
 
-    lines = [f"Search results for: {query}"]
-    for title, url in results:
+    lines = [f"Search results for: {query} (count={count}, offset={offset})"]
+    for title, url, description in results:
         lines.append(f"  - {title}")
         lines.append(f"    {url}")
+        if description:
+            lines.append(f"    {description}")
     return "\n".join(lines)
 
 
@@ -153,11 +191,11 @@ def remote_trigger(inp: dict) -> str:
     body = inp.get("body")
 
     if not url:
-        return "Error: url is required"
+        raise ToolError("Error: url is required")
     if not (url.startswith("http://") or url.startswith("https://")):
-        return "Error: url must start with http:// or https://"
+        raise ToolError("Error: url must start with http:// or https://")
     if method not in ("GET", "POST", "PUT", "DELETE", "PATCH"):
-        return f"Error: unsupported method '{method}'"
+        raise ToolError(f"Error: unsupported method '{method}'")
 
     kwargs: dict = {"headers": headers, "timeout": 60}
     if body is not None:
@@ -168,17 +206,24 @@ def remote_trigger(inp: dict) -> str:
 
     try:
         resp = httpx.request(method, url, **kwargs)
+    except ToolError:
+        raise
     except Exception as e:
-        return f"Error: {type(e).__name__}: {e}"
+        raise ToolError(f"Error: {type(e).__name__}: {e}")
 
-    snippet = (resp.text or "")[:2000]
-    more = len(resp.text or "") - len(snippet)
+    safe_text = result_redactor()(resp.text or "")
+    snippet = safe_text[:2000]
+    more = len(safe_text) - len(snippet)
     lines = [f"{method} {url} -> {resp.status_code}"]
     if snippet:
         lines.append(snippet)
     if more > 0:
         lines.append(f"[... {more} more chars truncated ...]")
-    return "\n".join(lines)
+    message = "\n".join(lines)
+    if resp.status_code >= 400:
+        raise ToolError(message, detail={"status_code": resp.status_code,
+                                         "method": method, "url": url})
+    return message
 
 
 # ============================================================
@@ -203,11 +248,27 @@ def register(registry: ToolRegistry) -> None:
         ),
         ToolSpec(
             name="WebSearch",
-            description="Search the web and return ranked results with citations.",
+            description=(
+                "Brave Search API でウェブ検索し、title / url / description を返す。"
+                "count (1-20、default 10) / offset (0-9、default 0) で件数とページを"
+                "調整可能。API key は secrets.json の auth_profiles.brave.key で管理。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
+                    "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "description": "結果件数 (1-20、default 10)",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9,
+                        "description": "ページオフセット (0-9、default 0)",
+                    },
                     "allowed_domains": {"type": "array",
                                         "items": {"type": "string"}},
                     "blocked_domains": {"type": "array",

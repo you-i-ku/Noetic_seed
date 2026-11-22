@@ -117,7 +117,13 @@ state = _make_state([
 ])
 saved, ol, os_ = _with_tmp_state(state)
 try:
-    result = _builtin_module._wait_or_dismiss({"dismiss": "abc12345_0025"})
+    from core.runtime.registry import ToolError
+    try:
+        _builtin_module._wait_or_dismiss({"dismiss": "abc12345_0025"})
+    except ToolError as exc:
+        result = str(exc)
+    else:
+        raise AssertionError("expected ToolError")
     _assert(result.startswith("[dismiss] id="),
             "3-1 cycle 25 に pending なしで失敗")
 finally:
@@ -132,7 +138,13 @@ print("=== Section 4: 不正形式 ===")
 state = _make_state([])
 saved, ol, os_ = _with_tmp_state(state)
 try:
-    result = _builtin_module._wait_or_dismiss({"dismiss": "garbage_invalid"})
+    from core.runtime.registry import ToolError
+    try:
+        _builtin_module._wait_or_dismiss({"dismiss": "garbage_invalid"})
+    except ToolError as exc:
+        result = str(exc)
+    else:
+        raise AssertionError("expected ToolError")
     _assert(result.startswith("[dismiss] id="), "4-1 不正形式で失敗")
 finally:
     _restore(ol, os_)
@@ -180,7 +192,12 @@ state = _make_state([
 ])
 saved, ol, os_ = _with_tmp_state(state)
 try:
-    result = _builtin_module._wait_or_dismiss({"dismiss": "abc12345_0025"})
+    try:
+        _builtin_module._wait_or_dismiss({"dismiss": "abc12345_0025"})
+    except ToolError as exc:
+        result = str(exc)
+    else:
+        raise AssertionError("expected ToolError")
     _assert(result.startswith("[dismiss] id="),
             "6-1 消化済 pending は fallback 対象外")
 finally:
